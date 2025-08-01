@@ -1,9 +1,13 @@
 #include "Halide.h"
 #include "halide_trace_config.h"
 #include <stdint.h>
+#include <string>
+#include <algorithm>
+#include <vector>
 
 // Include the individual pipeline stages
 #include "stage_hot_pixel_suppression.h"
+#include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h"
 #include "stage_color_correct.h"
@@ -31,6 +35,7 @@ public:
     Input<float> gamma{"gamma"};
     Input<float> contrast{"contrast"};
     Input<float> sharpen_strength{"sharpen_strength"};
+    Input<float> ca_correction_strength{"ca_correction_strength"};
     Input<int> blackLevel{"blackLevel"};
     Input<int> whiteLevel{"whiteLevel"};
     Output<Buffer<uint8_t, 3>> processed{"processed"};
@@ -38,6 +43,9 @@ public:
     void generate() {
         // ========== THE ALGORITHM ==========
         // A sequence of Funcs defining the camera pipeline.
+        Expr out_width_est = 2592 - 32;
+        Expr out_height_est = 1968 - 24;
+
 
         // Stage 0: Shift the input around to deal with boundary conditions
         Func shifted("shifted");
@@ -45,9 +53,17 @@ public:
 
         // Stage 1: Hot pixel suppression
         Func denoised = pipeline_hot_pixel_suppression(shifted, x, y);
+        
+        // Stage 1.5: Chromatic Aberration Correction
+        CACorrectBuilder ca_builder(denoised, x, y,
+                                    ca_correction_strength,
+                                    blackLevel, whiteLevel,
+                                    out_width_est, out_height_est,
+                                    get_target(), using_autoscheduler());
+        Func ca_corrected = ca_builder.output;
 
         // Stage 2: Deinterleave the Bayer pattern
-        Func deinterleaved = pipeline_deinterleave(denoised, x, y, c);
+        Func deinterleaved = pipeline_deinterleave(ca_corrected, x, y, c);
 
         // Stage 3: Demosaic
         DemosaicBuilder demosaic_builder(deinterleaved, x, y, c);
@@ -81,9 +97,10 @@ public:
         gamma.set_estimate(2.0);
         contrast.set_estimate(50);
         sharpen_strength.set_estimate(1.0);
+        ca_correction_strength.set_estimate(1.0);
         blackLevel.set_estimate(25);
         whiteLevel.set_estimate(1023);
-        processed.set_estimates({{0, 2592}, {0, 1968}, {0, 3}});
+        processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
 
         // ========== SCHEDULE ==========
@@ -92,15 +109,13 @@ public:
             // The estimates above will be used.
         } else if (get_target().has_gpu_feature()) {
             // Manual GPU schedule
-
-            // We can generate slightly better code if we know the output is even-sized
             Expr out_width = processed.width();
             Expr out_height = processed.height();
             processed.bound(c, 0, 3)
                 .bound(x, 0, (out_width / 2) * 2)
                 .bound(y, 0, (out_height / 2) * 2);
 
-            Var xi, yi, xii, xio;
+            Var xi, yi;
 
             int tile_x = 28;
             int tile_y = 12;
@@ -130,17 +145,22 @@ public:
                 f.compute_at(processed, x).gpu_threads(demosaic_builder.qx, demosaic_builder.qy);
             }
 
-            denoised.compute_at(processed, x)
-                .tile(x, y, xi, yi, 2, 2)
-                .unroll(xi)
-                .unroll(yi)
-                .gpu_threads(x, y);
-
             deinterleaved.compute_at(processed, x)
                 .unroll(x, 2)
                 .gpu_threads(x, y)
                 .reorder(c, x, y)
                 .unroll(c);
+            
+            ca_corrected.compute_at(processed, x).gpu_threads(x, y);
+            for (Func f : ca_builder.intermediates) {
+                if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
+                    f.compute_root().gpu_tile(f.args()[0], f.args()[1], xi, yi, 16, 16);
+                } else {
+                    f.compute_at(processed, x).gpu_threads(x,y);
+                }
+            }
+            
+            denoised.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
 
         } else {
             // Manual CPU schedule
@@ -209,17 +229,21 @@ public:
                 .vectorize(x, 2 * vec, TailStrategy::RoundUp)
                 .unroll(c);
 
-            denoised.compute_at(processed, yi)
-                .store_at(processed, yo)
-                .prefetch(input, y, y, 2)
-                .fold_storage(y, 4)
-                .tile(x, y, x, y, xi, yi, 2 * vec, 2)
-                .vectorize(xi)
-                .unroll(yi);
+            ca_corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+            for (Func f : ca_builder.intermediates) {
+                if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
+                    f.compute_root().parallel(f.args()[1]).vectorize(f.args()[0], vec);
+                } else {
+                    f.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+                }
+            }
+
+            denoised.compute_root().parallel(y).vectorize(x, vec * 2);
 
             if (get_target().has_feature(Target::HVX)) {
                 processed.hexagon();
                 denoised.align_storage(x, vec);
+                ca_corrected.align_storage(x, vec);
                 deinterleaved.align_storage(x, vec);
                 corrected.align_storage(x, vec);
             }
@@ -241,6 +265,9 @@ public:
                 cfg.pos = {305, 360};
                 cfg.labels = {{"denoised"}};
                 denoised.add_trace_tag(cfg.to_trace_tag());
+                
+                // Visualization for ca_corrected is difficult as it's still Bayer.
+                // We'll skip it and visualize its effect on the demosaiced output.
 
                 cfg.pos = {580, 120};
                 const int y_offset = 220;

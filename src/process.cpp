@@ -18,9 +18,10 @@ using namespace Halide::Runtime;
 using namespace Halide::Tools;
 
 int main(int argc, char **argv) {
-    if (argc < 8) {
-        printf("Usage: ./process raw.png color_temp gamma contrast sharpen timing_iterations output.png\n"
-               "e.g. ./process raw.png 3700 2.0 50 1.0 5 output.png\n");
+    if (argc < 9) {
+        printf("Usage: ./process raw.png color_temp gamma contrast sharpen ca_strength timing_iterations output.png\n"
+               "e.g. ./process raw.png 3700 2.0 50 1.0 1.0 5 output.png\n"
+               "ca_strength: 0.0=off, 1.0=default correction\n");
         return 0;
     }
 
@@ -60,7 +61,8 @@ int main(int argc, char **argv) {
     float gamma = (float)atof(argv[3]);
     float contrast = (float)atof(argv[4]);
     float sharpen = (float)atof(argv[5]);
-    int timing_iterations = atoi(argv[6]);
+    float ca_strength = (float)atof(argv[6]);
+    int timing_iterations = atoi(argv[7]);
     int blackLevel = 25;
     int whiteLevel = 1023;
 
@@ -68,7 +70,7 @@ int main(int argc, char **argv) {
 
     best = benchmark(timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
-                    color_temp, gamma, contrast, sharpen, blackLevel, whiteLevel,
+                    color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
                     output);
         output.device_sync();
     });
@@ -77,15 +79,15 @@ int main(int argc, char **argv) {
 #ifndef NO_AUTO_SCHEDULE
     best = benchmark(timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                                  color_temp, gamma, contrast, sharpen, blackLevel, whiteLevel,
+                                  color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
                                   output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
 #endif
 
-    fprintf(stderr, "output: %s\n", argv[7]);
-    convert_and_save_image(output, argv[7]);
+    fprintf(stderr, "output: %s\n", argv[8]);
+    convert_and_save_image(output, argv[8]);
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
     printf("Success!\n");

@@ -57,13 +57,13 @@ Use the `capture` tool to create a 16-bit RAW PNG file.
 
 Use the `process` tool to run the pipeline. It takes arguments in a fixed order.
 
-**Usage:** `./process <raw_input.png> <color_temp> <gamma> <contrast> <sharpen> <iterations> <output.png>`
+**Usage:** `./process <raw_input.png> <color_temp> <gamma> <contrast> <sharpen> <ca_strength> <iterations> <output.png>`
 
 ```bash
-# Example with neutral settings
-./build/process raw_image.png 3700 2.2 50 1.0 5 processed_neutral.png
+# Example with neutral settings and no CA correction
+./build/process raw_image.png 3700 2.2 50 1.0 0.0 5 processed_neutral.png
 
-# Example with warmer color temperature and more contrast
-./build/process raw_image.png 3200 2.2 70 1.2 5 processed_warm.png
+# Example with CA correction enabled
+./build/process raw_image.png 3700 2.2 50 1.0 1.0 5 processed_ca.png
 ```
 The program will print benchmark timings for both the manually-scheduled and auto-scheduled versions of the pipeline.
