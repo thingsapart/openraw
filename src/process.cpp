@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
 
     double best;
 
+#ifdef BENCHMARK
     best = benchmark(timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
                     color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
@@ -75,8 +76,17 @@ int main(int argc, char **argv) {
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
+#else
+    camera_pipe(input, matrix_3200, matrix_7000,
+                color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                output);
+    output.device_sync();
+#endif
+
+#define NO_AUTO_SCHEDULE
 
 #ifndef NO_AUTO_SCHEDULE
+#ifdef BENCHMARK
     best = benchmark(timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
                                   color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
@@ -84,6 +94,12 @@ int main(int argc, char **argv) {
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
+#else
+    camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
+                              color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                              output);
+    output.device_sync();
+#endif
 #endif
 
     fprintf(stderr, "output: %s\n", argv[8]);
