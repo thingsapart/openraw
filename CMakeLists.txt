@@ -42,7 +42,7 @@ add_halide_library(camera_pipe
 add_halide_library(camera_pipe_auto_schedule
     FROM pipeline_generator
     GENERATOR camera_pipe
-    AUTOSCHEDULER Halide::Mullapudi2016
+    AUTOSCHEDULER Halide::Li2018
 )
 
 
