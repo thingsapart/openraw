@@ -11,16 +11,16 @@
 struct ProcessConfig {
     std::string input_path;
     std::string output_path;
+    float black_point = 25.0f;
+    float white_point = 4095.0f;
+    float exposure = 1.0f;
+    int demosaic_algorithm = 1; // 0=simple, 1=vhg, 2=ahd, 3=lmmse
     float color_temp = 3700.0f;
     float tint = 0.0f;
-    float exposure = 1.0f;
-    int demosaic_algorithm = 0; // 0=simple, 1=vhg
     float saturation = 1.0f;
     int saturation_algorithm = 1; // 0=HSL, 1=LAB
     float gamma = 2.2f;
     float contrast = 50.0f;
-    float black_point = 25.0f;
-    float white_point = 4095.0f; // Defines the input value that maps to white in the curve.
     std::string curve_points_str;
     std::string curve_r_str;
     std::string curve_g_str;

@@ -3,6 +3,9 @@
 
 #include "Halide.h"
 
+// DEPRECATED: This stage is now combined into stage_normalize_and_expose.h
+// The file is kept for reference but should not be included in the generator.
+
 inline Halide::Func pipeline_exposure(Halide::Func input,
                                       Halide::Expr exposure,
                                       Halide::Var x, Halide::Var y, Halide::Var c) {

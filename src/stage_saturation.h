@@ -22,14 +22,10 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     Func hsl_saturated("hsl_saturated");
     Func lab_saturated("lab_saturated");
 
-    // Both algorithms must operate on a normalized [0,1] range to work correctly.
-    // The input is Float(32) in the [0, 65535] range, so we normalize.
-    const float norm_factor = 1.0f / 65535.0f;
-    const float denorm_factor = 65535.0f;
-
-    Expr r_norm = input(x, y, 0) * norm_factor;
-    Expr g_norm = input(x, y, 1) * norm_factor;
-    Expr b_norm = input(x, y, 2) * norm_factor;
+    // The input is already normalized floating point data in the [0, N] range.
+    Expr r_norm = input(x, y, 0);
+    Expr g_norm = input(x, y, 1);
+    Expr b_norm = input(x, y, 2);
 
     // Helper lambda for fmod(a, b) -> a - b * floor(a / b)
     auto halide_fmod = [](Halide::Expr a, Halide::Expr b) {
@@ -61,9 +57,9 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr g_hsl = select(h < 60.0f, x_hsl, select(h < 120.0f, c_hsl, select(h < 180.0f, c_hsl, select(h < 240.0f, x_hsl, select(h < 300.0f, 0.0f, 0.0f)))));
         Expr b_hsl = select(h < 60.0f, 0.0f, select(h < 120.0f, 0.0f, select(h < 180.0f, x_hsl, select(h < 240.0f, c_hsl, select(h < 300.0f, c_hsl, x_hsl)))));
 
-        Expr r_new = (r_hsl + m_hsl) * denorm_factor;
-        Expr g_new = (g_hsl + m_hsl) * denorm_factor;
-        Expr b_new = (b_hsl + m_hsl) * denorm_factor;
+        Expr r_new = (r_hsl + m_hsl);
+        Expr g_new = (g_hsl + m_hsl);
+        Expr b_new = (b_hsl + m_hsl);
 
         hsl_saturated(x, y, c) = mux(c, {r_new, g_new, b_new});
     }
@@ -107,11 +103,7 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr g_new_norm = -0.9689f * x_new_xyz + 1.8758f * y_new_xyz + 0.0415f * z_new_xyz;
         Expr b_new_norm =  0.0557f * x_new_xyz - 0.2040f * y_new_xyz + 1.0570f * z_new_xyz;
 
-        lab_saturated(x, y, c) = mux(c, {
-            r_new_norm * denorm_factor,
-            g_new_norm * denorm_factor,
-            b_new_norm * denorm_factor
-        });
+        lab_saturated(x, y, c) = mux(c, {r_new_norm, g_new_norm, b_new_norm});
     }
 
     // --- Final Selection ---

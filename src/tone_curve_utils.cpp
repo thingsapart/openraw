@@ -127,6 +127,7 @@ void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points,
     
     if (useCustomCurve) {
         // --- LOGIC for Custom Curves ---
+        // This logic assumes a normalized [0, 1] input and produces a [0, 1] output.
         std::vector<Point> points = user_points;
         bool has_start = false, has_end = false;
         for(const auto& p : points) {
@@ -187,23 +188,11 @@ void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points,
         }
     } else {
         // --- REVISED LOGIC for Gamma/Contrast S-Curve ---
-        float black_level = cfg.black_point * cfg.exposure;
-        // The white point should also be scaled by exposure, as it's a linear operation
-        // before the curve. This was the source of the "too dark" issue, as it
-        // was hardcoded to 65535.0f, ignoring the actual signal range.
-        float white_level = cfg.white_point * cfg.exposure;
-        if (white_level > 65535.0f) {
-            white_level = 65535.0f;
-        }
-
-        if (black_level >= white_level) {
-            black_level = white_level - 1;
-        }
-        float inv_range = 1.0f / (white_level - black_level);
-
+        // This LUT now assumes its input is normalized to [0, 1] from the linear pipeline stages.
+        // It is no longer responsible for black or white point adjustments.
         for (int i = 0; i < lut_size; ++i) {
-            // 1. Normalize linear input to [0, 1]
-            float linear_val = std::max(0.0f, std::min(1.0f, (i - black_level) * inv_range));
+            // 1. Input is already normalized to [0, 1] for the purpose of LUT generation
+            float linear_val = static_cast<float>(i) / (lut_size - 1.0f);
             
             // 2. Apply standard gamma correction to move to a perceptual space
             float perceptual_val = pow(linear_val, 1.0f / cfg.gamma);

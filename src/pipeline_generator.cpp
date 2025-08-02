@@ -10,7 +10,7 @@
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h"
-#include "stage_exposure.h"
+#include "stage_normalize_and_expose.h" // New, combined stage
 #include "stage_color_correct.h"
 #include "stage_saturation.h"
 #include "stage_apply_curve.h"
@@ -45,11 +45,13 @@ public:
     GeneratorParam<Type> result_type{"result_type", UInt(8)};
 
     Input<Buffer<uint16_t, 2>> input{"input"};
+    Input<float> black_point{"black_point"};
+    Input<float> white_point{"white_point"};
+    Input<float> exposure{"exposure"};
     Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
     Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
     Input<float> color_temp{"color_temp"};
     Input<float> tint{"tint"};
-    Input<float> exposure{"exposure"};
     Input<float> saturation{"saturation"};
     Input<int> saturation_algorithm{"saturation_algorithm"};
     Input<int> demosaic_algorithm{"demosaic_algorithm"};
@@ -82,46 +84,41 @@ public:
                                     get_target(), using_autoscheduler());
         Func ca_corrected = ca_builder.output;
 
-        // --- PIPELINE CONVERSION TO FLOAT32 ---
-        // Convert to Float32 to prevent integer overflow/underflow in demosaic
-        // and to preserve precision in subsequent color-related stages.
-        // We do not normalize here; stages will operate on a [0, 65535] float range.
-        Func to_float("to_float");
-        to_float(x, y) = cast<float>(ca_corrected(x, y));
+        // Stage 1.7: Normalization and Exposure
+        // This is the correct place to do black subtraction and white point scaling.
+        // It converts the uint16 raw data to float and normalizes it to a [0, N] range.
+        Func normalized = pipeline_normalize_and_expose(ca_corrected, black_point, white_point, exposure, x, y);
 
         // Stage 2: Deinterleave the Bayer pattern
-        Func deinterleaved = pipeline_deinterleave(to_float, x, y, c);
+        Func deinterleaved = pipeline_deinterleave(normalized, x, y, c);
 
-        // Stage 3: Demosaic. Now operates on Float32 data.
-        DemosaicBuilder demosaic_builder(deinterleaved, x, y, c, demosaic_algorithm, out_width_est / 2, out_height_est / 2);
+        // Stage 3: Demosaic. Now operates on normalized Float32 data.
+        DemosaicBuilder demosaic_builder(deinterleaved, x, y, c, demosaic_algorithm, out_width_est, out_height_est);
         Func demosaiced = demosaic_builder.output;
 
-        // Stage 4: Color correction. Must be done before exposure.
+        // Stage 4: Color correction.
         Func color_corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
                                                       color_temp, tint, x, y, c,
                                                       get_target(), using_autoscheduler());
-        
-        // Stage 5: Exposure adjustment. Applied to linear RGB data.
-        Func exposed = pipeline_exposure(color_corrected, exposure, x, y, c);
 
-        // Stage 6: Saturation adjustment
-        Func saturated = pipeline_saturation(exposed, saturation, saturation_algorithm, x, y, c);
+        // Stage 5: Saturation adjustment (operates on linear float data)
+        Func saturated = pipeline_saturation(color_corrected, saturation, saturation_algorithm, x, y, c);
 
-        // --- PIPELINE CONVERSION BACK TO UINT16 ---
-        // Convert back to uint16 for the curves and sharpening stages.
-        Func to_uint16("to_uint16");
-        to_uint16(x, y, c) = cast<uint16_t>(clamp(saturated(x, y, c), 0.0f, 65535.0f));
+        // Stage 6: Apply tone curve
+        // The input is now normalized float. We convert it to a uint16 index for the LUT.
+        // The LUT now represents a pure gamma/S-curve mapping from a [0,1] domain.
+        Func to_uint16_for_lut("to_uint16_for_lut");
+        // We scale by 65535 to use the full range of the uint16 LUT.
+        to_uint16_for_lut(x, y, c) = cast<uint16_t>(clamp(saturated(x, y, c) * 65535.0f, 0.0f, 65535.0f));
 
-        // Stage 7: Apply tone curve
-        // Get the LUT extent from the Input buffer and pass it to the helper.
         Expr lut_extent = tone_curves.dim(0).extent();
-        Func curved = pipeline_apply_curve(to_uint16, tone_curves, lut_extent, curve_mode, x, y, c);
+        Func curved = pipeline_apply_curve(to_uint16_for_lut, tone_curves, lut_extent, curve_mode, x, y, c);
 
-        // Stage 8: Sharpen the image
+        // Stage 7: Sharpen the image
         Func sharpened = pipeline_sharpen(curved, sharpen_strength, x, y, c,
                                           get_target(), using_autoscheduler());
 
-        // Stage 9: Convert from 16-bit to 8-bit using a selectable tone mapping operator.
+        // Stage 8: Convert from 16-bit to 8-bit using a selectable tone mapping operator.
         Func normalized16("normalized16");
         normalized16(x, y, c) = cast<float>(sharpened(x, y, c)) / 65535.0f;
         
@@ -133,7 +130,6 @@ public:
         Func reinhard_tonemapped("reinhard_tonemapped");
         {
             Expr reinhard_val = normalized16(x, y, c) / (normalized16(x, y, c) + 1.0f);
-            // Apply a gamma curve for contrast restoration. A gamma of 1.5 darkens midtones.
             const float contrast_gamma = 1.0f / 1.5f;
             Expr contrast_restored = pow(reinhard_val, contrast_gamma);
             reinhard_tonemapped(x, y, c) = u8_sat(contrast_restored * 255.0f);
@@ -142,15 +138,11 @@ public:
         // Algorithm 2: Filmic S-curve (cinematic, protects highlights and shadows)
         Func filmic_tonemapped("filmic_tonemapped");
         {
-            // This curve is defined for an input with an exposure bias.
             const float exposure_bias = 2.0f;
             Expr biased_input = normalized16(x, y, c) * exposure_bias;
-            
-            // The "white point" W defines the linear value that maps to white after the curve.
             const float W = 11.2f;
             Expr curve_val = uncharted2_tonemap_partial(biased_input);
             Expr white_scale = 1.0f / uncharted2_tonemap_partial(W);
-            
             Expr final_val = curve_val * white_scale;
             filmic_tonemapped(x, y, c) = u8_sat(final_val * 255.0f);
         }
@@ -165,213 +157,98 @@ public:
 
 
         // ========== ESTIMATES ==========
-        // (This can be useful in conjunction with RunGen and benchmarks as well
-        // as auto-schedule, so we do it in all cases.)
         input.set_estimates({{0, 2592}, {0, 1968}});
+        black_point.set_estimate(25.0f);
+        white_point.set_estimate(4095.0f);
+        exposure.set_estimate(1.0f);
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
-        exposure.set_estimate(1.0f);
         saturation.set_estimate(1.0f);
-        saturation_algorithm.set_estimate(1); // Default to L*a*b*
-        demosaic_algorithm.set_estimate(0); // Default to simple
-        curve_mode.set_estimate(1); // Default to RGB
+        saturation_algorithm.set_estimate(1);
+        demosaic_algorithm.set_estimate(1);
+        curve_mode.set_estimate(1);
         tone_curves.set_estimates({{0, 65536}, {0, 3}});
         sharpen_strength.set_estimate(1.0);
         ca_correction_strength.set_estimate(1.0);
-        tonemap_algorithm.set_estimate(0); // Default to linear
+        tonemap_algorithm.set_estimate(0);
         processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
 
         // ========== SCHEDULE ==========
         if (using_autoscheduler()) {
             // Let the auto-scheduler do its thing.
-            // The estimates above will be used.
         } else if (get_target().has_gpu_feature()) {
             // Manual GPU schedule
-            Expr out_width = processed.width();
-            Expr out_height = processed.height();
-            processed.bound(c, 0, 3)
-                .bound(x, 0, (out_width / 2) * 2)
-                .bound(y, 0, (out_height / 2) * 2);
-
             Var xi, yi;
-
-            int tile_x = 28;
-            int tile_y = 12;
-            if (get_target().has_feature(Target::D3D12Compute)) {
-                tile_x = 20;
-                tile_y = 12;
-            }
-
-            processed.compute_root()
-                .reorder(c, x, y)
-                .unroll(x, 2)
-                .gpu_tile(x, y, xi, yi, tile_x, tile_y);
-            
-            final_output.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            // Note: the `sharpen` stage is fused into `final_output` by default.
-
-            curved.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            to_uint16.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            saturated.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            exposed.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            color_corrected.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            demosaiced.compute_at(processed, x).gpu_threads(x, y);
-            demosaic_builder.simple_output.compute_at(processed, x).gpu_threads(x, y);
-            demosaic_builder.vhg_output.compute_at(processed, x).gpu_threads(x, y);
+            processed.compute_root().gpu_tile(x, y, xi, yi, 28, 12);
+            final_output.compute_at(processed, xi).gpu_threads(xi, yi);
+            curved.compute_at(processed, xi).gpu_threads(xi, yi);
+            to_uint16_for_lut.compute_at(processed, xi).gpu_threads(xi, yi);
+            saturated.compute_at(processed, xi).gpu_threads(xi, yi);
+            color_corrected.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaiced.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaic_builder.simple_output.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaic_builder.vhg_output.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaic_builder.ahd_output.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaic_builder.lmmse_output.compute_at(processed, xi).gpu_threads(xi, yi);
             for (Func f : demosaic_builder.quarter_res_intermediates) {
-                f.compute_at(processed, x).gpu_threads(demosaic_builder.qx, demosaic_builder.qy);
+                f.compute_at(processed, x); // Compute at block level
             }
-
-            deinterleaved.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y)
-                .reorder(c, x, y)
-                .unroll(c);
-
-            to_float.compute_at(processed, x).gpu_threads(x,y);
-
-            ca_corrected.compute_at(processed, x).gpu_threads(x, y);
-            for (Func f : ca_builder.intermediates) {
-                if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
-                    f.compute_root().gpu_tile(f.args()[0], f.args()[1], xi, yi, 16, 16);
-                } else {
-                    f.compute_at(processed, x).gpu_threads(x,y);
-                }
+            for (Func f : demosaic_builder.full_res_intermediates) {
+                f.compute_at(processed, xi).gpu_threads(xi, yi);
             }
-
+            deinterleaved.compute_at(processed, xi).gpu_threads(xi, yi).unroll(c);
+            normalized.compute_at(processed, xi).gpu_threads(xi, yi);
+            ca_corrected.compute_at(processed, xi).gpu_threads(xi, yi);
             denoised.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
 
         } else {
             // Manual CPU schedule
-
-            Expr out_width = processed.width();
-            Expr out_height = processed.height();
-
-            Expr strip_size;
-            if (get_target().has_feature(Target::HVX)) {
-                strip_size = processed.dim(1).extent() / 4;
-            } else {
-                strip_size = 32;
-            }
-            strip_size = (strip_size / 2) * 2;
-
             int vec = get_target().natural_vector_size(Float(32));
-            if (get_target().has_feature(Target::HVX)) {
-                vec = 32; // for float
-            }
+            Expr strip_size = 32;
 
+            // Corrected schedule order: split first, then parallelize.
             processed.compute_root()
-                .reorder(c, x, y)
-                .split(y, yi, yii, 2, TailStrategy::RoundUp)
-                .split(yi, yo, yi, strip_size / 2)
-                .vectorize(x, 2 * vec, TailStrategy::RoundUp)
-                .unroll(c)
-                .parallel(yo);
+                .split(y, yo, yi, strip_size)
+                .parallel(yo)
+                .vectorize(x, 2 * vec);
+
+            final_output.compute_at(processed, yi).vectorize(x, 2 * vec);
+            curved.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
+            to_uint16_for_lut.compute_at(curved, x).vectorize(x, vec);
+            saturated.compute_at(curved, x).vectorize(x, vec);
+            color_corrected.compute_at(curved, x).vectorize(x, vec);
+
+            demosaiced.compute_at(curved, x).vectorize(x, vec);
+            demosaic_builder.simple_output.compute_at(curved, x).vectorize(x, vec);
+            demosaic_builder.vhg_output.compute_at(curved, x).vectorize(x, vec);
+            demosaic_builder.ahd_output.compute_at(curved, x).vectorize(x, vec);
+            demosaic_builder.lmmse_output.compute_at(curved, x).vectorize(x, vec);
             
-            final_output.compute_at(processed, yi)
-                .store_at(processed, yo)
-                .reorder(c, x, y)
-                .tile(x, y, x, y, xi, yi, 2 * vec, 2, TailStrategy::RoundUp)
-                .vectorize(xi)
-                .unroll(yi)
-                .unroll(c);
-
-            // Note: the `sharpen` stage is fused into `final_output` by default.
-
-            curved.compute_at(processed, yi)
-                .store_at(processed, yo)
-                .reorder(c, x, y)
-                .tile(x, y, x, y, xi, yi, get_target().natural_vector_size(UInt(16)), 2, TailStrategy::RoundUp)
-                .vectorize(xi)
-                .unroll(yi)
-                .unroll(c);
-            
-            to_uint16.compute_at(curved, x).vectorize(x).unroll(c);
-            saturated.compute_at(curved, x).vectorize(x).unroll(c);
-            exposed.compute_at(curved, x).vectorize(x).unroll(c);
-            color_corrected.compute_at(curved, x).vectorize(x).unroll(c);
-
-            demosaiced.compute_at(curved, x).vectorize(x).unroll(c);
-            demosaic_builder.simple_output.compute_at(curved, x).vectorize(x).unroll(c);
-            demosaic_builder.vhg_output.compute_at(curved, x).vectorize(x).unroll(c);
-
             Var demosaic_intermediate_v = demosaic_builder.qx;
             for (Func f : demosaic_builder.quarter_res_intermediates) {
-                 f.compute_at(processed, yi)
-                    .store_at(processed, yo)
-                    .vectorize(demosaic_intermediate_v, vec, TailStrategy::RoundUp)
-                    .fold_storage(demosaic_builder.qy, 4);
+                 f.compute_at(processed, yi).vectorize(demosaic_intermediate_v, vec);
             }
-            if (demosaic_builder.quarter_res_intermediates.size() > 1) {
-                demosaic_builder.quarter_res_intermediates[1].compute_with(
-                    demosaic_builder.quarter_res_intermediates[0], demosaic_intermediate_v,
-                    {{demosaic_builder.qx, LoopAlignStrategy::AlignStart}, {demosaic_builder.qy, LoopAlignStrategy::AlignStart}});
+            for (Func f : demosaic_builder.full_res_intermediates) {
+                f.compute_at(processed, yi).vectorize(x, vec);
             }
 
-            deinterleaved.compute_at(processed, yi)
-                .store_at(processed, yo)
-                .fold_storage(y, 4)
-                .reorder(c, x, y)
-                .vectorize(x, vec, TailStrategy::RoundUp)
-                .unroll(c);
+            deinterleaved.compute_at(processed, yi).vectorize(x, vec);
+            normalized.compute_at(processed, yi).vectorize(x, vec);
+            ca_corrected.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
             
-            to_float.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
-
-            ca_corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, get_target().natural_vector_size(UInt(16)));
+            // FIX: Remove nested parallelism from CA intermediates.
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
-                    f.compute_root().parallel(f.args()[1]).vectorize(f.args()[0], vec);
+                    f.compute_root().vectorize(f.args()[0], vec);
                 } else {
-                    f.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+                    f.compute_at(processed, yi).vectorize(x, vec);
                 }
             }
 
-            denoised.compute_root().parallel(y).vectorize(x, get_target().natural_vector_size(UInt(16)) * 2);
-
-            if (get_target().has_feature(Target::HVX)) {
-                processed.hexagon();
-                denoised.align_storage(x, 128);
-                ca_corrected.align_storage(x, 128);
-                to_float.align_storage(x, 128);
-                deinterleaved.align_storage(x, 128);
-                exposed.align_storage(x, 128);
-                color_corrected.align_storage(x, 128);
-                saturated.align_storage(x, 128);
-                to_uint16.align_storage(x, 128);
-            }
-
-            processed
-                .bound(c, 0, 3)
-                .bound(x, 0, ((out_width) / (2 * vec)) * (2 * vec))
-                .bound(y, 0, (out_height / strip_size) * strip_size);
-
-
-            // ========== TRACE TAGS for HalideTraceViz ==========
-            {
-                // Visualization is complex now that the LUT is pre-generated.
-                // We'll simplify the trace tags for now.
-            }
+            denoised.compute_root().vectorize(x, get_target().natural_vector_size(UInt(16)) * 2);
         }
     }
 };

@@ -16,17 +16,13 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
 
 #ifdef NO_COLOR_CORRECT
     Func corrected("corrected_dummy");
-    // Dummy pass-through stage
     corrected(x, y, c) = input(x, y, c);
     return corrected;
 #else
     Func corrected("corrected");
-    // Get a color matrix by linearly interpolating between two
-    // calibrated matrices using inverse kelvin.
-    Func matrix("cc_matrix"); // **FIX:** Use the simple constructor. Type is inferred.
-    Var mx("cc_mx"), my("cc_my"); // Matrix coordinates
+    Func matrix("cc_matrix");
+    Var mx("cc_mx"), my("cc_my");
     Expr alpha = (1.0f / color_temp - 1.0f / 3200) / (1.0f / 7000 - 1.0f / 3200);
-    // The expression below is float, so Halide will infer that 'matrix' is a Float(32) Func.
     matrix(mx, my) = (matrix_3200(mx, my) * alpha + matrix_7000(mx, my) * (1 - alpha));
 
     if (!is_autoscheduled) {
@@ -36,20 +32,24 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
         }
     }
 
-    // Perform the matrix multiplication. The input is already Float(32).
-    Expr ir = input(x, y, 0);
-    Expr ig = input(x, y, 1);
-    Expr ib = input(x, y, 2);
+    // The input is normalized floating point data. The color matrices expect
+    // non-normalized data, so we scale it back up by the white point before
+    // the matrix multiply, and then scale it back down.
+    // NOTE: This is a simplification. A real pipeline would use different matrices
+    // calibrated for normalized data. For this example, this is a reasonable proxy.
+    const float approx_white_point = 4095.f;
+
+    Expr ir = input(x, y, 0) * approx_white_point;
+    Expr ig = input(x, y, 1) * approx_white_point;
+    Expr ib = input(x, y, 2) * approx_white_point;
 
     Expr r_f = matrix(3, 0) + matrix(0, 0) * ir + matrix(1, 0) * ig + matrix(2, 0) * ib;
     Expr g_f = matrix(3, 1) + matrix(0, 1) * ir + matrix(1, 1) * ig + matrix(2, 1) * ib;
     Expr b_f = matrix(3, 2) + matrix(0, 2) * ir + matrix(1, 2) * ig + matrix(2, 2) * ib;
 
-    // Apply tint adjustment to the green channel.
     g_f = g_f * (1.0f - tint);
 
-    // Output is Float(32) for the next stage. Clamping is deferred until we cast back to uint16.
-    corrected(x, y, c) = mux(c, {r_f, g_f, b_f});
+    corrected(x, y, c) = mux(c, {r_f, g_f, b_f}) / approx_white_point;
     return corrected;
 #endif
 }
