@@ -1,4 +1,4 @@
 README.md
 TODO.md
 src/*
-Makefile
+CMakeLists.txt

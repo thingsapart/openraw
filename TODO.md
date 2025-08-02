@@ -9,7 +9,7 @@ These are fundamental adjustments that are missing and provide the most value fo
 - [x] **Exposure Control:** Add a global multiplier to brighten or darken the image in linear space before the tone curve.
 - [x] **Global Saturation:** Add a master saturation control to increase or decrease the intensity of all colors. Implemented with two selectable algorithms: HSL and L*a*b*.
 - [x] **Blacks & Whites Sliders:** Expose controls to adjust the black and white clip points of the tone curve. (Integrated into Curve stage).
-- [x] **Custom Tone Curve:** Implement a flexible tone curve using user-defined control points, applied to either Luma or RGB, with optional per-channel overrides.
+- [x] **Custom Tone Curve:** Implement a flexible tone curve using user-defined control points, applied to either Luma or RGB, with optional per-channel overrides and a PNG visualization.
 - [ ] **Vignette Correction:** Implement a basic radial darkening or brightening to counteract or add a lens vignette effect.
 - [ ] **Crop Tool:** Add parameters to define a crop rectangle, effectively changing the output bounds of the pipeline.
 

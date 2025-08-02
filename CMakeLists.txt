@@ -12,6 +12,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Halide REQUIRED)
 message(STATUS "Found Halide: ${Halide_VERSION}")
 
+# --- External Dependencies (stb) ---
+# Use FetchContent to automatically download stb_image_write.h at configure time.
+include(FetchContent)
+FetchContent_Declare(
+    stb_image_write
+    URL https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
+    URL_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
+    DOWNLOAD_NO_EXTRACT TRUE       # This is a single file, not an archive
+)
+FetchContent_MakeAvailable(stb_image_write)
+
+
 # --- Libcamera Support ---
 option(USE_LIBCAMERA "Build with libcamera support for the capture tool" OFF)
 if(USE_LIBCAMERA)
@@ -48,6 +60,10 @@ add_halide_library(camera_pipe_auto_schedule
 
 # === STAGE 3: The Runner (Main Processor) ===
 add_executable(process src/process.cpp)
+
+# Add the include directory for the downloaded stb header.
+# FetchContent makes the path available via the <name>_SOURCE_DIR variable.
+target_include_directories(process PRIVATE ${stb_image_write_SOURCE_DIR})
 
 # The runner from the example requires Halide's ImageIO and Tools libraries.
 # Linking against the generated library targets automatically handles dependencies,
