@@ -66,6 +66,7 @@ Use the `process` tool to run the pipeline. Arguments are specified with flags. 
 # Example with custom settings and CA correction enabled
 ./build/process --input raw_image.png --output processed_custom.png \
     --exposure 1.5 \
+    --saturation 1.2 \
     --color-temp 4500 \
     --tint 0.1 \
     --gamma 2.0 \

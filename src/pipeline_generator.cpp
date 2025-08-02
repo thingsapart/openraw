@@ -12,6 +12,7 @@
 #include "stage_demosaic.h"
 #include "stage_exposure.h"
 #include "stage_color_correct.h"
+#include "stage_saturation.h"
 #include "stage_apply_curve.h"
 #include "stage_sharpen.h"
 
@@ -35,6 +36,7 @@ public:
     Input<float> color_temp{"color_temp"};
     Input<float> tint{"tint"};
     Input<float> exposure{"exposure"};
+    Input<float> saturation{"saturation"};
     Input<float> gamma{"gamma"};
     Input<float> contrast{"contrast"};
     Input<float> sharpen_strength{"sharpen_strength"};
@@ -80,8 +82,11 @@ public:
                                                 color_temp, tint, x, y, c,
                                                 get_target(), using_autoscheduler());
 
+        // Stage 4.5: Saturation adjustment
+        Func saturated = pipeline_saturation(corrected, saturation, x, y, c);
+
         // Stage 5: Apply tone curve (gamma, contrast)
-        Func curved = pipeline_apply_curve(corrected, blackLevel, whiteLevel,
+        Func curved = pipeline_apply_curve(saturated, blackLevel, whiteLevel,
                                            contrast, gamma, x, y, c,
                                            result_type, get_target(), using_autoscheduler());
 
@@ -102,6 +107,7 @@ public:
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
         exposure.set_estimate(1.0f);
+        saturation.set_estimate(1.0f);
         gamma.set_estimate(2.0);
         contrast.set_estimate(50);
         sharpen_strength.set_estimate(1.0);
@@ -140,6 +146,10 @@ public:
             // Note: the `sharpen` stage is fused into `processed` by default.
 
             curved.compute_at(processed, x)
+                .unroll(x, 2)
+                .gpu_threads(x, y);
+
+            saturated.compute_at(processed, x)
                 .unroll(x, 2)
                 .gpu_threads(x, y);
 
@@ -211,6 +221,11 @@ public:
                 .unroll(yi)
                 .unroll(c);
             
+            saturated.compute_at(curved, x)
+                .reorder(c, x, y)
+                .vectorize(x)
+                .unroll(c);
+
             corrected.compute_at(curved, x)
                 .reorder(c, x, y)
                 .vectorize(x)
@@ -264,6 +279,7 @@ public:
                 deinterleaved.align_storage(x, vec);
                 exposed.align_storage(x, vec);
                 corrected.align_storage(x, vec);
+                saturated.align_storage(x, vec);
             }
 
             processed
@@ -321,12 +337,16 @@ public:
                 cfg.labels = {{"color-corrected"}};
                 corrected.add_trace_tag(cfg.to_trace_tag());
 
-                cfg.max = 256;
                 cfg.pos = {1770, 360};
+                cfg.labels = {{"saturated"}};
+                saturated.add_trace_tag(cfg.to_trace_tag());
+
+                cfg.max = 256;
+                cfg.pos = {1980, 360};
                 cfg.labels = {{"gamma-corrected"}};
                 curved.add_trace_tag(cfg.to_trace_tag());
                 
-                cfg.pos = {1980, 360};
+                cfg.pos = {2190, 360};
                 cfg.labels = {{"sharpened"}};
                 processed.add_trace_tag(cfg.to_trace_tag());
             }
