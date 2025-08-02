@@ -55,15 +55,26 @@ Use the `capture` tool to create a 16-bit RAW PNG file.
 
 ### Step 2: Process the RAW Image
 
-Use the `process` tool to run the pipeline. It takes arguments in a fixed order.
+Use the `process` tool to run the pipeline. Arguments are specified with flags. Run with `--help` for a full list of options.
 
-**Usage:** `./process <raw_input.png> <color_temp> <gamma> <contrast> <sharpen> <ca_strength> <iterations> <output.png>`
+**Usage:** `./process --input <path> --output <path> [options...]`
 
 ```bash
-# Example with neutral settings and no CA correction
-./build/process raw_image.png 3700 2.2 50 1.0 0.0 5 processed_neutral.png
+# Example with default settings
+./build/process --input raw_image.png --output processed_default.png
 
-# Example with CA correction enabled
-./build/process raw_image.png 3700 2.2 50 1.0 1.0 5 processed_ca.png
+# Example with custom settings and CA correction enabled
+./build/process --input raw_image.png --output processed_custom.png \
+    --color-temp 4500 \
+    --tint 0.1 \
+    --gamma 2.0 \
+    --contrast 55 \
+    --sharpen 1.2 \
+    --ca-strength 1.0 \
+    --iterations 10
+
+# See all available options
+./build/process --help
 ```
 The program will print benchmark timings for both the manually-scheduled and auto-scheduled versions of the pipeline.
+

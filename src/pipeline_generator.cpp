@@ -32,6 +32,7 @@ public:
     Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
     Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
     Input<float> color_temp{"color_temp"};
+    Input<float> tint{"tint"};
     Input<float> gamma{"gamma"};
     Input<float> contrast{"contrast"};
     Input<float> sharpen_strength{"sharpen_strength"};
@@ -71,7 +72,7 @@ public:
 
         // Stage 4: Color correction
         Func corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
-                                                color_temp, x, y, c,
+                                                color_temp, tint, x, y, c,
                                                 get_target(), using_autoscheduler());
 
         // Stage 5: Apply tone curve (gamma, contrast)
@@ -94,6 +95,7 @@ public:
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         color_temp.set_estimate(3700);
+        tint.set_estimate(0.0f);
         gamma.set_estimate(2.0);
         contrast.set_estimate(50);
         sharpen_strength.set_estimate(1.0);

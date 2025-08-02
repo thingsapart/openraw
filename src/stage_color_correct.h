@@ -7,6 +7,7 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
                                            Halide::Func matrix_3200,
                                            Halide::Func matrix_7000,
                                            Halide::Expr color_temp,
+                                           Halide::Expr tint,
                                            Halide::Var x, Halide::Var y, Halide::Var c,
                                            const Halide::Target &target,
                                            bool is_autoscheduled) {
@@ -42,6 +43,11 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
     Expr r = matrix(3, 0) + matrix(0, 0) * ir + matrix(1, 0) * ig + matrix(2, 0) * ib;
     Expr g = matrix(3, 1) + matrix(0, 1) * ir + matrix(1, 1) * ig + matrix(2, 1) * ib;
     Expr b = matrix(3, 2) + matrix(0, 2) * ir + matrix(1, 2) * ig + matrix(2, 2) * ib;
+
+    // Apply tint adjustment to the green channel.
+    // A positive tint value shifts the image towards magenta (by reducing green).
+    // A negative tint value shifts the image towards green (by increasing green).
+    g = cast<int32_t>(cast<float>(g) * (1.0f - tint));
 
     r = cast<int16_t>(r / 256);
     g = cast<int16_t>(g / 256);

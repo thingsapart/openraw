@@ -13,24 +13,100 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <map>
+#include <stdexcept>
 
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
 
+// A struct to hold all pipeline parameters
+struct ProcessConfig {
+    std::string input_path;
+    std::string output_path;
+    float color_temp = 3700.0f;
+    float tint = 0.0f;
+    float gamma = 2.2f;
+    float contrast = 50.0f;
+    float sharpen = 1.0f;
+    float ca_strength = 0.0f; // Default to off
+    int timing_iterations = 5;
+};
+
+// Prints the usage message for the process executable.
+void print_usage() {
+    printf("Usage: ./process --input <raw.png> --output <out.png> [options]\n\n"
+           "Required arguments:\n"
+           "  --input <path>         Path to the input 16-bit RAW PNG file.\n"
+           "  --output <path>        Path for the output 8-bit image file.\n\n"
+           "Options:\n"
+           "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
+           "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
+           "  --gamma <val>          Gamma correction value (default: 2.2).\n"
+           "  --contrast <val>       Contrast enhancement value (default: 50.0).\n"
+           "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
+           "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
+           "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n"
+           "  --help                 Display this help message.\n");
+}
+
 int main(int argc, char **argv) {
-    if (argc < 9) {
-        printf("Usage: ./process raw.png color_temp gamma contrast sharpen ca_strength timing_iterations output.png\n"
-               "e.g. ./process raw.png 3700 2.0 50 1.0 1.0 5 output.png\n"
-               "ca_strength: 0.0=off, 1.0=default correction\n");
+    if (argc == 1) {
+        print_usage();
         return 0;
     }
+
+    // --- Argument Parsing ---
+    ProcessConfig cfg;
+    std::map<std::string, std::string> args;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help") {
+            print_usage();
+            return 0;
+        }
+        if (arg.rfind("--", 0) == 0) {
+            if (i + 1 < argc) {
+                args[arg.substr(2)] = argv[++i];
+            } else {
+                fprintf(stderr, "Error: Missing value for argument %s\n", arg.c_str());
+                return 1;
+            }
+        } else {
+            fprintf(stderr, "Error: Unrecognized positional argument: %s\n", arg.c_str());
+            print_usage();
+            return 1;
+        }
+    }
+
+    try {
+        if (args.count("input")) cfg.input_path = args["input"];
+        if (args.count("output")) cfg.output_path = args["output"];
+        if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
+        if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
+        if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
+        if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
+        if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
+        if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
+        if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "Error parsing arguments: %s\n", e.what());
+        return 1;
+    }
+
+    if (cfg.input_path.empty() || cfg.output_path.empty()) {
+        fprintf(stderr, "Error: --input and --output arguments are required.\n\n");
+        print_usage();
+        return 1;
+    }
+    // --- End Argument Parsing ---
 
 #ifdef HL_MEMINFO
     halide_enable_malloc_trace();
 #endif
 
-    fprintf(stderr, "input: %s\n", argv[1]);
-    Buffer<uint16_t, 2> input = load_and_convert_image(argv[1]);
+    fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
+    Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
     Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
 
@@ -57,28 +133,22 @@ int main(int argc, char **argv) {
         }
     }
 
-    float color_temp = (float)atof(argv[2]);
-    float gamma = (float)atof(argv[3]);
-    float contrast = (float)atof(argv[4]);
-    float sharpen = (float)atof(argv[5]);
-    float ca_strength = (float)atof(argv[6]);
-    int timing_iterations = atoi(argv[7]);
     int blackLevel = 25;
     int whiteLevel = 1023;
 
     double best;
 
 #ifdef BENCHMARK
-    best = benchmark(timing_iterations, 1, [&]() {
+    best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
-                    color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                    cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                     output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 #else
     camera_pipe(input, matrix_3200, matrix_7000,
-                color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                 output);
     output.device_sync();
 #endif
@@ -87,23 +157,23 @@ int main(int argc, char **argv) {
 
 #ifndef NO_AUTO_SCHEDULE
 #ifdef BENCHMARK
-    best = benchmark(timing_iterations, 1, [&]() {
+    best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                                  color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                                  cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                                   output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
 #else
     camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                              color_temp, gamma, contrast, sharpen, ca_strength, blackLevel, whiteLevel,
+                              cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                               output);
     output.device_sync();
 #endif
 #endif
 
-    fprintf(stderr, "output: %s\n", argv[8]);
-    convert_and_save_image(output, argv[8]);
+    fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
+    convert_and_save_image(output, cfg.output_path);
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
     printf("Success!\n");
