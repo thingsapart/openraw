@@ -5,6 +5,7 @@
 
 // This stage now takes a pre-computed 2D Look-Up Table (LUT) of size [lut_size, 3]
 // and applies it to the image.
+// **FIX:** It now performs a 16-bit -> 16-bit transform.
 inline Halide::Func pipeline_apply_curve(Halide::Func input,
                                          Halide::Func tone_curves_lut,
                                          Halide::Expr lut_extent,
@@ -15,7 +16,7 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
 
 #ifdef NO_APPLY_CURVE
     Func curved("curved_dummy");
-    curved(x, y, c) = cast<uint8_t>(clamp(input(x, y, c), 0, 16383) >> 6);
+    curved(x, y, c) = input(x,y,c);
     return curved;
 #else
     Func curved("curved");
@@ -24,7 +25,7 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
     // This is the simplest mode. We look up each channel in its corresponding LUT column.
     Func curved_rgb("curved_rgb");
     {
-        // Cast the int16 input to int32 to match the type of lut_extent.
+        // Cast the uint16 input to int32 to match the type of lut_extent.
         Expr val_as_int32 = cast<int32_t>(input(x, y, c));
         Expr clamped_val = clamp(val_as_int32, 0, lut_extent - 1);
         curved_rgb(x, y, c) = tone_curves_lut(clamped_val, c);
@@ -54,14 +55,14 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
         Expr b_new = b * new_luma / luma_safe;
         
         curved_luma(x, y, c) = mux(c, {
-            cast<uint8_t>(clamp(r_new, 0, 255)),
-            cast<uint8_t>(clamp(g_new, 0, 255)),
-            cast<uint8_t>(clamp(b_new, 0, 255))
+            cast<uint16_t>(clamp(r_new, 0, 65535)),
+            cast<uint16_t>(clamp(g_new, 0, 65535)),
+            cast<uint16_t>(clamp(b_new, 0, 65535))
         });
     }
 
     // Select the final algorithm based on the curve_mode parameter.
-    curved(x, y, c) = select(curve_mode == 0, curved_luma(x, y, c), curved_rgb(x, y, c));
+    curved(x, y, c) = cast<uint16_t>(select(curve_mode == 0, curved_luma(x, y, c), curved_rgb(x, y, c)));
 
     return curved;
 #endif

@@ -22,10 +22,9 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     Func hsl_saturated("hsl_saturated");
     Func lab_saturated("lab_saturated");
 
-    // Both algorithms must operate on a normalized [0,1] range to work correctly.
-    // We normalize the 12-bit input data, apply the effect, then denormalize back to the original range.
-    const float norm_factor = 1.0f / 4095.0f;
-    const float denorm_factor = 4095.0f;
+    // **FIX:** Both algorithms now normalize based on the full 16-bit range.
+    const float norm_factor = 1.0f / 65535.0f;
+    const float denorm_factor = 65535.0f;
 
     Expr r_norm = cast<float>(input(x, y, 0)) * norm_factor;
     Expr g_norm = cast<float>(input(x, y, 1)) * norm_factor;
@@ -66,9 +65,9 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr b_new = (b_hsl + m_hsl) * denorm_factor;
 
         hsl_saturated(x, y, c) = mux(c, {
-            cast<int16_t>(clamp(r_new, 0, 32767)),
-            cast<int16_t>(clamp(g_new, 0, 32767)),
-            cast<int16_t>(clamp(b_new, 0, 32767))
+            cast<uint16_t>(clamp(r_new, 0, 65535)),
+            cast<uint16_t>(clamp(g_new, 0, 65535)),
+            cast<uint16_t>(clamp(b_new, 0, 65535))
         });
     }
 
@@ -112,9 +111,9 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr b_new_norm =  0.0557f * x_new_xyz - 0.2040f * y_new_xyz + 1.0570f * z_new_xyz;
 
         lab_saturated(x, y, c) = mux(c, {
-            cast<int16_t>(clamp(r_new_norm * denorm_factor, 0, 32767)),
-            cast<int16_t>(clamp(g_new_norm * denorm_factor, 0, 32767)),
-            cast<int16_t>(clamp(b_new_norm * denorm_factor, 0, 32767))
+            cast<uint16_t>(clamp(r_new_norm * denorm_factor, 0, 65535)),
+            cast<uint16_t>(clamp(g_new_norm * denorm_factor, 0, 65535)),
+            cast<uint16_t>(clamp(b_new_norm * denorm_factor, 0, 65535))
         });
     }
 

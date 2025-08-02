@@ -37,7 +37,7 @@ struct ProcessConfig {
     float gamma = 2.2f;
     float contrast = 50.0f;
     float black_point = 25.0f;
-    float white_point = 4095.0f; // CORRECTED: Default to a 12-bit range.
+    float white_point = 65535.0f;
     std::string curve_points_str;
     std::string curve_r_str;
     std::string curve_g_str;
@@ -55,7 +55,7 @@ class ToneCurveUtils {
 public:
     ToneCurveUtils(const ProcessConfig& cfg);
 
-    Halide::Runtime::Buffer<uint8_t, 2> get_lut_for_halide() {
+    Halide::Runtime::Buffer<uint16_t, 2> get_lut_for_halide() { // **FIX:** Returns a uint16_t buffer
         return lut_buffer;
     }
 
@@ -67,18 +67,18 @@ private:
     int curve_mode;
 
     // LUT data
-    Halide::Runtime::Buffer<uint8_t, 2> lut_buffer;
+    Halide::Runtime::Buffer<uint16_t, 2> lut_buffer; // **FIX:** LUT is now uint16_t
     
     // Private helpers
     static bool parse_curve_points(const std::string& s, std::vector<Point>& points);
-    static void generate_lut_channel(const std::vector<Point>& user_points, float black_point, float white_point, float gamma, float contrast, uint8_t* lut_col, int lut_size);
+    static void generate_lut_channel(const std::vector<Point>& user_points, float black_point, float white_point, float gamma, float contrast, uint16_t* lut_col, int lut_size);
 };
 
 // --- IMPLEMENTATION ---
 
 ToneCurveUtils::ToneCurveUtils(const ProcessConfig& cfg)
     : black_point(cfg.black_point), white_point(cfg.white_point), gamma(cfg.gamma), contrast(cfg.contrast), curve_mode(cfg.curve_mode),
-      lut_buffer(4096, 3) {
+      lut_buffer(65536, 3) {
     
     std::vector<Point> global_pts, r_pts, g_pts, b_pts;
 
@@ -119,10 +119,11 @@ bool ToneCurveUtils::render_curves_to_png(const char* filename, int width, int h
 
     // 3. Draw the curve(s)
     auto draw_curve = [&](int channel_idx, uint8_t r, uint8_t g, uint8_t b) {
-        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 255.0f * (height-1));
+        // **FIX:** Normalize from the 16-bit LUT range for visualization
+        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 65535.0f * (height-1));
         for(int x = 1; x < width; ++x) {
             int lut_idx = (int)(((float)x / (width-1)) * (lut_buffer.width()-1));
-            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 255.0f * (height-1));
+            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 65535.0f * (height-1));
             // Draw a line from (x-1, prev_y) to (x, y)
             int start_y = std::min(prev_y, y);
             int end_y = std::max(prev_y, y);
@@ -178,7 +179,8 @@ bool ToneCurveUtils::parse_curve_points(const std::string& s, std::vector<Point>
     return true;
 }
 
-void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points, float black_point, float white_point, float gamma, float contrast, uint8_t* lut_col, int lut_size) {
+// **FIX:** Generates a 16-bit LUT
+void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points, float black_point, float white_point, float gamma, float contrast, uint16_t* lut_col, int lut_size) {
     std::vector<Point> points;
     bool useCustomCurve = !user_points.empty();
     
@@ -244,7 +246,6 @@ void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points,
                 mapped_val = h00*p0.y + h10*h*m0 + h01*p1.y + h11*h*m1;
             }
         } else {
-            // ** FIX: ** Revert to the original, well-behaved S-curve formula.
             float b = 2.0f - pow(2.0f, contrast / 100.0f);
             float a = 2.0f - 2.0f * b;
             float g = pow(val_norm, 1.0f / gamma);
@@ -254,7 +255,8 @@ void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points,
                 mapped_val = a * g * g + b * g;
             }
         }
-        lut_col[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, mapped_val * 255.0f + 0.5f)));
+        // **FIX:** Scale to 16-bit range instead of 8-bit
+        lut_col[i] = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, mapped_val * 65535.0f + 0.5f)));
     }
 }
 

@@ -23,14 +23,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb_image_write)
 
-
 # --- Libcamera Support ---
 option(USE_LIBCAMERA "Build with libcamera support for the capture tool" OFF)
 if(USE_LIBCAMERA)
     find_package(Libcamera REQUIRED)
     find_package(PNG REQUIRED)
 endif()
-
 
 # === STAGE 1: The Generator ===
 # The add_halide_generator function defines an executable target for our generator.
@@ -91,3 +89,4 @@ if(USE_LIBCAMERA)
         PNG::PNG
     )
 endif()
+

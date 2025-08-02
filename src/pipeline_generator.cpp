@@ -15,6 +15,7 @@
 #include "stage_saturation.h"
 #include "stage_apply_curve.h"
 #include "stage_sharpen.h"
+#include "stage_finalize.h"
 
 namespace {
 
@@ -37,9 +38,11 @@ public:
     Input<float> tint{"tint"};
     Input<float> exposure{"exposure"};
     Input<float> saturation{"saturation"};
+    // **FIX:** Contrast is now only used by the host to generate the main tone curve.
+    // It is no longer passed into the Halide pipeline itself.
     Input<int> saturation_algorithm{"saturation_algorithm"};
     Input<int> curve_mode{"curve_mode"};
-    Input<Buffer<uint8_t, 2>> tone_curves{"tone_curves"};
+    Input<Buffer<uint16_t, 2>> tone_curves{"tone_curves"};
     Input<float> sharpen_strength{"sharpen_strength"};
     Input<float> ca_correction_strength{"ca_correction_strength"};
     Output<Buffer<uint8_t, 3>> processed{"processed"};
@@ -84,17 +87,19 @@ public:
         // Stage 4.5: Saturation adjustment
         Func saturated = pipeline_saturation(corrected, saturation, saturation_algorithm, x, y, c);
 
-        // Stage 5: Apply tone curve
-        // Get the LUT extent from the Input buffer and pass it to the helper.
+        // Stage 5: Apply tone curve (16-bit -> 16-bit)
         Expr lut_extent = tone_curves.dim(0).extent();
         Func curved = pipeline_apply_curve(saturated, tone_curves, lut_extent, curve_mode, x, y, c);
 
-        // Stage 6: Sharpen the image
+        // Stage 6: Sharpen, operating on 16-bit data
         Func sharpened = pipeline_sharpen(curved, sharpen_strength, x, y, c,
                                           get_target(), using_autoscheduler());
 
+        // Stage 7: The Finalize stage (16-bit -> 8-bit)
+        Func finalized = pipeline_finalize(sharpened, x, y, c);
+
         // Set the final output Func
-        processed(x, y, c) = sharpened(x, y, c);
+        processed(x, y, c) = finalized(x, y, c);
 
 
         // ========== ESTIMATES ==========
@@ -109,7 +114,7 @@ public:
         saturation.set_estimate(1.0f);
         saturation_algorithm.set_estimate(1); // Default to L*a*b*
         curve_mode.set_estimate(1); // Default to RGB
-        tone_curves.set_estimates({{0, 4096}, {0, 3}});
+        tone_curves.set_estimates({{0, 65536}, {0, 3}});
         sharpen_strength.set_estimate(1.0);
         ca_correction_strength.set_estimate(1.0);
         processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
@@ -141,23 +146,12 @@ public:
                 .unroll(x, 2)
                 .gpu_tile(x, y, xi, yi, tile_x, tile_y);
 
-            // Note: the `sharpen` stage is fused into `processed` by default.
-
-            curved.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            saturated.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            corrected.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
-
-            exposed.compute_at(processed, x)
-                .unroll(x, 2)
-                .gpu_threads(x, y);
+            // Stages are now fused into `processed` by default
+            sharpened.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y);
+            curved.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y);
+            saturated.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y);
+            corrected.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y);
+            exposed.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y);
 
             demosaiced.compute_at(processed, x)
                 .gpu_threads(x, y);
@@ -209,30 +203,13 @@ public:
                 .unroll(c)
                 .parallel(yo);
 
-            // Note: the `sharpen` stage is fused into `processed` by default.
+            // Note: `finalized` is fused into `processed` by default.
 
-            curved.compute_at(processed, yi)
-                .store_at(processed, yo)
-                .reorder(c, x, y)
-                .tile(x, y, x, y, xi, yi, 2 * vec, 2, TailStrategy::RoundUp)
-                .vectorize(xi)
-                .unroll(yi)
-                .unroll(c);
-
-            saturated.compute_at(curved, x)
-                .reorder(c, x, y)
-                .vectorize(x)
-                .unroll(c);
-
-            corrected.compute_at(curved, x)
-                .reorder(c, x, y)
-                .vectorize(x)
-                .unroll(c);
-
-            exposed.compute_at(curved, x)
-                .reorder(c, x, y)
-                .vectorize(x)
-                .unroll(c);
+            sharpened.compute_at(processed, yi).store_at(processed, yo).vectorize(x, 2*vec);
+            curved.compute_at(processed, yi).store_at(processed, yo).vectorize(x, 2*vec);
+            saturated.compute_at(curved, x).reorder(c, x, y).vectorize(x).unroll(c);
+            corrected.compute_at(curved, x).reorder(c, x, y).vectorize(x).unroll(c);
+            exposed.compute_at(curved, x).reorder(c, x, y).vectorize(x).unroll(c);
 
             demosaiced.compute_at(curved, x)
                 .vectorize(x)

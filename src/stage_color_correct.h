@@ -36,8 +36,7 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
         }
     }
 
-    // **FIX:** Perform the matrix multiplication in floating point to preserve the
-    // full dynamic range of the image data.
+    // Perform the matrix multiplication in floating point to preserve precision.
     Expr ir = cast<float>(input(x, y, 0));
     Expr ig = cast<float>(input(x, y, 1));
     Expr ib = cast<float>(input(x, y, 2));
@@ -49,10 +48,10 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
     // Apply tint adjustment to the green channel.
     g_f = g_f * (1.0f - tint);
 
-    // Cast back to int16 for the next stage, clamping to a valid range.
-    Expr r = cast<int16_t>(clamp(r_f, 0, 32767));
-    Expr g = cast<int16_t>(clamp(g_f, 0, 32767));
-    Expr b = cast<int16_t>(clamp(b_f, 0, 32767));
+    // Cast back to uint16 for the next stage, clamping to the full 16-bit range.
+    Expr r = cast<uint16_t>(clamp(r_f, 0, 65535));
+    Expr g = cast<uint16_t>(clamp(g_f, 0, 65535));
+    Expr b = cast<uint16_t>(clamp(b_f, 0, 65535));
 
     corrected(x, y, c) = mux(c, {r, g, b});
     return corrected;

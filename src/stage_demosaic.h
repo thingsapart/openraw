@@ -56,7 +56,7 @@ public:
         Expr r_channel = deinterleaved(x/2, y/2, 1);
         Expr g_channel = avg(deinterleaved(x/2, y/2, 0), deinterleaved(x/2, y/2, 3));
         Expr b_channel = deinterleaved(x/2, y/2, 2);
-        output(x, y, c) = cast<int16_t>(mux(c, {r_channel, g_channel, b_channel}));
+        output(x, y, c) = cast<uint16_t>(mux(c, {r_channel, g_channel, b_channel}));
         // No intermediates in the dummy version.
 
 #else
@@ -114,7 +114,8 @@ public:
         b_full = interleave_y(interleave_x(b_gr, b_r), interleave_x(b_b, b_gb));
 
         output = Func("demosaiced");
-        output(x, y, c) = cast<int16_t>(mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)}));
+        // **FIX:** Use uint16_t for consistent intermediate types
+        output(x, y, c) = cast<uint16_t>(mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)}));
 #endif
     }
 };

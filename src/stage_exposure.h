@@ -19,10 +19,9 @@ inline Halide::Func pipeline_exposure(Halide::Func input,
 
     // Multiply the linear data by the exposure factor.
     // Cast to float for the multiplication, then clamp to the valid range
-    // of the 16-bit integer type and cast back. This prevents overflow
-    // while maintaining the data type for subsequent stages.
+    // of the 16-bit unsigned integer type and cast back.
     Expr val_f = cast<float>(input(x, y, c)) * exposure;
-    exposed(x, y, c) = cast<int16_t>(clamp(val_f, 0.0f, 32767.0f));
+    exposed(x, y, c) = cast<uint16_t>(clamp(val_f, 0.0f, 65535.0f));
     return exposed;
 #endif
 }
