@@ -5,7 +5,6 @@
 #include "halide_trace_config.h"
 #include "pipeline_helpers.h"
 
-// **FIX:** This stage now operates on 16-bit data.
 inline Halide::Func pipeline_sharpen(Halide::Func input,
                                      Halide::Expr sharpen_strength,
                                      Halide::Var x, Halide::Var y, Halide::Var c,
@@ -22,27 +21,30 @@ inline Halide::Func pipeline_sharpen(Halide::Func input,
 #else
     Func sharpened("sharpened");
 
-    // The input is uint16. For sharpening, it's safer and cleaner to work
-    // with floats to avoid intermediate clipping and overflow.
-    Func input_f("sharpen_input_f");
-    input_f(x, y, c) = cast<float>(input(x, y, c));
+    Func sharpen_strength_x32("sharpen_strength_x32");
+    sharpen_strength_x32() = u8_sat(sharpen_strength * 32);
+    if (!is_autoscheduled) {
+        sharpen_strength_x32.compute_root();
+        if (target.has_gpu_feature()) {
+            sharpen_strength_x32.gpu_single_thread();
+        }
+    }
 
-    // A simple 3x3 box blur in floating point.
-    Func blur_x("sharpen_blur_x");
-    blur_x(x, y, c) = (input_f(x - 1, y, c) + input_f(x, y, c) + input_f(x + 1, y, c)) / 3.0f;
+    Halide::Trace::FuncConfig cfg;
+    cfg.labels = {{"sharpen strength"}};
+    cfg.pos = {10, 1000};
+    sharpen_strength_x32.add_trace_tag(cfg.to_trace_tag());
+
+    Func unsharp_y("unsharp_y");
+    unsharp_y(x, y, c) = blur121(input(x, y - 1, c), input(x, y, c), input(x, y + 1, c));
 
     Func unsharp("unsharp");
-    unsharp(x, y, c) = (blur_x(x, y - 1, c) + blur_x(x, y, c) + blur_x(x, y + 1, c)) / 3.0f;
+    unsharp(x, y, c) = blur121(unsharp_y(x - 1, y, c), unsharp_y(x, y, c), unsharp_y(x + 1, y, c));
 
-    // The mask is the difference between the original and the blurred image.
-    Expr mask = input_f(x, y, c) - unsharp(x, y, c);
+    Func mask("mask");
+    mask(x, y, c) = cast<int32_t>(input(x, y, c)) - cast<int32_t>(unsharp(x, y, c));
 
-    // Apply the sharpened mask. The sharpen_strength is a float.
-    Expr sharpened_f = input_f(x, y, c) + mask * sharpen_strength;
-
-    // Clamp the result back to the 16-bit range and cast to the final type.
-    sharpened(x, y, c) = cast<uint16_t>(clamp(sharpened_f, 0.0f, 65535.0f));
-
+    sharpened(x, y, c) = u16_sat(cast<int32_t>(input(x, y, c)) + (mask(x, y, c) * sharpen_strength_x32()) / 32);
     return sharpened;
 #endif
 }

@@ -22,7 +22,8 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     Func hsl_saturated("hsl_saturated");
     Func lab_saturated("lab_saturated");
 
-    // **FIX:** Both algorithms now normalize based on the full 16-bit range.
+    // Both algorithms must operate on a normalized [0,1] range to work correctly.
+    // We will use the full 16-bit range for normalization.
     const float norm_factor = 1.0f / 65535.0f;
     const float denorm_factor = 65535.0f;
 

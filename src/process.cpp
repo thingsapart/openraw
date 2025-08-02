@@ -37,9 +37,9 @@ void print_usage() {
            "  --saturation <factor>  Color saturation. 0=grayscale, 1=normal. Default: 1.0.\n"
            "  --saturation-algo <id> Saturation algorithm. 'hsl' or 'lab' (default: lab).\n"
            "  --black-point <val>    The input value that maps to black (default: 25.0).\n"
-           "  --white-point <val>    The input value that maps to white (default: 65535.0).\n"
-           "  --gamma <val>          Gamma for the main tone curve (default: 2.2).\n"
-           "  --contrast <val>       Contrast for the main tone curve (default: 50.0).\n"
+           "  --white-point <val>    The input value that maps to white (default: 4095.0).\n"
+           "  --gamma <val>          Gamma for default S-curve. Default: 2.2.\n"
+           "  --contrast <val>       Contrast for default S-curve. Default: 50.0.\n"
            "  --curve-points <str>   Global curve points, e.g. \"0:0,1:1\". Overrides gamma/contrast.\n"
            "  --curve-r <str>        Red channel curve points. Overrides --curve-points for red.\n"
            "  --curve-g <str>        Green channel curve points. Overrides --curve-points for green.\n"
@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
     // --- DEBUG: Print LUT values to stdout ---
     printf("\n--- Tone Curve LUT Samples ---\n");
     printf("Input, R_Out, G_Out, B_Out\n");
-    for (int i = 0; i < tone_curves_buf.width(); i += 4096) {
+    for (int i = 0; i < tone_curves_buf.width(); i += tone_curves_buf.width() / 20) {
         printf("%d, %d, %d, %d\n", i, tone_curves_buf(i, 0), tone_curves_buf(i, 1), tone_curves_buf(i, 2));
     }
     printf("%d, %d, %d, %d\n", tone_curves_buf.width()-1, tone_curves_buf(tone_curves_buf.width()-1, 0), tone_curves_buf(tone_curves_buf.width()-1, 1), tone_curves_buf(tone_curves_buf.width()-1, 2));
@@ -173,16 +173,16 @@ int main(int argc, char **argv) {
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
-                    cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation,
-                    cfg.saturation_algorithm, cfg.curve_mode, tone_curves_buf,
+                    cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
+                    cfg.curve_mode, tone_curves_buf,
                     cfg.sharpen, cfg.ca_strength, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 #else
     camera_pipe(input, matrix_3200, matrix_7000,
-                cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation,
-                cfg.saturation_algorithm, cfg.curve_mode, tone_curves_buf,
+                cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
+                cfg.curve_mode, tone_curves_buf,
                 cfg.sharpen, cfg.ca_strength, output);
     output.device_sync();
 #endif
@@ -193,16 +193,16 @@ int main(int argc, char **argv) {
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                                  cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation,
-                                  cfg.saturation_algorithm, cfg.curve_mode, tone_curves_buf,
+                                  cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
+                                  cfg.curve_mode, tone_curves_buf,
                                   cfg.sharpen, cfg.ca_strength, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
 #else
     camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation,
-                              cfg.saturation_algorithm, cfg.curve_mode, tone_curves_buf,
+                              cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
+                              cfg.curve_mode, tone_curves_buf,
                               cfg.sharpen, cfg.ca_strength, output);
     output.device_sync();
 #endif

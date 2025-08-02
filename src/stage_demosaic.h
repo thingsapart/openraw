@@ -114,7 +114,6 @@ public:
         b_full = interleave_y(interleave_x(b_gr, b_r), interleave_x(b_b, b_gb));
 
         output = Func("demosaiced");
-        // **FIX:** Use uint16_t for consistent intermediate types
         output(x, y, c) = cast<uint16_t>(mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)}));
 #endif
     }
