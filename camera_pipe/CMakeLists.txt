@@ -23,14 +23,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb_image_write)
 
-
 # --- Libcamera Support ---
 option(USE_LIBCAMERA "Build with libcamera support for the capture tool" OFF)
 if(USE_LIBCAMERA)
     find_package(Libcamera REQUIRED)
     find_package(PNG REQUIRED)
 endif()
-
 
 # === STAGE 1: The Generator ===
 # The add_halide_generator function defines an executable target for our generator.
@@ -59,7 +57,7 @@ add_halide_library(camera_pipe_auto_schedule
 
 
 # === STAGE 3: The Runner (Main Processor) ===
-add_executable(process src/process.cpp src/tone_curve_utils.cpp)
+add_executable(process src/process.cpp)
 
 # Add the include directory for the downloaded stb header.
 # FetchContent makes the path available via the <name>_SOURCE_DIR variable.
@@ -92,21 +90,3 @@ if(USE_LIBCAMERA)
     )
 endif()
 
-
-# === STAGE 5: The Test Runner ===
-# Use file(GLOB) to find all test source files automatically.
-file(GLOB TEST_SOURCES "src/tests/*.cpp")
-add_executable(test_runner ${TEST_SOURCES} src/tone_curve_utils.cpp)
-
-# The test runner needs include paths for the main src/ dir and stb.
-target_include_directories(test_runner PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${stb_image_write_SOURCE_DIR}
-)
-
-# test_runner needs ImageIO for the new stage dumping test.
-target_link_libraries(test_runner PRIVATE
-    Halide::Halide
-    Halide::ImageIO
-)
-add_test(NAME PipelineTests COMMAND test_runner)

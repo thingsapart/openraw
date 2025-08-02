@@ -28,9 +28,10 @@ These features are central to modern RAW editing but require more complex algori
 
 These features are powerful but are very difficult to implement or are for more specialized use cases.
 
+- [x] **Advanced Demosaicing Algorithms:** Provide options for different demosaicing algorithms (e.g., VHG) to allow users to trade between detail and artifacts.
 - [ ] **Local Adjustments (Brushes, Gradients):** Architect a system for applying adjustments via user-defined masks, which is a major departure from a global pipeline.
 - [ ] **Input Color Profile (DCP/ICC) Support:** Add the capability to parse standard camera profile files for more accurate color reproduction.
-- [ ] **Advanced Demosaicing Algorithms:** Provide options for different demosaicing algorithms (e.g., AmaZE) to allow users to trade between detail and artifacts.
 - [ ] **Perspective Correction:** Implement a full projective transform to correct for geometric keystoning.
 - [ ] **LUT File Support:** Add the ability to load and apply 3D Look-Up Tables (e.g., from `.cube` files) for creative color grading.
 - [ ] **Dehaze:** Implement a specialized algorithm to remove or add atmospheric haze by analyzing local color and contrast.
+

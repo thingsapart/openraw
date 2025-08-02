@@ -2,120 +2,204 @@
 #define STAGE_DEMOSAIC_H
 
 #include "Halide.h"
-#include "halide_trace_config.h"
-#include "pipeline_helpers.h"
 #include <vector>
 #include <string>
 #include <algorithm>
 
-namespace {
-
-// Helper functions used by the Demosaic algorithm
-using Halide::Expr;
-using Halide::Func;
-using Halide::cast;
-using Halide::absd;
-using Halide::mux;
-using Halide::select;
-using Halide::Var;
-
-Func interleave_x(Func a, Func b) {
-    Var x("ix_x"), y("ix_y");
-    Func out("interleaved_x");
-    out(x, y) = select((x % 2) == 0, a(x / 2, y), b(x / 2, y));
-    return out;
-}
-
-Func interleave_y(Func a, Func b) {
-    Var x("iy_x"), y("iy_y");
-    Func out("interleaved_y");
-    out(x, y) = select((y % 2) == 0, a(x, y / 2), b(x, y / 2));
-    return out;
-}
-} // namespace
-
-// DemosaicBuilder is a plain C++ class that constructs the Halide algorithm
-// for the demosaic stage. It no longer contains scheduling logic itself.
+// DemosaicBuilder is a C++ class that constructs the Halide algorithm for the demosaic stage.
+// It now operates entirely on Float(32) data to prevent integer underflow/overflow artifacts.
+// It can be constructed with a choice of algorithm.
 class DemosaicBuilder {
+private:
+    // All internal helpers now operate on float Exprs.
+    using Expr = Halide::Expr;
+    using Func = Halide::Func;
+    using Var = Halide::Var;
+    using Region = Halide::Region;
+
+    // A clamp for convenience
+    static const float_t max_val;
+
+    // Helper to interleave two half-resolution Funcs into a single full-resolution one.
+    Func interleave(Func a, Func b, Func c, Func d) {
+        Var x("ix"), y("iy");
+        Func out("interleaved_demosaic");
+        Expr is_x_even = (x % 2 == 0);
+        Expr is_y_even = (y % 2 == 0);
+        Expr half_x = x / 2;
+        Expr half_y = y / 2;
+        out(x, y) = select(is_y_even,
+                           select(is_x_even, a(half_x, half_y), b(half_x, half_y)),
+                           select(is_x_even, c(half_x, half_y), d(half_x, half_y)));
+        return out;
+    }
+
+    void build_simple(Func deinterleaved, Var x, Var y, Var c) {
+        // This is a Float(32) implementation of the original demosaic algorithm.
+        // Operating in float prevents integer underflow, which is a major source of artifacts.
+        Func g_gr, r_r, b_b, g_gb;
+        g_gr(qx, qy) = deinterleaved(qx, qy, 0);
+        r_r(qx, qy)  = deinterleaved(qx, qy, 1);
+        b_b(qx, qy)  = deinterleaved(qx, qy, 2);
+        g_gb(qx, qy) = deinterleaved(qx, qy, 3);
+
+        // Interpolate green at red and blue sites
+        Func g_at_r("g_at_r"), g_at_b("g_at_b");
+        Expr g_v_r = (g_gb(qx, qy - 1) + g_gb(qx, qy)) * 0.5f;
+        Expr g_h_r = (g_gr(qx + 1, qy) + g_gr(qx, qy)) * 0.5f;
+        Expr grad_v_r = abs(g_gb(qx, qy - 1) - g_gb(qx, qy));
+        Expr grad_h_r = abs(g_gr(qx + 1, qy) - g_gr(qx, qy));
+        g_at_r(qx, qy) = select(grad_h_r < grad_v_r, g_h_r, g_v_r);
+
+        Expr g_v_b = (g_gr(qx, qy + 1) + g_gr(qx, qy)) * 0.5f;
+        Expr g_h_b = (g_gb(qx - 1, qy) + g_gb(qx, qy)) * 0.5f;
+        Expr grad_v_b = abs(g_gr(qx, qy + 1) - g_gr(qx, qy));
+        Expr grad_h_b = abs(g_gb(qx - 1, qy) - g_gb(qx, qy));
+        g_at_b(qx, qy) = select(grad_h_b < grad_v_b, g_h_b, g_v_b);
+        quarter_res_intermediates.push_back(g_at_r);
+        quarter_res_intermediates.push_back(g_at_b);
+
+        // Interpolate R and B at green sites, using green correction
+        Func r_at_gr, b_at_gr, r_at_gb, b_at_gb;
+        Expr r_avg = (r_r(qx - 1, qy) + r_r(qx, qy)) * 0.5f;
+        Expr g_avg = (g_at_r(qx, qy) + g_at_r(qx-1, qy)) * 0.5f;
+        r_at_gr(qx, qy) = r_avg + g_gr(qx, qy) - g_avg;
+
+        Expr b_avg = (b_b(qx, qy) + b_b(qx, qy-1)) * 0.5f;
+        g_avg = (g_at_b(qx, qy) + g_at_b(qx, qy-1)) * 0.5f;
+        b_at_gr(qx, qy) = b_avg + g_gr(qx, qy) - g_avg;
+        
+        r_avg = (r_r(qx, qy) + r_r(qx, qy+1)) * 0.5f;
+        g_avg = (g_at_r(qx, qy) + g_at_r(qx, qy+1)) * 0.5f;
+        r_at_gb(qx, qy) = r_avg + g_gb(qx, qy) - g_avg;
+
+        b_avg = (b_b(qx, qy) + b_b(qx+1, qy)) * 0.5f;
+        g_avg = (g_at_b(qx, qy) + g_at_b(qx+1, qy)) * 0.5f;
+        b_at_gb(qx, qy) = b_avg + g_gb(qx, qy) - g_avg;
+
+        // Interpolate R at B sites and B at R sites
+        Func r_at_b, b_at_r;
+        Expr r_p_b = (r_r(qx, qy) + r_r(qx-1, qy+1)) * 0.5f;
+        Expr g_p_b = (g_at_r(qx, qy) + g_at_r(qx-1, qy+1)) * 0.5f;
+        Expr r_n_b = (r_r(qx-1, qy) + r_r(qx, qy+1)) * 0.5f;
+        Expr g_n_b = (g_at_r(qx-1, qy) + g_at_r(qx, qy+1)) * 0.5f;
+        r_at_b(qx, qy) = select(abs(r_p_b-g_p_b) < abs(r_n_b-g_n_b), r_p_b + g_at_b(qx, qy) - g_p_b, r_n_b + g_at_b(qx, qy) - g_n_b);
+
+        Expr b_p_r = (b_b(qx, qy) + b_b(qx+1, qy-1)) * 0.5f;
+        Expr g_p_r = (g_at_b(qx, qy) + g_at_b(qx+1, qy-1)) * 0.5f;
+        Expr b_n_r = (b_b(qx+1, qy) + b_b(qx, qy-1)) * 0.5f;
+        Expr g_n_r = (g_at_b(qx+1, qy) + g_at_b(qx, qy-1)) * 0.5f;
+        b_at_r(qx, qy) = select(abs(b_p_r-g_p_r) < abs(b_n_r-g_n_r), b_p_r + g_at_r(qx, qy) - g_p_r, b_n_r + g_at_r(qx, qy) - g_n_r);
+
+        // Interleave the channels back to full resolution
+        Func r_full = interleave(r_at_gr, r_r, r_at_b, r_at_gb);
+        Func g_full = interleave(g_gr, g_at_r, g_at_b, g_gb);
+        Func b_full = interleave(b_at_gr, b_at_r, b_b, b_at_gb);
+        
+        output(x, y, c) = mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)});
+    }
+    
+    void build_vhg(Func deinterleaved, Var x, Var y, Var c) {
+        // A VHG (Variable Hue Gradient) Demosaic implementation.
+        // It works by interpolating color differences (hue) instead of absolute values,
+        // which helps reduce zippered artifacts along edges.
+        Func g_gr, r_r, b_b, g_gb;
+        g_gr(qx, qy) = deinterleaved(qx, qy, 0);
+        r_r(qx, qy)  = deinterleaved(qx, qy, 1);
+        b_b(qx, qy)  = deinterleaved(qx, qy, 2);
+        g_gb(qx, qy) = deinterleaved(qx, qy, 3);
+        
+        // 1. Interpolate G everywhere first (same as simple method)
+        Func g_at_r("g_at_r_vhg"), g_at_b("g_at_b_vhg");
+        Expr g_v_r = (g_gb(qx, qy - 1) + g_gb(qx, qy)) * 0.5f;
+        Expr g_h_r = (g_gr(qx + 1, qy) + g_gr(qx, qy)) * 0.5f;
+        Expr grad_v_r = abs(g_gb(qx, qy - 1) - g_gb(qx, qy));
+        Expr grad_h_r = abs(g_gr(qx + 1, qy) - g_gr(qx, qy));
+        g_at_r(qx, qy) = select(grad_h_r < grad_v_r, g_h_r, g_v_r);
+
+        Expr g_v_b = (g_gr(qx, qy + 1) + g_gr(qx, qy)) * 0.5f;
+        Expr g_h_b = (g_gb(qx - 1, qy) + g_gb(qx, qy)) * 0.5f;
+        Expr grad_v_b = abs(g_gr(qx, qy + 1) - g_gr(qx, qy));
+        Expr grad_h_b = abs(g_gb(qx - 1, qy) - g_gb(qx, qy));
+        g_at_b(qx, qy) = select(grad_h_b < grad_v_b, g_h_b, g_v_b);
+        quarter_res_intermediates.push_back(g_at_r);
+        quarter_res_intermediates.push_back(g_at_b);
+        
+        Func g_full = interleave(g_gr, g_at_r, g_at_b, g_gb);
+
+        // 2. Create hue maps (color differences) at R and B sites
+        Func R_minus_G("R_minus_G"), B_minus_G("B_minus_G");
+        R_minus_G(qx, qy) = r_r(qx, qy) - g_at_r(qx, qy);
+        B_minus_G(qx, qy) = b_b(qx, qy) - g_at_b(qx, qy);
+
+        // 3. Interpolate hue maps everywhere
+        Func R_minus_G_interp("R_minus_G_interp"), B_minus_G_interp("B_minus_G_interp");
+        Expr R_G_h = (R_minus_G(qx, qy) + R_minus_G(qx-1, qy)) * 0.5f;
+        Expr R_G_v = (R_minus_G(qx, qy) + R_minus_G(qx, qy-1)) * 0.5f;
+        Expr R_G_grad_h = absd(R_minus_G(qx, qy), R_minus_G(qx-1, qy));
+        Expr R_G_grad_v = absd(R_minus_G(qx, qy), R_minus_G(qx, qy-1));
+        R_minus_G_interp(qx, qy) = select(R_G_grad_h < R_G_grad_v, R_G_h, R_G_v);
+
+        Expr B_G_h = (B_minus_G(qx, qy) + B_minus_G(qx-1, qy)) * 0.5f;
+        Expr B_G_v = (B_minus_G(qx, qy) + B_minus_G(qx, qy-1)) * 0.5f;
+        Expr B_G_grad_h = absd(B_minus_G(qx, qy), B_minus_G(qx-1, qy));
+        Expr B_G_grad_v = absd(B_minus_G(qx, qy), B_minus_G(qx, qy-1));
+        B_minus_G_interp(qx, qy) = select(B_G_grad_h < B_G_grad_v, B_G_h, B_G_v);
+        
+        Func R_minus_G_full = interleave(R_minus_G_interp, R_minus_G, R_minus_G_interp, R_minus_G_interp);
+        Func B_minus_G_full = interleave(B_minus_G_interp, B_minus_G_interp, B_minus_G, B_minus_G_interp);
+
+        // 4. Reconstruct R and B by adding back the full-res Green channel
+        Func r_full, b_full;
+        r_full(x, y) = R_minus_G_full(x, y) + g_full(x, y);
+        b_full(x, y) = B_minus_G_full(x, y) + g_full(x, y);
+
+        output(x, y, c) = mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)});
+    }
+
 public:
     // The final output Func of this stage
     Func output;
-    // The intermediate Funcs that need to be scheduled by the parent
-    std::vector<Func> intermediates;
+    // The full-resolution algorithm outputs, exposed for scheduling
+    Func simple_output;
+    Func vhg_output;
+    // The quarter-resolution intermediate Funcs that need to be scheduled by the parent
+    std::vector<Func> quarter_res_intermediates;
     // The Vars used to define the quarter-sized intermediates, exposed for scheduling
     Var qx, qy;
 
-    DemosaicBuilder(Func deinterleaved, Var x, Var y, Var c) : qx("d_qx"), qy("d_qy") {
-#ifdef NO_DEMOSAIC
-        output = Func("demosaiced_dummy");
+    DemosaicBuilder(Func deinterleaved, Var x, Var y, Var c, Halide::Expr algorithm, Halide::Expr width, Halide::Expr height)
+        : qx("d_qx"), qy("d_qy")
+    {
+        // The input deinterleaved Func is on a quarter-sized domain. To handle
+        // boundary conditions robustly for different algorithms, we'll clamp it.
+        // The width and height are passed in as Exprs from the generator.
+        Region bounds = {{Expr(0), width}, {Expr(0), height}, {Expr(0), 4}};
+        Func deinterleaved_clamped = Halide::BoundaryConditions::repeat_edge(deinterleaved, bounds);
         
-        // Dummy stage: A real demosaic converts a (w/2, h/2, 4) image to a
-        // (w, h, 3) image. This dummy must do the same to maintain pipeline
-        // integrity. We simply take the R, G, B channels and ignore the second G.
-        // The output size is implicitly handled by how Halide computes it.
-        Expr r_channel = deinterleaved(x/2, y/2, 1);
-        Expr g_channel = avg(deinterleaved(x/2, y/2, 0), deinterleaved(x/2, y/2, 3));
-        Expr b_channel = deinterleaved(x/2, y/2, 2);
-        output(x, y, c) = cast<uint16_t>(mux(c, {r_channel, g_channel, b_channel}));
-        // No intermediates in the dummy version.
+        // Initialize the public Func members that will hold the algorithm outputs
+        this->simple_output = Func("demosaiced_simple");
+        this->vhg_output = Func("demosaiced_vhg");
+        
+        // Build the simple path, which will define `this->simple_output`
+        this->output = this->simple_output; // Redirect member
+        build_simple(deinterleaved_clamped, x, y, c);
+        std::vector<Func> simple_intermediates_list = this->quarter_res_intermediates;
+        
+        // Build the VHG path, which will define `this->vhg_output`
+        this->output = this->vhg_output; // Redirect member
+        this->quarter_res_intermediates.clear();
+        build_vhg(deinterleaved_clamped, x, y, c);
+        std::vector<Func> vhg_intermediates_list = this->quarter_res_intermediates;
 
-#else
-        Func r_r("r_r"), g_gr("g_gr"), g_gb("g_gb"), b_b("b_b");
-        g_gr(qx, qy) = deinterleaved(qx, qy, 0);
-        r_r(qx, qy) = deinterleaved(qx, qy, 1);
-        b_b(qx, qy) = deinterleaved(qx, qy, 2);
-        g_gb(qx, qy) = deinterleaved(qx, qy, 3);
+        // Combine the lists of quarter-res intermediates for scheduling
+        this->quarter_res_intermediates = simple_intermediates_list;
+        this->quarter_res_intermediates.insert(this->quarter_res_intermediates.end(), vhg_intermediates_list.begin(), vhg_intermediates_list.end());
 
-        Func g_r("g_r"), g_b("g_b");
-        intermediates.push_back(g_r);
-        intermediates.push_back(g_b);
-
-        Expr gv_r = avg(g_gb(qx, qy - 1), g_gb(qx, qy));
-        Expr gvd_r = absd(g_gb(qx, qy - 1), g_gb(qx, qy));
-        Expr gh_r = avg(g_gr(qx + 1, qy), g_gr(qx, qy));
-        Expr ghd_r = absd(g_gr(qx + 1, qy), g_gr(qx, qy));
-        g_r(qx, qy) = select(ghd_r < gvd_r, gh_r, gv_r);
-
-        Expr gv_b = avg(g_gr(qx, qy + 1), g_gr(qx, qy));
-        Expr gvd_b = absd(g_gr(qx, qy + 1), g_gr(qx, qy));
-        Expr gh_b = avg(g_gb(qx - 1, qy), g_gb(qx, qy));
-        Expr ghd_b = absd(g_gb(qx - 1, qy), g_gb(qx, qy));
-        g_b(qx, qy) = select(ghd_b < gvd_b, gh_b, gv_b);
-
-        Func r_gr("r_gr"), b_gr("b_gr"), r_gb("r_gb"), b_gb("b_gb");
-        Expr green_correction_r_gr = g_gr(qx, qy) - avg(g_r(qx, qy), g_r(qx - 1, qy));
-        r_gr(qx, qy) = green_correction_r_gr + avg(r_r(qx - 1, qy), r_r(qx, qy));
-        Expr green_correction_b_gr = g_gr(qx, qy) - avg(g_b(qx, qy), g_b(qx, qy - 1));
-        b_gr(qx, qy) = green_correction_b_gr + avg(b_b(qx, qy), b_b(qx, qy - 1));
-        Expr green_correction_r_gb = g_gb(qx, qy) - avg(g_r(qx, qy), g_r(qx, qy + 1));
-        r_gb(qx, qy) = green_correction_r_gb + avg(r_r(qx, qy), r_r(qx, qy + 1));
-        Expr green_correction_b_gb = g_gb(qx, qy) - avg(g_b(qx, qy), g_b(qx + 1, qy));
-        b_gb(qx, qy) = green_correction_b_gb + avg(b_b(qx, qy), b_b(qx + 1, qy));
-
-        Func r_b("r_b"), b_r("b_r");
-        Expr green_correction_rp_b = g_b(qx, qy) - avg(g_r(qx, qy), g_r(qx - 1, qy + 1));
-        Expr rp_b = green_correction_rp_b + avg(r_r(qx, qy), r_r(qx - 1, qy + 1));
-        Expr rpd_b = absd(r_r(qx, qy), r_r(qx - 1, qy + 1));
-        Expr green_correction_rn_b = g_b(qx, qy) - avg(g_r(qx - 1, qy), g_r(qx, qy + 1));
-        Expr rn_b = green_correction_rn_b + avg(r_r(qx - 1, qy), r_r(qx, qy + 1));
-        Expr rnd_b = absd(r_r(qx - 1, qy), r_r(qx, qy + 1));
-        r_b(qx, qy) = select(rpd_b < rnd_b, rp_b, rn_b);
-        Expr green_correction_bp_r = g_r(qx, qy) - avg(g_b(qx, qy), g_b(qx + 1, qy - 1));
-        Expr bp_r = green_correction_bp_r + avg(b_b(qx, qy), b_b(qx + 1, qy - 1));
-        Expr bpd_r = absd(b_b(qx, qy), b_b(qx + 1, qy - 1));
-        Expr green_correction_bn_r = g_r(qx, qy) - avg(g_b(qx + 1, qy), g_b(qx, qy - 1));
-        Expr bn_r = green_correction_bn_r + avg(b_b(qx + 1, qy), b_b(qx, qy - 1));
-        Expr bnd_r = absd(b_b(qx + 1, qy), b_b(qx, qy - 1));
-        b_r(qx, qy) = select(bpd_r < bnd_r, bp_r, bn_r);
-
-        Func r_full("demosaic_r"), g_full("demosaic_g"), b_full("demosaic_b");
-        r_full = interleave_y(interleave_x(r_gr, r_r), interleave_x(r_b, r_gb));
-        g_full = interleave_y(interleave_x(g_gr, g_r), interleave_x(g_b, g_gb));
-        b_full = interleave_y(interleave_x(b_gr, b_r), interleave_x(b_b, b_gb));
-
-        output = Func("demosaiced");
-        output(x, y, c) = cast<uint16_t>(mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)}));
-#endif
+        // Define the final output Func which selects between the two algorithm outputs
+        this->output = Func("demosaiced");
+        this->output(x, y, c) = select(algorithm == 1, this->vhg_output(x, y, c),
+                                                      this->simple_output(x, y, c));
     }
 };
 

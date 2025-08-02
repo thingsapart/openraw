@@ -147,26 +147,30 @@ public:
             Expr C = clamped_norm_raw(tile_x, tile_y);
             Expr G = clamped_g_interp(tile_x, tile_y);
             Expr deltgrb = G - C;
+            
+            // This threshold prevents division by zero in flat areas (shadows, highlights)
+            // which is the likely cause of the visual artifacts.
+            const float den_thresh = 0.001f; 
 
             // --- Horizontal shifts (v=1) ---
             Expr gdiff_h = clamped_g_interp(tile_x + 1, tile_y) - clamped_g_interp(tile_x - 1, tile_y);
             Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f));
             Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f));
-            Expr shift_h_r = num_h_r / (den_h_r + 1e-5f);
+            Expr shift_h_r = select(den_h_r > den_thresh, num_h_r / den_h_r, 0.0f);
 
             Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f));
             Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f));
-            Expr shift_h_b = num_h_b / (den_h_b + 1e-5f);
+            Expr shift_h_b = select(den_h_b > den_thresh, num_h_b / den_h_b, 0.0f);
 
             // --- Vertical shifts (v=0) ---
             Expr gdiff_v = clamped_g_interp(tile_x, tile_y + 1) - clamped_g_interp(tile_x, tile_y - 1);
             Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f));
             Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f));
-            Expr shift_v_r = num_v_r / (den_v_r + 1e-5f);
+            Expr shift_v_r = select(den_v_r > den_thresh, num_v_r / den_v_r, 0.0f);
 
             Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f));
             Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f));
-            Expr shift_v_b = num_v_b / (den_v_b + 1e-5f);
+            Expr shift_v_b = select(den_v_b > den_thresh, num_v_b / den_v_b, 0.0f);
             
             const float bslim = 3.99f;
             // c=0 is R, c=1 is B

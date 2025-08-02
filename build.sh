@@ -1,5 +1,8 @@
 #!/bin/bash
-rm -rf build
-mkdir build && cd build
+if command -v "brew" >/dev/null 2>&1; then
+  ${HALIDE_PATH:`brew --prefix halide`}
+fi
+# rm -rf build
+mkdir build; cd build
 cmake ..
 cmake --build .

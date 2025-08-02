@@ -1,4 +1,6 @@
 README.md
+ARCH.md
 TODO.md
 src/*
+src/tests/*
 CMakeLists.txt

@@ -5,6 +5,8 @@
 #include "camera_pipe_auto_schedule.h"
 #endif
 
+#define BENCHMARK
+
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
@@ -34,6 +36,7 @@ void print_usage() {
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --exposure <factor>    Exposure multiplier (e.g., 2.0 is +1 stop). Default: 1.0.\n"
+           "  --demosaic <algo>      Demosaic algorithm: 'simple', 'vhg' (default: simple).\n"
            "  --saturation <factor>  Color saturation. 0=grayscale, 1=normal. Default: 1.0.\n"
            "  --saturation-algo <id> Saturation algorithm. 'hsl' or 'lab' (default: lab).\n"
            "  --black-point <val>    The input value that maps to black (default: 25.0).\n"
@@ -47,6 +50,7 @@ void print_usage() {
            "  --curve-mode <id>      Curve mode. 'luma' or 'rgb' (default: rgb).\n"
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
+           "  --tonemap <algo>       Tone mapping algorithm: 'linear', 'reinhard', 'filmic' (default: linear).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n"
            "  --help                 Display this help message.\n");
 }
@@ -86,6 +90,13 @@ int main(int argc, char **argv) {
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("exposure")) cfg.exposure = std::stof(args["exposure"]);
+        if (args.count("demosaic")) {
+            std::string algo = args["demosaic"];
+            std::transform(algo.begin(), algo.end(), algo.begin(), ::tolower);
+            if (algo == "simple") cfg.demosaic_algorithm = 0;
+            else if (algo == "vhg") cfg.demosaic_algorithm = 1;
+            else { fprintf(stderr, "Error: Unknown demosaic algorithm '%s'. Use 'simple' or 'vhg'.\n", args["demosaic"].c_str()); return 1; }
+        }
         if (args.count("saturation")) cfg.saturation = std::stof(args["saturation"]);
         if (args.count("saturation-algo")) {
             std::string algo = args["saturation-algo"];
@@ -111,6 +122,14 @@ int main(int argc, char **argv) {
         }
         if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
+        if (args.count("tonemap")) {
+            std::string algo = args["tonemap"];
+            std::transform(algo.begin(), algo.end(), algo.begin(), ::tolower);
+            if (algo == "linear") cfg.tonemap_algorithm = 0;
+            else if (algo == "reinhard") cfg.tonemap_algorithm = 1;
+            else if (algo == "filmic") cfg.tonemap_algorithm = 2;
+            else { fprintf(stderr, "Error: Unknown tonemap algorithm '%s'. Use 'linear', 'reinhard', or 'filmic'.\n", args["tonemap"].c_str()); return 1; }
+        }
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
     } catch (const std::exception& e) {
         fprintf(stderr, "Error parsing arguments: %s\n", e.what());
@@ -174,16 +193,16 @@ int main(int argc, char **argv) {
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
                     cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
-                    cfg.curve_mode, tone_curves_buf,
-                    cfg.sharpen, cfg.ca_strength, output);
+                    cfg.demosaic_algorithm, cfg.curve_mode, tone_curves_buf,
+                    cfg.sharpen, cfg.ca_strength, cfg.tonemap_algorithm, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 #else
     camera_pipe(input, matrix_3200, matrix_7000,
                 cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
-                cfg.curve_mode, tone_curves_buf,
-                cfg.sharpen, cfg.ca_strength, output);
+                cfg.demosaic_algorithm, cfg.curve_mode, tone_curves_buf,
+                cfg.sharpen, cfg.ca_strength, cfg.tonemap_algorithm, output);
     output.device_sync();
 #endif
 
@@ -194,16 +213,16 @@ int main(int argc, char **argv) {
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
                                   cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
-                                  cfg.curve_mode, tone_curves_buf,
-                                  cfg.sharpen, cfg.ca_strength, output);
+                                  cfg.demosaic_algorithm, cfg.curve_mode, tone_curves_buf,
+                                  cfg.sharpen, cfg.ca_strength, cfg.tonemap_algorithm, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
 #else
     camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, cfg.exposure, cfg.saturation, cfg.saturation_algorithm,
-                              cfg.curve_mode, tone_curves_buf,
-                              cfg.sharpen, cfg.ca_strength, output);
+                              cfg.demosaic_algorithm, cfg.curve_mode, tone_curves_buf,
+                              cfg.sharpen, cfg.ca_strength, cfg.tonemap_algorithm, output);
     output.device_sync();
 #endif
 #endif
