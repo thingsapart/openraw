@@ -22,6 +22,15 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     Func hsl_saturated("hsl_saturated");
     Func lab_saturated("lab_saturated");
 
+    // Both algorithms must operate on a normalized [0,1] range to work correctly.
+    // We normalize the 12-bit input data, apply the effect, then denormalize back to the original range.
+    const float norm_factor = 1.0f / 4095.0f;
+    const float denorm_factor = 4095.0f;
+
+    Expr r_norm = cast<float>(input(x, y, 0)) * norm_factor;
+    Expr g_norm = cast<float>(input(x, y, 1)) * norm_factor;
+    Expr b_norm = cast<float>(input(x, y, 2)) * norm_factor;
+
     // Helper lambda for fmod(a, b) -> a - b * floor(a / b)
     auto halide_fmod = [](Halide::Expr a, Halide::Expr b) {
         return a - b * Halide::floor(a / b);
@@ -29,20 +38,16 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
 
     // --- Algorithm 0: HSL-based Saturation ---
     {
-        Expr r_f = cast<float>(input(x, y, 0));
-        Expr g_f = cast<float>(input(x, y, 1));
-        Expr b_f = cast<float>(input(x, y, 2));
-
-        Expr c_max = max(r_f, g_f, b_f);
-        Expr c_min = min(r_f, g_f, b_f);
+        Expr c_max = max(r_norm, g_norm, b_norm);
+        Expr c_min = min(r_norm, g_norm, b_norm);
         Expr delta = c_max - c_min;
 
         Expr l = (c_max + c_min) / 2.0f;
         Expr s = select(delta < 1e-6f, 0.0f, delta / (1.0f - abs(2.0f * l - 1.0f)));
-
-        Expr h_intermediate = select(c_max == r_f, halide_fmod((g_f - b_f) / delta, 6.0f),
-                                select(c_max == g_f, (b_f - r_f) / delta + 2.0f,
-                                                     (r_f - g_f) / delta + 4.0f));
+        
+        Expr h_intermediate = select(c_max == r_norm, halide_fmod((g_norm - b_norm) / delta, 6.0f),
+                                select(c_max == g_norm, (b_norm - r_norm) / delta + 2.0f,
+                                                     (r_norm - g_norm) / delta + 4.0f));
         Expr h_before_wrap = select(delta < 1e-6f, 0.0f, 60.0f * h_intermediate);
         Expr h = select(h_before_wrap < 0.0f, h_before_wrap + 360.0f, h_before_wrap);
 
@@ -51,14 +56,14 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr c_hsl = (1.0f - abs(2.0f * l - 1.0f)) * new_s;
         Expr x_hsl = c_hsl * (1.0f - abs(halide_fmod(h / 60.0f, 2.0f) - 1.0f));
         Expr m_hsl = l - c_hsl / 2.0f;
-
+        
         Expr r_hsl = select(h < 60.0f, c_hsl, select(h < 120.0f, x_hsl, select(h < 180.0f, 0.0f, select(h < 240.0f, 0.0f, select(h < 300.0f, x_hsl, c_hsl)))));
         Expr g_hsl = select(h < 60.0f, x_hsl, select(h < 120.0f, c_hsl, select(h < 180.0f, c_hsl, select(h < 240.0f, x_hsl, select(h < 300.0f, 0.0f, 0.0f)))));
         Expr b_hsl = select(h < 60.0f, 0.0f, select(h < 120.0f, 0.0f, select(h < 180.0f, x_hsl, select(h < 240.0f, c_hsl, select(h < 300.0f, c_hsl, x_hsl)))));
 
-        Expr r_new = (r_hsl + m_hsl);
-        Expr g_new = (g_hsl + m_hsl);
-        Expr b_new = (b_hsl + m_hsl);
+        Expr r_new = (r_hsl + m_hsl) * denorm_factor;
+        Expr g_new = (g_hsl + m_hsl) * denorm_factor;
+        Expr b_new = (b_hsl + m_hsl) * denorm_factor;
 
         hsl_saturated(x, y, c) = mux(c, {
             cast<int16_t>(clamp(r_new, 0, 32767)),
@@ -69,14 +74,6 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
 
     // --- Algorithm 1: L*a*b*-based Saturation ---
     {
-        // The data is already linear from the sensor. We just need to normalize it.
-        // Assume a working range of [0, 16383] (14-bit) for normalization.
-        // This is a heuristic but practical for this pipeline.
-        const float norm_factor = 1.0f / 16383.0f;
-        Expr r_norm = cast<float>(input(x, y, 0)) * norm_factor;
-        Expr g_norm = cast<float>(input(x, y, 1)) * norm_factor;
-        Expr b_norm = cast<float>(input(x, y, 2)) * norm_factor;
-
         // sRGB to XYZ conversion matrix
         Expr x_xyz = 0.4124f * r_norm + 0.3576f * g_norm + 0.1805f * b_norm;
         Expr y_xyz = 0.2126f * r_norm + 0.7152f * g_norm + 0.0722f * b_norm;
@@ -96,11 +93,9 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr a = 500.0f * (fx - fy);
         Expr b = 200.0f * (fy - fz);
 
-        // Boost chroma (a and b components)
         Expr new_a = a * saturation;
         Expr new_b = b * saturation;
 
-        // L*a*b* to XYZ
         auto f_inv = [&](Expr t) {
             return select(t > delta_val, t * t * t, 3.0f * delta_val * delta_val * (t - 4.0f / 29.0f));
         };
@@ -112,13 +107,10 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr y_new_xyz = f_inv(fy_new) * yn;
         Expr z_new_xyz = f_inv(fz_new) * zn;
         
-        // XYZ to sRGB
         Expr r_new_norm =  3.2406f * x_new_xyz - 1.5372f * y_new_xyz - 0.4986f * z_new_xyz;
         Expr g_new_norm = -0.9689f * x_new_xyz + 1.8758f * y_new_xyz + 0.0415f * z_new_xyz;
         Expr b_new_norm =  0.0557f * x_new_xyz - 0.2040f * y_new_xyz + 1.0570f * z_new_xyz;
 
-        // Denormalize and clamp
-        const float denorm_factor = 1.0f / norm_factor;
         lab_saturated(x, y, c) = mux(c, {
             cast<int16_t>(clamp(r_new_norm * denorm_factor, 0, 32767)),
             cast<int16_t>(clamp(g_new_norm * denorm_factor, 0, 32767)),
@@ -127,7 +119,6 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     }
 
     // --- Final Selection ---
-    // Use the `algorithm` parameter to select which result to use.
     saturated(x, y, c) = select(algorithm == 0,
                                 hsl_saturated(x, y, c),
                                 lab_saturated(x, y, c));

@@ -141,6 +141,16 @@ int main(int argc, char **argv) {
     ToneCurveUtils curve_util(cfg);
     Buffer<uint8_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
 
+    // --- DEBUG: Print LUT values to stdout ---
+    printf("\n--- Tone Curve LUT Samples ---\n");
+    printf("Input, R_Out, G_Out, B_Out\n");
+    for (int i = 0; i < tone_curves_buf.width(); i += tone_curves_buf.width() / 20) {
+        printf("%d, %d, %d, %d\n", i, tone_curves_buf(i, 0), tone_curves_buf(i, 1), tone_curves_buf(i, 2));
+    }
+    printf("%d, %d, %d, %d\n", tone_curves_buf.width()-1, tone_curves_buf(tone_curves_buf.width()-1, 0), tone_curves_buf(tone_curves_buf.width()-1, 1), tone_curves_buf(tone_curves_buf.width()-1, 2));
+    printf("--------------------------\n\n");
+    // --- End Debug ---
+
     // These color matrices are for the sensor in the Nokia N900 and are
     // taken from the FCam source.
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},

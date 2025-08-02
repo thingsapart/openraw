@@ -57,11 +57,11 @@ public:
 
         // Stage 1: Hot pixel suppression
         Func denoised = pipeline_hot_pixel_suppression(shifted, x, y);
-        
+
         // Stage 1.5: Chromatic Aberration Correction
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,
-                                    1, 1023, // Placeholder black/white levels
+                                    1, 4095, // Use a 12-bit range
                                     out_width_est, out_height_est,
                                     get_target(), using_autoscheduler());
         Func ca_corrected = ca_builder.output;
@@ -170,7 +170,7 @@ public:
                 .gpu_threads(x, y)
                 .reorder(c, x, y)
                 .unroll(c);
-            
+
             ca_corrected.compute_at(processed, x).gpu_threads(x, y);
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
@@ -179,7 +179,7 @@ public:
                     f.compute_at(processed, x).gpu_threads(x,y);
                 }
             }
-            
+
             denoised.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
 
         } else {
@@ -218,7 +218,7 @@ public:
                 .vectorize(xi)
                 .unroll(yi)
                 .unroll(c);
-            
+
             saturated.compute_at(curved, x)
                 .reorder(c, x, y)
                 .vectorize(x)
@@ -238,7 +238,7 @@ public:
                 .vectorize(x)
                 .reorder(c, x, y)
                 .unroll(c);
-            
+
             Var demosaic_intermediate_v = demosaic_builder.qx;
             for (Func f : demosaic_builder.intermediates) {
                  f.compute_at(processed, yi)
