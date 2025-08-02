@@ -26,6 +26,7 @@ struct ProcessConfig {
     std::string output_path;
     float color_temp = 3700.0f;
     float tint = 0.0f;
+    float exposure = 1.0f;
     float gamma = 2.2f;
     float contrast = 50.0f;
     float sharpen = 1.0f;
@@ -42,6 +43,7 @@ void print_usage() {
            "Options:\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
+           "  --exposure <factor>    Exposure multiplier (e.g., 2.0 is +1 stop). Default: 1.0.\n"
            "  --gamma <val>          Gamma correction value (default: 2.2).\n"
            "  --contrast <val>       Contrast enhancement value (default: 50.0).\n"
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
@@ -84,6 +86,7 @@ int main(int argc, char **argv) {
         if (args.count("output")) cfg.output_path = args["output"];
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
+        if (args.count("exposure")) cfg.exposure = std::stof(args["exposure"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
         if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
         if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
@@ -141,14 +144,14 @@ int main(int argc, char **argv) {
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe(input, matrix_3200, matrix_7000,
-                    cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                    cfg.color_temp, cfg.tint, cfg.exposure, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                     output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 #else
     camera_pipe(input, matrix_3200, matrix_7000,
-                cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                cfg.color_temp, cfg.tint, cfg.exposure, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                 output);
     output.device_sync();
 #endif
@@ -159,14 +162,14 @@ int main(int argc, char **argv) {
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                                  cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                                  cfg.color_temp, cfg.tint, cfg.exposure, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                                   output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
 #else
     camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                              cfg.color_temp, cfg.tint, cfg.exposure, cfg.gamma, cfg.contrast, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                               output);
     output.device_sync();
 #endif

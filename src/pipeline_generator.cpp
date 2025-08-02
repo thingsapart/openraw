@@ -10,6 +10,7 @@
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h"
+#include "stage_exposure.h"
 #include "stage_color_correct.h"
 #include "stage_apply_curve.h"
 #include "stage_sharpen.h"
@@ -33,6 +34,7 @@ public:
     Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
     Input<float> color_temp{"color_temp"};
     Input<float> tint{"tint"};
+    Input<float> exposure{"exposure"};
     Input<float> gamma{"gamma"};
     Input<float> contrast{"contrast"};
     Input<float> sharpen_strength{"sharpen_strength"};
@@ -70,8 +72,11 @@ public:
         DemosaicBuilder demosaic_builder(deinterleaved, x, y, c);
         Func demosaiced = demosaic_builder.output;
 
+        // Stage 3.5: Exposure adjustment
+        Func exposed = pipeline_exposure(demosaiced, exposure, x, y, c);
+
         // Stage 4: Color correction
-        Func corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
+        Func corrected = pipeline_color_correct(exposed, matrix_3200, matrix_7000,
                                                 color_temp, tint, x, y, c,
                                                 get_target(), using_autoscheduler());
 
@@ -96,6 +101,7 @@ public:
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
+        exposure.set_estimate(1.0f);
         gamma.set_estimate(2.0);
         contrast.set_estimate(50);
         sharpen_strength.set_estimate(1.0);
@@ -138,6 +144,10 @@ public:
                 .gpu_threads(x, y);
 
             corrected.compute_at(processed, x)
+                .unroll(x, 2)
+                .gpu_threads(x, y);
+
+            exposed.compute_at(processed, x)
                 .unroll(x, 2)
                 .gpu_threads(x, y);
 
@@ -206,6 +216,11 @@ public:
                 .vectorize(x)
                 .unroll(c);
 
+            exposed.compute_at(curved, x)
+                .reorder(c, x, y)
+                .vectorize(x)
+                .unroll(c);
+
             demosaiced.compute_at(curved, x)
                 .vectorize(x)
                 .reorder(c, x, y)
@@ -247,6 +262,7 @@ public:
                 denoised.align_storage(x, vec);
                 ca_corrected.align_storage(x, vec);
                 deinterleaved.align_storage(x, vec);
+                exposed.align_storage(x, vec);
                 corrected.align_storage(x, vec);
             }
 
@@ -297,16 +313,20 @@ public:
                 cfg.labels = {{"demosaiced"}};
                 demosaiced.add_trace_tag(cfg.to_trace_tag());
 
-                cfg.pos = {1400, 360};
+                cfg.pos = {1350, 360};
+                cfg.labels = {{"exposure-adj"}};
+                exposed.add_trace_tag(cfg.to_trace_tag());
+
+                cfg.pos = {1560, 360};
                 cfg.labels = {{"color-corrected"}};
                 corrected.add_trace_tag(cfg.to_trace_tag());
 
                 cfg.max = 256;
-                cfg.pos = {1660, 360};
+                cfg.pos = {1770, 360};
                 cfg.labels = {{"gamma-corrected"}};
                 curved.add_trace_tag(cfg.to_trace_tag());
                 
-                cfg.pos = {1920, 360};
+                cfg.pos = {1980, 360};
                 cfg.labels = {{"sharpened"}};
                 processed.add_trace_tag(cfg.to_trace_tag());
             }

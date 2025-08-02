@@ -6,7 +6,7 @@ A list of potential features to add to the RAW processing pipeline, sorted by pr
 
 These are fundamental adjustments that are missing and provide the most value for the effort.
 
-- [ ] **Exposure Control:** Add a global multiplier to brighten or darken the image in linear space before the tone curve.
+- [x] **Exposure Control:** Add a global multiplier to brighten or darken the image in linear space before the tone curve.
 - [ ] **Global Saturation:** Add a master saturation control to increase or decrease the intensity of all colors.
 - [ ] **Blacks & Whites Sliders:** Expose controls to adjust the black and white clip points of the tone curve.
 - [ ] **Vignette Correction:** Implement a basic radial darkening or brightening to counteract or add a lens vignette effect.
