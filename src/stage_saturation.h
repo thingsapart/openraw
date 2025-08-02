@@ -3,12 +3,15 @@
 
 #include "Halide.h"
 
+// This stage contains two different saturation algorithms, selectable at runtime.
+// 0: HSL-based saturation. Fast but less perceptually accurate.
+// 1: L*a*b*-based chroma boosting. Slower but more perceptually uniform.
 inline Halide::Func pipeline_saturation(Halide::Func input,
                                         Halide::Expr saturation,
+                                        Halide::Expr algorithm,
                                         Halide::Var x, Halide::Var y, Halide::Var c) {
 #ifdef NO_SATURATION
     Halide::Func saturated("saturated_dummy");
-    // Dummy pass-through stage
     saturated(x, y, c) = input(x, y, c);
     return saturated;
 #else
@@ -16,30 +19,118 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     using namespace Halide::ConciseCasts;
 
     Func saturated("saturated");
+    Func hsl_saturated("hsl_saturated");
+    Func lab_saturated("lab_saturated");
 
-    // Get the R, G, B components. They are int16.
-    Expr r = input(x, y, 0);
-    Expr g = input(x, y, 1);
-    Expr b = input(x, y, 2);
+    // Helper lambda for fmod(a, b) -> a - b * floor(a / b)
+    auto halide_fmod = [](Halide::Expr a, Halide::Expr b) {
+        return a - b * Halide::floor(a / b);
+    };
 
-    // Calculate luminance. Use float for precision.
-    // The coefficients are for sRGB and are a good standard.
-    Expr r_f = cast<float>(r);
-    Expr g_f = cast<float>(g);
-    Expr b_f = cast<float>(b);
-    Expr luma = 0.299f * r_f + 0.587f * g_f + 0.114f * b_f;
+    // --- Algorithm 0: HSL-based Saturation ---
+    {
+        Expr r_f = cast<float>(input(x, y, 0));
+        Expr g_f = cast<float>(input(x, y, 1));
+        Expr b_f = cast<float>(input(x, y, 2));
 
-    // Interpolate between the luma and the original color
-    Expr r_new = luma + saturation * (r_f - luma);
-    Expr g_new = luma + saturation * (g_f - luma);
-    Expr b_new = luma + saturation * (b_f - luma);
+        Expr c_max = max(r_f, g_f, b_f);
+        Expr c_min = min(r_f, g_f, b_f);
+        Expr delta = c_max - c_min;
 
-    // Create the new pixel and clamp back to int16 range.
-    Expr r_sat = cast<int16_t>(clamp(r_new, 0.0f, 32767.0f));
-    Expr g_sat = cast<int16_t>(clamp(g_new, 0.0f, 32767.0f));
-    Expr b_sat = cast<int16_t>(clamp(b_new, 0.0f, 32767.0f));
+        Expr l = (c_max + c_min) / 2.0f;
+        Expr s = select(delta < 1e-6f, 0.0f, delta / (1.0f - abs(2.0f * l - 1.0f)));
 
-    saturated(x, y, c) = mux(c, {r_sat, g_sat, b_sat});
+        Expr h_intermediate = select(c_max == r_f, halide_fmod((g_f - b_f) / delta, 6.0f),
+                                select(c_max == g_f, (b_f - r_f) / delta + 2.0f,
+                                                     (r_f - g_f) / delta + 4.0f));
+        Expr h_before_wrap = select(delta < 1e-6f, 0.0f, 60.0f * h_intermediate);
+        Expr h = select(h_before_wrap < 0.0f, h_before_wrap + 360.0f, h_before_wrap);
+
+        Expr new_s = clamp(s * saturation, 0.0f, 1.0f);
+
+        Expr c_hsl = (1.0f - abs(2.0f * l - 1.0f)) * new_s;
+        Expr x_hsl = c_hsl * (1.0f - abs(halide_fmod(h / 60.0f, 2.0f) - 1.0f));
+        Expr m_hsl = l - c_hsl / 2.0f;
+
+        Expr r_hsl = select(h < 60.0f, c_hsl, select(h < 120.0f, x_hsl, select(h < 180.0f, 0.0f, select(h < 240.0f, 0.0f, select(h < 300.0f, x_hsl, c_hsl)))));
+        Expr g_hsl = select(h < 60.0f, x_hsl, select(h < 120.0f, c_hsl, select(h < 180.0f, c_hsl, select(h < 240.0f, x_hsl, select(h < 300.0f, 0.0f, 0.0f)))));
+        Expr b_hsl = select(h < 60.0f, 0.0f, select(h < 120.0f, 0.0f, select(h < 180.0f, x_hsl, select(h < 240.0f, c_hsl, select(h < 300.0f, c_hsl, x_hsl)))));
+
+        Expr r_new = (r_hsl + m_hsl);
+        Expr g_new = (g_hsl + m_hsl);
+        Expr b_new = (b_hsl + m_hsl);
+
+        hsl_saturated(x, y, c) = mux(c, {
+            cast<int16_t>(clamp(r_new, 0, 32767)),
+            cast<int16_t>(clamp(g_new, 0, 32767)),
+            cast<int16_t>(clamp(b_new, 0, 32767))
+        });
+    }
+
+    // --- Algorithm 1: L*a*b*-based Saturation ---
+    {
+        // The data is already linear from the sensor. We just need to normalize it.
+        // Assume a working range of [0, 16383] (14-bit) for normalization.
+        // This is a heuristic but practical for this pipeline.
+        const float norm_factor = 1.0f / 16383.0f;
+        Expr r_norm = cast<float>(input(x, y, 0)) * norm_factor;
+        Expr g_norm = cast<float>(input(x, y, 1)) * norm_factor;
+        Expr b_norm = cast<float>(input(x, y, 2)) * norm_factor;
+
+        // sRGB to XYZ conversion matrix
+        Expr x_xyz = 0.4124f * r_norm + 0.3576f * g_norm + 0.1805f * b_norm;
+        Expr y_xyz = 0.2126f * r_norm + 0.7152f * g_norm + 0.0722f * b_norm;
+        Expr z_xyz = 0.0193f * r_norm + 0.1192f * g_norm + 0.9505f * b_norm;
+
+        // XYZ to L*a*b* conversion (D65 whitepoint)
+        const float xn = 0.95047f, yn = 1.0f, zn = 1.08883f;
+        const float delta_val = 6.0f / 29.0f;
+        auto f = [&](Expr t) {
+            return select(t > delta_val * delta_val * delta_val, pow(t, 1.0f / 3.0f), t / (3.0f * delta_val * delta_val) + 4.0f / 29.0f);
+        };
+        Expr fx = f(x_xyz / xn);
+        Expr fy = f(y_xyz / yn);
+        Expr fz = f(z_xyz / zn);
+
+        Expr L = 116.0f * fy - 16.0f;
+        Expr a = 500.0f * (fx - fy);
+        Expr b = 200.0f * (fy - fz);
+
+        // Boost chroma (a and b components)
+        Expr new_a = a * saturation;
+        Expr new_b = b * saturation;
+
+        // L*a*b* to XYZ
+        auto f_inv = [&](Expr t) {
+            return select(t > delta_val, t * t * t, 3.0f * delta_val * delta_val * (t - 4.0f / 29.0f));
+        };
+        Expr fy_new = (L + 16.0f) / 116.0f;
+        Expr fx_new = new_a / 500.0f + fy_new;
+        Expr fz_new = fy_new - new_b / 200.0f;
+        
+        Expr x_new_xyz = f_inv(fx_new) * xn;
+        Expr y_new_xyz = f_inv(fy_new) * yn;
+        Expr z_new_xyz = f_inv(fz_new) * zn;
+        
+        // XYZ to sRGB
+        Expr r_new_norm =  3.2406f * x_new_xyz - 1.5372f * y_new_xyz - 0.4986f * z_new_xyz;
+        Expr g_new_norm = -0.9689f * x_new_xyz + 1.8758f * y_new_xyz + 0.0415f * z_new_xyz;
+        Expr b_new_norm =  0.0557f * x_new_xyz - 0.2040f * y_new_xyz + 1.0570f * z_new_xyz;
+
+        // Denormalize and clamp
+        const float denorm_factor = 1.0f / norm_factor;
+        lab_saturated(x, y, c) = mux(c, {
+            cast<int16_t>(clamp(r_new_norm * denorm_factor, 0, 32767)),
+            cast<int16_t>(clamp(g_new_norm * denorm_factor, 0, 32767)),
+            cast<int16_t>(clamp(b_new_norm * denorm_factor, 0, 32767))
+        });
+    }
+
+    // --- Final Selection ---
+    // Use the `algorithm` parameter to select which result to use.
+    saturated(x, y, c) = select(algorithm == 0,
+                                hsl_saturated(x, y, c),
+                                lab_saturated(x, y, c));
 
     return saturated;
 #endif

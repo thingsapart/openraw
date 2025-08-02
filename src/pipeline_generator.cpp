@@ -37,12 +37,11 @@ public:
     Input<float> tint{"tint"};
     Input<float> exposure{"exposure"};
     Input<float> saturation{"saturation"};
-    Input<float> gamma{"gamma"};
-    Input<float> contrast{"contrast"};
+    Input<int> saturation_algorithm{"saturation_algorithm"};
+    Input<int> curve_mode{"curve_mode"};
+    Input<Buffer<uint8_t, 2>> tone_curves{"tone_curves"};
     Input<float> sharpen_strength{"sharpen_strength"};
     Input<float> ca_correction_strength{"ca_correction_strength"};
-    Input<int> blackLevel{"blackLevel"};
-    Input<int> whiteLevel{"whiteLevel"};
     Output<Buffer<uint8_t, 3>> processed{"processed"};
 
     void generate() {
@@ -62,7 +61,7 @@ public:
         // Stage 1.5: Chromatic Aberration Correction
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,
-                                    blackLevel, whiteLevel,
+                                    1, 1023, // Placeholder black/white levels
                                     out_width_est, out_height_est,
                                     get_target(), using_autoscheduler());
         Func ca_corrected = ca_builder.output;
@@ -83,12 +82,12 @@ public:
                                                 get_target(), using_autoscheduler());
 
         // Stage 4.5: Saturation adjustment
-        Func saturated = pipeline_saturation(corrected, saturation, x, y, c);
+        Func saturated = pipeline_saturation(corrected, saturation, saturation_algorithm, x, y, c);
 
-        // Stage 5: Apply tone curve (gamma, contrast)
-        Func curved = pipeline_apply_curve(saturated, blackLevel, whiteLevel,
-                                           contrast, gamma, x, y, c,
-                                           result_type, get_target(), using_autoscheduler());
+        // Stage 5: Apply tone curve
+        // Get the LUT extent from the Input buffer and pass it to the helper.
+        Expr lut_extent = tone_curves.dim(0).extent();
+        Func curved = pipeline_apply_curve(saturated, tone_curves, lut_extent, curve_mode, x, y, c);
 
         // Stage 6: Sharpen the image
         Func sharpened = pipeline_sharpen(curved, sharpen_strength, x, y, c,
@@ -108,12 +107,11 @@ public:
         tint.set_estimate(0.0f);
         exposure.set_estimate(1.0f);
         saturation.set_estimate(1.0f);
-        gamma.set_estimate(2.0);
-        contrast.set_estimate(50);
+        saturation_algorithm.set_estimate(1); // Default to L*a*b*
+        curve_mode.set_estimate(1); // Default to RGB
+        tone_curves.set_estimates({{0, 4096}, {0, 3}});
         sharpen_strength.set_estimate(1.0);
         ca_correction_strength.set_estimate(1.0);
-        blackLevel.set_estimate(25);
-        whiteLevel.set_estimate(1023);
         processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
 
@@ -290,65 +288,8 @@ public:
 
             // ========== TRACE TAGS for HalideTraceViz ==========
             {
-                Halide::Trace::FuncConfig cfg;
-                cfg.max = 1024;
-                cfg.pos = {10, 348};
-                cfg.labels = {{"input"}};
-                input.add_trace_tag(cfg.to_trace_tag());
-
-                cfg.pos = {305, 360};
-                cfg.labels = {{"denoised"}};
-                denoised.add_trace_tag(cfg.to_trace_tag());
-                
-                // Visualization for ca_corrected is difficult as it's still Bayer.
-                // We'll skip it and visualize its effect on the demosaiced output.
-
-                cfg.pos = {580, 120};
-                const int y_offset = 220;
-                cfg.strides = {{1, 0}, {0, 1}, {0, y_offset}};
-                cfg.labels = {
-                    {"gr", {0, 0 * y_offset}},
-                    {"r", {0, 1 * y_offset}},
-                    {"b", {0, 2 * y_offset}},
-                    {"gb", {0, 3 * y_offset}},
-                };
-                deinterleaved.add_trace_tag(cfg.to_trace_tag());
-                
-                cfg.pos = {860, 340 - 220};
-                for(Func f : demosaic_builder.intermediates) {
-                    std::string label = f.name();
-                    std::replace(label.begin(), label.end(), '_', '@');
-                    cfg.pos.y += 220;
-                    cfg.labels = {{label}};
-                    f.add_trace_tag(cfg.to_trace_tag());
-                }
-
-                cfg.color_dim = 2;
-                cfg.strides = {{1, 0}, {0, 1}, {0, 0}};
-                cfg.pos = {1140, 360};
-                cfg.labels = {{"demosaiced"}};
-                demosaiced.add_trace_tag(cfg.to_trace_tag());
-
-                cfg.pos = {1350, 360};
-                cfg.labels = {{"exposure-adj"}};
-                exposed.add_trace_tag(cfg.to_trace_tag());
-
-                cfg.pos = {1560, 360};
-                cfg.labels = {{"color-corrected"}};
-                corrected.add_trace_tag(cfg.to_trace_tag());
-
-                cfg.pos = {1770, 360};
-                cfg.labels = {{"saturated"}};
-                saturated.add_trace_tag(cfg.to_trace_tag());
-
-                cfg.max = 256;
-                cfg.pos = {1980, 360};
-                cfg.labels = {{"gamma-corrected"}};
-                curved.add_trace_tag(cfg.to_trace_tag());
-                
-                cfg.pos = {2190, 360};
-                cfg.labels = {{"sharpened"}};
-                processed.add_trace_tag(cfg.to_trace_tag());
+                // Visualization is complex now that the LUT is pre-generated.
+                // We'll simplify the trace tags for now.
             }
         }
     }

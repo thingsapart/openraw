@@ -60,20 +60,17 @@ Use the `process` tool to run the pipeline. Arguments are specified with flags. 
 **Usage:** `./process --input <path> --output <path> [options...]`
 
 ```bash
-# Example with default settings
-./build/process --input raw_image.png --output processed_default.png
+# Example using a global custom tone curve to crush blacks and lift mid-tones
+./build/process --input raw_image.png --output processed_curve.png \
+    --curve-points "0.1:0,0.5:0.6,1:1"
 
-# Example with custom settings and CA correction enabled
-./build/process --input raw_image.png --output processed_custom.png \
-    --exposure 1.5 \
-    --saturation 1.2 \
-    --color-temp 4500 \
-    --tint 0.1 \
-    --gamma 2.0 \
-    --contrast 55 \
-    --sharpen 1.2 \
-    --ca-strength 1.0 \
-    --iterations 10
+# Example using per-channel curves for a "cross-processed" look
+# - Crushes blacks and lifts whites in the Red channel
+# - Standard S-curve in the Green channel
+# - Lifts blacks and darkens highlights in the Blue channel
+./build/process --input raw_image.png --output processed_cross.png \
+    --curve-r "0.1:0,0.9:1" \
+    --curve-b "0:0.1,1:0.9"
 
 # See all available options
 ./build/process --help
