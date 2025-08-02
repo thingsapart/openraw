@@ -36,7 +36,7 @@ endif()
 # The add_halide_generator function defines an executable target for our generator.
 # The source file contains the logic from the official camera_pipe example.
 add_halide_generator(pipeline_generator
-    SOURCES src/pipeline_generator.cpp
+    SOURCES src/pipeline_generator.cpp src/stage_demosaic.cpp
 )
 
 
@@ -96,7 +96,7 @@ endif()
 # === STAGE 5: The Test Runner ===
 # Use file(GLOB) to find all test source files automatically.
 file(GLOB TEST_SOURCES "src/tests/*.cpp")
-add_executable(test_runner ${TEST_SOURCES} src/tone_curve_utils.cpp)
+add_executable(test_runner ${TEST_SOURCES} src/tone_curve_utils.cpp src/stage_demosaic.cpp)
 
 # The test runner needs include paths for the main src/ dir and stb.
 target_include_directories(test_runner PRIVATE
@@ -104,7 +104,6 @@ target_include_directories(test_runner PRIVATE
     ${stb_image_write_SOURCE_DIR}
 )
 
-# test_runner needs ImageIO for the new stage dumping test.
 target_link_libraries(test_runner PRIVATE
     Halide::Halide
     Halide::ImageIO
