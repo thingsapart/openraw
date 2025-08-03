@@ -22,6 +22,7 @@ inline Halide::Func pipeline_sharpen(Halide::Func input,
     Func sharpened("sharpened");
 
     Func sharpen_strength_x32("sharpen_strength_x32");
+    // The sharpening factor is small, so u8 is fine.
     sharpen_strength_x32() = u8_sat(sharpen_strength * 32);
     if (!is_autoscheduled) {
         sharpen_strength_x32.compute_root();
@@ -35,16 +36,24 @@ inline Halide::Func pipeline_sharpen(Halide::Func input,
     cfg.pos = {10, 1000};
     sharpen_strength_x32.add_trace_tag(cfg.to_trace_tag());
 
+    // Create a blurred version of the image (unsharp mask)
+    // The input is now uint16.
     Func unsharp_y("unsharp_y");
     unsharp_y(x, y, c) = blur121(input(x, y - 1, c), input(x, y, c), input(x, y + 1, c));
 
     Func unsharp("unsharp");
     unsharp(x, y, c) = blur121(unsharp_y(x - 1, y, c), unsharp_y(x, y, c), unsharp_y(x + 1, y, c));
 
+    // Calculate the sharpening mask (difference between original and blurred)
+    // Cast to a wider signed type for the subtraction.
     Func mask("mask");
-    mask(x, y, c) = cast<int16_t>(input(x, y, c)) - cast<int16_t>(unsharp(x, y, c));
+    mask(x, y, c) = cast<int32_t>(input(x, y, c)) - cast<int32_t>(unsharp(x, y, c));
 
-    sharpened(x, y, c) = u8_sat(input(x, y, c) + (mask(x, y, c) * sharpen_strength_x32()) / 32);
+    // Add the scaled mask back to the original image.
+    // Use a wider intermediate type to prevent overflow before clamping.
+    Expr sharpened_val = cast<int32_t>(input(x, y, c)) + (mask(x, y, c) * sharpen_strength_x32()) / 32;
+    sharpened(x, y, c) = u16_sat(sharpened_val);
+    
     return sharpened;
 #endif
 }

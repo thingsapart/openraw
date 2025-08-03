@@ -24,21 +24,23 @@ Var x("x"), y("y"), c("c"), yi("yi"), yo("yo"), yii("yii"), xi("xi");
 
 class CameraPipe : public Halide::Generator<CameraPipe> {
 public:
-    // Parameterized output type, because LLVM PTX (GPU) backend does not
-    // currently allow 8-bit computations
-    GeneratorParam<Type> result_type{"result_type", UInt(8)};
+    // All internal stages will be uint16. The final output is uint8.
+    // The result_type param is no longer needed as the pipeline is now fixed type.
 
+    // --- Inputs ---
     Input<Buffer<uint16_t, 2>> input{"input"};
     Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
     Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
     Input<float> color_temp{"color_temp"};
     Input<float> tint{"tint"};
-    Input<float> gamma{"gamma"};
-    Input<float> contrast{"contrast"};
     Input<float> sharpen_strength{"sharpen_strength"};
     Input<float> ca_correction_strength{"ca_correction_strength"};
     Input<int> blackLevel{"blackLevel"};
     Input<int> whiteLevel{"whiteLevel"};
+    // NEW: The tone curve LUT, replacing gamma and contrast.
+    Input<Buffer<uint16_t, 2>> tone_curve_lut{"tone_curve_lut"};
+
+    // --- Output ---
     Output<Buffer<uint8_t, 3>> processed{"processed"};
 
     void generate() {
@@ -68,24 +70,31 @@ public:
 
         // Stage 3: Demosaic
         DemosaicBuilder demosaic_builder(deinterleaved, x, y, c);
-        Func demosaiced = demosaic_builder.output;
+        Func demosaiced = demosaic_builder.output; // Output is int16
 
         // Stage 4: Color correction
         Func corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
                                                 color_temp, tint, x, y, c,
-                                                get_target(), using_autoscheduler());
+                                                get_target(), using_autoscheduler()); // Output is int16
 
-        // Stage 5: Apply tone curve (gamma, contrast)
+        // Stage 5: Apply tone curve from LUT
+        // Wrap the Input LUT buffer in a Func to pass it to the stage helper.
+        Func tone_curve_func("tone_curve_func");
+        Var lut_x("lut_x_var"), lut_c("lut_c_var");
+        tone_curve_func(lut_x, lut_c) = tone_curve_lut(lut_x, lut_c);
+
+        Expr lut_size_expr = tone_curve_lut.dim(0).extent();
         Func curved = pipeline_apply_curve(corrected, blackLevel, whiteLevel,
-                                           contrast, gamma, x, y, c,
-                                           result_type, get_target(), using_autoscheduler());
+                                           tone_curve_func, lut_size_expr, x, y, c,
+                                           get_target(), using_autoscheduler()); // Output is uint16
 
         // Stage 6: Sharpen the image
+        // This stage is modified to work with uint16 data.
         Func sharpened = pipeline_sharpen(curved, sharpen_strength, x, y, c,
-                                          get_target(), using_autoscheduler());
+                                          get_target(), using_autoscheduler()); // Output is uint16
 
-        // Set the final output Func
-        processed(x, y, c) = sharpened(x, y, c);
+        // Final stage: Convert to 8-bit for output
+        processed(x, y, c) = cast<uint8_t>(sharpened(x, y, c) >> 8);
 
 
         // ========== ESTIMATES ==========
@@ -94,10 +103,9 @@ public:
         input.set_estimates({{0, 2592}, {0, 1968}});
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
+        tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
-        gamma.set_estimate(2.0);
-        contrast.set_estimate(50);
         sharpen_strength.set_estimate(1.0);
         ca_correction_strength.set_estimate(1.0);
         blackLevel.set_estimate(25);
@@ -128,17 +136,14 @@ public:
 
             processed.compute_root()
                 .reorder(c, x, y)
-                .unroll(x, 2)
                 .gpu_tile(x, y, xi, yi, tile_x, tile_y);
 
             // Note: the `sharpen` stage is fused into `processed` by default.
 
             curved.compute_at(processed, x)
-                .unroll(x, 2)
                 .gpu_threads(x, y);
 
             corrected.compute_at(processed, x)
-                .unroll(x, 2)
                 .gpu_threads(x, y);
 
             demosaiced.compute_at(processed, x)
@@ -187,7 +192,7 @@ public:
                 .reorder(c, x, y)
                 .split(y, yi, yii, 2, TailStrategy::RoundUp)
                 .split(yi, yo, yi, strip_size / 2)
-                .vectorize(x, 2 * vec, TailStrategy::RoundUp)
+                .vectorize(x, vec, TailStrategy::RoundUp)
                 .unroll(c)
                 .parallel(yo);
 
@@ -196,7 +201,7 @@ public:
             curved.compute_at(processed, yi)
                 .store_at(processed, yo)
                 .reorder(c, x, y)
-                .tile(x, y, x, y, xi, yi, 2 * vec, 2, TailStrategy::RoundUp)
+                .tile(x, y, x, y, xi, yi, vec, 2, TailStrategy::RoundUp)
                 .vectorize(xi)
                 .unroll(yi)
                 .unroll(c);
@@ -215,7 +220,7 @@ public:
             for (Func f : demosaic_builder.intermediates) {
                  f.compute_at(processed, yi)
                     .store_at(processed, yo)
-                    .vectorize(demosaic_intermediate_v, 2 * vec, TailStrategy::RoundUp)
+                    .vectorize(demosaic_intermediate_v, vec, TailStrategy::RoundUp)
                     .fold_storage(demosaic_builder.qy, 4);
             }
             if (demosaic_builder.intermediates.size() > 1) {
@@ -228,7 +233,7 @@ public:
                 .store_at(processed, yo)
                 .fold_storage(y, 4)
                 .reorder(c, x, y)
-                .vectorize(x, 2 * vec, TailStrategy::RoundUp)
+                .vectorize(x, vec, TailStrategy::RoundUp)
                 .unroll(c);
 
             ca_corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
@@ -240,7 +245,7 @@ public:
                 }
             }
 
-            denoised.compute_root().parallel(y).vectorize(x, vec * 2);
+            denoised.compute_root().parallel(y).vectorize(x, vec);
 
             if (get_target().has_feature(Target::HVX)) {
                 processed.hexagon();
@@ -248,18 +253,20 @@ public:
                 ca_corrected.align_storage(x, vec);
                 deinterleaved.align_storage(x, vec);
                 corrected.align_storage(x, vec);
+                curved.align_storage(x, vec);
             }
 
             processed
                 .bound(c, 0, 3)
-                .bound(x, 0, ((out_width) / (2 * vec)) * (2 * vec))
+                .bound(x, 0, (out_width / vec) * vec)
                 .bound(y, 0, (out_height / strip_size) * strip_size);
 
 
             // ========== TRACE TAGS for HalideTraceViz ==========
+            // Visualization max values updated for uint16_t pipeline
             {
                 Halide::Trace::FuncConfig cfg;
-                cfg.max = 1024;
+                cfg.max = 4095;
                 cfg.pos = {10, 348};
                 cfg.labels = {{"input"}};
                 input.add_trace_tag(cfg.to_trace_tag());
@@ -268,9 +275,6 @@ public:
                 cfg.labels = {{"denoised"}};
                 denoised.add_trace_tag(cfg.to_trace_tag());
                 
-                // Visualization for ca_corrected is difficult as it's still Bayer.
-                // We'll skip it and visualize its effect on the demosaiced output.
-
                 cfg.pos = {580, 120};
                 const int y_offset = 220;
                 cfg.strides = {{1, 0}, {0, 1}, {0, y_offset}};
@@ -301,13 +305,18 @@ public:
                 cfg.labels = {{"color-corrected"}};
                 corrected.add_trace_tag(cfg.to_trace_tag());
 
-                cfg.max = 256;
+                cfg.max = 65535;
                 cfg.pos = {1660, 360};
-                cfg.labels = {{"gamma-corrected"}};
+                cfg.labels = {{"tonemapped"}};
                 curved.add_trace_tag(cfg.to_trace_tag());
                 
                 cfg.pos = {1920, 360};
                 cfg.labels = {{"sharpened"}};
+                sharpened.add_trace_tag(cfg.to_trace_tag());
+
+                cfg.max = 255;
+                cfg.pos = {2180, 360};
+                cfg.labels = {{"final_output"}};
                 processed.add_trace_tag(cfg.to_trace_tag());
             }
         }

@@ -47,7 +47,7 @@ add_halide_library(camera_pipe_auto_schedule
 
 
 # === STAGE 3: The Runner (Main Processor) ===
-add_executable(process src/process.cpp)
+add_executable(process src/process.cpp src/tone_curve_utils.cpp)
 
 # The runner from the example requires Halide's ImageIO and Tools libraries.
 # Linking against the generated library targets automatically handles dependencies,
