@@ -6,7 +6,7 @@
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h"
 #include "stage_color_correct.h"
-#include "stage_exposure.h"
+#include "stage_normalize_and_expose.h"
 #include "stage_saturation.h"
 
 // This test file was created to resolve compilation errors. It builds
@@ -35,10 +35,10 @@ void test_stage_outputs() {
     CACorrectBuilder ca_builder(denoised, x, y, 0.0f, 25.0f, 4095.0f, width, height, get_host_target(), false);
     Func ca_corrected = ca_builder.output;
 
-    Func to_float("to_float_dump");
-    to_float(x, y) = cast<float>(ca_corrected(x, y));
+    // Use placeholder values for the normalization stage
+    Func normalized = pipeline_normalize_and_expose(ca_corrected, 25.0f, 4095.0f, 1.0f, x, y);
 
-    Func deinterleaved = pipeline_deinterleave(to_float, x, y, c);
+    Func deinterleaved = pipeline_deinterleave(normalized, x, y, c);
 
     // FIX: Call the DemosaicBuilder with the correct constructor signature,
     // providing the algorithm, width, and height.
@@ -51,9 +51,9 @@ void test_stage_outputs() {
     mat_buf(1, 1) = 1.0f;
     mat_buf(2, 2) = 1.0f;
 
-    Func color_corrected = pipeline_color_correct(demosaiced, buffer_to_func(mat_buf, "m32"), buffer_to_func(mat_buf, "m70"), 3700.0f, 0.0f, x, y, c, Halide::get_host_target(), false);
-    Func exposed = pipeline_exposure(color_corrected, 1.0f, x, y, c);
-    Func saturated = pipeline_saturation(exposed, 1.0f, 1, x, y, c);
+    // FIX: Add the missing 'white_point' argument to the function call.
+    Func color_corrected = pipeline_color_correct(demosaiced, buffer_to_func(mat_buf, "m32"), buffer_to_func(mat_buf, "m70"), 3700.0f, 0.0f, 4095.0f, x, y, c, Halide::get_host_target(), false);
+    Func saturated = pipeline_saturation(color_corrected, 1.0f, 1, x, y, c);
 
     // Realize the final stage to ensure the graph is valid.
     // We don't need to check the output, just that it compiles and runs.

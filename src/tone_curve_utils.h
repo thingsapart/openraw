@@ -29,7 +29,7 @@ struct ProcessConfig {
     float sharpen = 1.0f;
     float ca_strength = 0.0f; // Default to off
     int timing_iterations = 5;
-    int tonemap_algorithm = 0; // 0=linear, 1=reinhard, 2=filmic
+    int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
 };
 
 

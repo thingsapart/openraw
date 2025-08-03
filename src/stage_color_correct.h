@@ -8,6 +8,7 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
                                            Halide::Func matrix_7000,
                                            Halide::Expr color_temp,
                                            Halide::Expr tint,
+                                           Halide::Expr white_point,
                                            Halide::Var x, Halide::Var y, Halide::Var c,
                                            const Halide::Target &target,
                                            bool is_autoscheduled) {
@@ -32,24 +33,21 @@ inline Halide::Func pipeline_color_correct(Halide::Func input,
         }
     }
 
-    // The input is normalized floating point data. The color matrices expect
-    // non-normalized data, so we scale it back up by the white point before
-    // the matrix multiply, and then scale it back down.
-    // NOTE: This is a simplification. A real pipeline would use different matrices
-    // calibrated for normalized data. For this example, this is a reasonable proxy.
-    const float approx_white_point = 4095.f;
+    // The input is normalized floating point data [0, N]. The color matrices were
+    // calibrated for non-normalized data. To apply the matrix correctly, the color
+    // components must be multiplied by their coefficients, and the offset must be
+    // normalized by the white point before being added.
+    Expr ir = input(x, y, 0);
+    Expr ig = input(x, y, 1);
+    Expr ib = input(x, y, 2);
 
-    Expr ir = input(x, y, 0) * approx_white_point;
-    Expr ig = input(x, y, 1) * approx_white_point;
-    Expr ib = input(x, y, 2) * approx_white_point;
-
-    Expr r_f = matrix(3, 0) + matrix(0, 0) * ir + matrix(1, 0) * ig + matrix(2, 0) * ib;
-    Expr g_f = matrix(3, 1) + matrix(0, 1) * ir + matrix(1, 1) * ig + matrix(2, 1) * ib;
-    Expr b_f = matrix(3, 2) + matrix(0, 2) * ir + matrix(1, 2) * ig + matrix(2, 2) * ib;
+    Expr r_f = matrix(3, 0) / white_point + matrix(0, 0) * ir + matrix(1, 0) * ig + matrix(2, 0) * ib;
+    Expr g_f = matrix(3, 1) / white_point + matrix(0, 1) * ir + matrix(1, 1) * ig + matrix(2, 1) * ib;
+    Expr b_f = matrix(3, 2) / white_point + matrix(0, 2) * ir + matrix(1, 2) * ig + matrix(2, 2) * ib;
 
     g_f = g_f * (1.0f - tint);
 
-    corrected(x, y, c) = mux(c, {r_f, g_f, b_f}) / approx_white_point;
+    corrected(x, y, c) = mux(c, {r_f, g_f, b_f});
     return corrected;
 #endif
 }

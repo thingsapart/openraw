@@ -22,10 +22,15 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     Func hsl_saturated("hsl_saturated");
     Func lab_saturated("lab_saturated");
 
-    // The input is already normalized floating point data in the [0, N] range.
-    Expr r_norm = input(x, y, 0);
-    Expr g_norm = input(x, y, 1);
-    Expr b_norm = input(x, y, 2);
+    // CRITICAL FIX: The color science algorithms (HSL, L*a*b*) assume a [0, 1] input range.
+    // The linear pipeline may contain highlight values > 1.0. We must clamp the input
+    // to this stage to prevent mathematical errors that cause extreme color shifts.
+    Func clamped_input("clamped_for_saturation");
+    clamped_input(x, y, c) = clamp(input(x, y, c), 0.0f, 1.0f);
+
+    Expr r_norm = clamped_input(x, y, 0);
+    Expr g_norm = clamped_input(x, y, 1);
+    Expr b_norm = clamped_input(x, y, 2);
 
     // Helper lambda for fmod(a, b) -> a - b * floor(a / b)
     auto halide_fmod = [](Halide::Expr a, Halide::Expr b) {
@@ -107,9 +112,14 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     }
 
     // --- Final Selection ---
-    saturated(x, y, c) = select(algorithm == 0,
-                                hsl_saturated(x, y, c),
-                                lab_saturated(x, y, c));
+    // If saturation is 1.0 (a no-op), we can bypass the expensive color math
+    // and just pass the original (unclamped) input through. This preserves highlight data.
+    saturated(x, y, c) = select(abs(saturation - 1.0f) < 1e-4f, 
+                                input(x, y, c),
+                                select(algorithm == 0,
+                                    hsl_saturated(x, y, c),
+                                    lab_saturated(x, y, c))
+                                );
 
     return saturated;
 #endif

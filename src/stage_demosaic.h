@@ -27,15 +27,16 @@ private:
     void build_simple(Func result, Func deinterleaved, Var x, Var y, Var c);
     void build_vhg(Func result, Func deinterleaved, Var x, Var y, Var c);
     void build_ahd(Func result, Func deinterleaved, Var x, Var y, Var c);
-    void build_lmmse(Func result, Func deinterleaved, Var x, Var y, Var c);
+    void build_amaze(Func result, Func deinterleaved, Var x, Var y, Var c);
 
 public:
     Func output;
     // Full-resolution algorithm outputs, exposed for individual scheduling.
-    Func simple_output, vhg_output, ahd_output, lmmse_output;
-    // All intermediate Funcs that need to be scheduled by the parent.
+    Func simple_output, vhg_output, ahd_output, amaze_output;
+    // Intermediate Funcs that need to be scheduled by the parent.
     std::vector<Func> quarter_res_intermediates;
     std::vector<Func> full_res_intermediates;
+    
     // The Vars used to define the quarter-sized intermediates, exposed for scheduling.
     Var qx, qy;
 

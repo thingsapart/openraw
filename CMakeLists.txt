@@ -31,6 +31,40 @@ if(USE_LIBCAMERA)
     find_package(PNG REQUIRED)
 endif()
 
+# --- Configurable Pipeline Stages ---
+# Add options to disable individual stages via preprocessor defines.
+option(DISABLE_HOT_PIXEL_SUPPRESSION "Bypass Hot Pixel Suppression" OFF)
+option(DISABLE_CA_CORRECT "Bypass Chromatic Aberration Correction" OFF)
+option(DISABLE_DEINTERLEAVE "Bypass Deinterleaving" OFF)
+option(DISABLE_COLOR_CORRECT "Bypass Color Correction" OFF)
+option(DISABLE_SATURATION "Bypass Saturation Adjustment" OFF)
+option(DISABLE_APPLY_CURVE "Bypass Tone Curve Application" OFF)
+option(DISABLE_SHARPEN "Bypass Sharpening" OFF)
+
+# Collect the chosen defines to pass to the compiler.
+set(PIPELINE_DEFINES)
+if(DISABLE_HOT_PIPELI_SUPPRESSION)
+    list(APPEND PIPELINE_DEFINES "NO_HOT_PIXEL_SUPPRESSION")
+endif()
+if(DISABLE_CA_CORRECT)
+    list(APPEND PIPELINE_DEFINES "NO_CA_CORRECT")
+endif()
+if(DISABLE_DEINTERLEAVE)
+    list(APPEND PIPELINE_DEFINES "NO_DEINTERLEAVE")
+endif()
+if(DISABLE_COLOR_CORRECT)
+    list(APPEND PIPELINE_DEFINES "NO_COLOR_CORRECT")
+endif()
+if(DISABLE_SATURATION)
+    list(APPEND PIPELINE_DEFINES "NO_SATURATION")
+endif()
+if(DISABLE_APPLY_CURVE)
+    list(APPEND PIPELINE_DEFINES "NO_APPLY_CURVE")
+endif()
+if(DISABLE_SHARPEN)
+    list(APPEND PIPELINE_DEFINES "NO_SHARPEN")
+endif()
+
 
 # === STAGE 1: The Generator ===
 # The add_halide_generator function defines an executable target for our generator.
@@ -38,6 +72,8 @@ endif()
 add_halide_generator(pipeline_generator
     SOURCES src/pipeline_generator.cpp src/stage_demosaic.cpp
 )
+# Pass the stage-disable defines to the generator
+target_compile_definitions(pipeline_generator PRIVATE ${PIPELINE_DEFINES})
 
 
 # === STAGE 2: Generate the Pipeline Libraries ===
@@ -103,6 +139,8 @@ target_include_directories(test_runner PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${stb_image_write_SOURCE_DIR}
 )
+# Pass the stage-disable defines to the test runner as well
+target_compile_definitions(test_runner PRIVATE ${PIPELINE_DEFINES})
 
 target_link_libraries(test_runner PRIVATE
     Halide::Halide

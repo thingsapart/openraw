@@ -1,5 +1,7 @@
 #include "halide_benchmark.h"
 
+#define BENCHMARK
+
 #include "camera_pipe.h"
 #ifndef NO_AUTO_SCHEDULE
 #include "camera_pipe_auto_schedule.h"
@@ -20,6 +22,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
@@ -34,7 +37,7 @@ void print_usage() {
            "  --black-point <val>    Sensor black level (0-65535). Default: 25.0.\n"
            "  --white-point <val>    Sensor white level (0-65535). Default: 4095.0.\n"
            "  --exposure <factor>    Exposure multiplier (e.g., 2.0 is +1 stop). Default: 1.0.\n"
-           "  --demosaic <algo>      Demosaic algorithm: 'simple', 'vhg', 'ahd', 'lmmse' (default: vhg).\n"
+           "  --demosaic <algo>      Demosaic algorithm: 'simple', 'vhg', 'ahd', 'amaze' (default: vhg).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --saturation <factor>  Color saturation. 0=grayscale, 1=normal. Default: 1.0.\n"
@@ -48,7 +51,7 @@ void print_usage() {
            "  --curve-b <str>        Blue channel curve points. Overrides --curve-points for blue.\n"
            "  --curve-mode <id>      Curve mode. 'luma' or 'rgb' (default: rgb).\n"
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
-           "  --tonemap <algo>       Tone mapping algorithm: 'linear', 'reinhard', 'filmic' (default: linear).\n\n"
+           "  --tonemap <algo>       Tone mapping: 'linear', 'reinhard', 'filmic', 'gamma' (default: gamma).\n\n"
            "Other Options:\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n"
@@ -96,8 +99,8 @@ int main(int argc, char **argv) {
             if (algo == "simple") cfg.demosaic_algorithm = 0;
             else if (algo == "vhg") cfg.demosaic_algorithm = 1;
             else if (algo == "ahd") cfg.demosaic_algorithm = 2;
-            else if (algo == "lmmse") cfg.demosaic_algorithm = 3;
-            else { fprintf(stderr, "Error: Unknown demosaic algorithm '%s'. Use 'simple', 'vhg', 'ahd', or 'lmmse'.\n", args["demosaic"].c_str()); return 1; }
+            else if (algo == "amaze") cfg.demosaic_algorithm = 3;
+            else { fprintf(stderr, "Error: Unknown demosaic algorithm '%s'. Use 'simple', 'vhg', 'ahd', or 'amaze'.\n", args["demosaic"].c_str()); return 1; }
         }
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
@@ -130,7 +133,8 @@ int main(int argc, char **argv) {
             if (algo == "linear") cfg.tonemap_algorithm = 0;
             else if (algo == "reinhard") cfg.tonemap_algorithm = 1;
             else if (algo == "filmic") cfg.tonemap_algorithm = 2;
-            else { fprintf(stderr, "Error: Unknown tonemap algorithm '%s'. Use 'linear', 'reinhard', or 'filmic'.\n", args["tonemap"].c_str()); return 1; }
+            else if (algo == "gamma") cfg.tonemap_algorithm = 3;
+            else { fprintf(stderr, "Error: Unknown tonemap algorithm '%s'. Use 'linear', 'reinhard', 'filmic', or 'gamma'.\n", args["tonemap"].c_str()); return 1; }
         }
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
     } catch (const std::exception& e) {
@@ -156,22 +160,26 @@ int main(int argc, char **argv) {
     fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
+
+    // If the user hasn't specified a white point, scan the image and suggest one.
+    if (!args.count("white-point")) {
+        std::atomic<uint16_t> max_val{0};
+        input.for_each_value([&](uint16_t& val) {
+            // This is a simple atomic max operation.
+            uint16_t current_max = max_val.load(std::memory_order_relaxed);
+            if (val > current_max) {
+                max_val.store(val, std::memory_order_relaxed);
+            }
+        });
+        fprintf(stderr, "INFO: --white-point not specified. Max RAW value in input is %u.\n", static_cast<unsigned int>(max_val));
+        fprintf(stderr, "      Consider setting --white-point %u for this image.\n", static_cast<unsigned int>(max_val));
+    }
+
     Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
 
     // Generate the tone curve LUT on the host side.
-    // This is now independent of black/white/exposure settings.
     ToneCurveUtils curve_util(cfg);
     Buffer<uint16_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
-
-    // --- DEBUG: Print LUT values to stdout ---
-    printf("\n--- Tone Curve LUT Samples ---\n");
-    printf("Input, R_Out, G_Out, B_Out\n");
-    for (int i = 0; i < tone_curves_buf.width(); i += tone_curves_buf.width() / 20) {
-        printf("%d, %d, %d, %d\n", i, tone_curves_buf(i, 0), tone_curves_buf(i, 1), tone_curves_buf(i, 2));
-    }
-    printf("%d, %d, %d, %d\n", tone_curves_buf.width()-1, tone_curves_buf(tone_curves_buf.width()-1, 0), tone_curves_buf(tone_curves_buf.width()-1, 1), tone_curves_buf(tone_curves_buf.width()-1, 2));
-    printf("--------------------------\n\n");
-    // --- End Debug ---
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},

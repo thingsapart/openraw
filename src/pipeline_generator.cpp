@@ -5,12 +5,20 @@
 #include <algorithm>
 #include <vector>
 
+// #define NO_APPLY_CURVE
+// #define NO_SHARPEN
+// #define NO_SATURATION
+// #define NO_COLOR_CORRECT
+// #define NO_DEINTERLEAVE
+// #define NO_HOT_PIXEL_SUPPRESSION
+// #define NO_CA_CORRECT
+
 // Include the individual pipeline stages
 #include "stage_hot_pixel_suppression.h"
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h"
-#include "stage_normalize_and_expose.h" // New, combined stage
+#include "stage_normalize_and_expose.h"
 #include "stage_color_correct.h"
 #include "stage_saturation.h"
 #include "stage_apply_curve.h"
@@ -98,7 +106,7 @@ public:
 
         // Stage 4: Color correction.
         Func color_corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
-                                                      color_temp, tint, x, y, c,
+                                                      color_temp, tint, white_point, x, y, c,
                                                       get_target(), using_autoscheduler());
 
         // Stage 5: Saturation adjustment (operates on linear float data)
@@ -121,11 +129,11 @@ public:
         // Stage 8: Convert from 16-bit to 8-bit using a selectable tone mapping operator.
         Func normalized16("normalized16");
         normalized16(x, y, c) = cast<float>(sharpened(x, y, c)) / 65535.0f;
-        
+
         // Algorithm 0: Linear mapping (fastest, clips highlights)
         Func linear_tonemapped("linear_tonemapped");
         linear_tonemapped(x, y, c) = u8_sat(sharpened(x, y, c) >> 8);
-        
+
         // Algorithm 1: Reinhard tone mapping (good highlight rolloff)
         Func reinhard_tonemapped("reinhard_tonemapped");
         {
@@ -146,9 +154,17 @@ public:
             Expr final_val = curve_val * white_scale;
             filmic_tonemapped(x, y, c) = u8_sat(final_val * 255.0f);
         }
-        
+
+        // Algorithm 3: Simple Gamma Correction (original camera_pipe style)
+        Func gamma_tonemapped("gamma_tonemapped");
+        {
+            const float gamma_val = 1.0f / 2.2f; // Standard sRGB gamma
+            gamma_tonemapped(x, y, c) = u8_sat(pow(normalized16(x, y, c), gamma_val) * 255.0f);
+        }
+
         Func final_output("final_output");
-        final_output(x, y, c) = select(tonemap_algorithm == 2, filmic_tonemapped(x, y, c),
+        final_output(x, y, c) = select(tonemap_algorithm == 3, gamma_tonemapped(x, y, c),
+                                       tonemap_algorithm == 2, filmic_tonemapped(x, y, c),
                                        tonemap_algorithm == 1, reinhard_tonemapped(x, y, c),
                                        /* else */              linear_tonemapped(x, y, c));
 
@@ -192,7 +208,7 @@ public:
             demosaic_builder.simple_output.compute_at(processed, xi).gpu_threads(xi, yi);
             demosaic_builder.vhg_output.compute_at(processed, xi).gpu_threads(xi, yi);
             demosaic_builder.ahd_output.compute_at(processed, xi).gpu_threads(xi, yi);
-            demosaic_builder.lmmse_output.compute_at(processed, xi).gpu_threads(xi, yi);
+            demosaic_builder.amaze_output.compute_at(processed, xi).gpu_threads(xi, yi);
             for (Func f : demosaic_builder.quarter_res_intermediates) {
                 f.compute_at(processed, x); // Compute at block level
             }
@@ -209,24 +225,28 @@ public:
             int vec = get_target().natural_vector_size(Float(32));
             Expr strip_size = 32;
 
-            // Corrected schedule order: split first, then parallelize.
             processed.compute_root()
                 .split(y, yo, yi, strip_size)
                 .parallel(yo)
                 .vectorize(x, 2 * vec);
 
             final_output.compute_at(processed, yi).vectorize(x, 2 * vec);
-            curved.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
-            to_uint16_for_lut.compute_at(curved, x).vectorize(x, vec);
-            saturated.compute_at(curved, x).vectorize(x, vec);
-            color_corrected.compute_at(curved, x).vectorize(x, vec);
 
-            demosaiced.compute_at(curved, x).vectorize(x, vec);
-            demosaic_builder.simple_output.compute_at(curved, x).vectorize(x, vec);
-            demosaic_builder.vhg_output.compute_at(curved, x).vectorize(x, vec);
-            demosaic_builder.ahd_output.compute_at(curved, x).vectorize(x, vec);
-            demosaic_builder.lmmse_output.compute_at(curved, x).vectorize(x, vec);
-            
+            // All stages from the curve onwards are computed inside the strip loop ('yi'),
+            // which allows for good locality.
+            curved.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
+            to_uint16_for_lut.compute_at(processed, yi).vectorize(x, vec);
+            saturated.compute_at(processed, yi).vectorize(x, vec);
+            color_corrected.compute_at(processed, yi).vectorize(x, vec);
+            demosaiced.compute_at(processed, yi).vectorize(x, vec);
+
+            // Schedule all demosaic variants and their intermediates at the strip level.
+            // This is the key to performance: compute these expensive stages once per strip.
+            demosaic_builder.simple_output.compute_at(processed, yi).vectorize(x, vec);
+            demosaic_builder.vhg_output.compute_at(processed, yi).vectorize(x, vec);
+            demosaic_builder.ahd_output.compute_at(processed, yi).vectorize(x, vec);
+            demosaic_builder.amaze_output.compute_at(processed, yi).vectorize(x, vec);
+
             Var demosaic_intermediate_v = demosaic_builder.qx;
             for (Func f : demosaic_builder.quarter_res_intermediates) {
                  f.compute_at(processed, yi).vectorize(demosaic_intermediate_v, vec);
@@ -238,13 +258,11 @@ public:
             deinterleaved.compute_at(processed, yi).vectorize(x, vec);
             normalized.compute_at(processed, yi).vectorize(x, vec);
             ca_corrected.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
-            
-            // FIX: Remove nested parallelism from CA intermediates.
+
+            // Root-level dependencies are computed serially before the main parallel loop begins.
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
                     f.compute_root().vectorize(f.args()[0], vec);
-                } else {
-                    f.compute_at(processed, yi).vectorize(x, vec);
                 }
             }
 
