@@ -90,6 +90,11 @@ public:
         // Final stage: Convert to 8-bit for output
         processed(x, y, c) = cast<uint8_t>(sharpened(x, y, c) >> 8);
 
+        // ***** PERFORMANCE FIX 1 *****
+        // Bound the color channel dimension to a constant '3'. This allows
+        // Halide to unroll loops over 'c' because it knows the extent at compile time.
+        processed.bound(c, 0, 3);
+
 
         // ========== ESTIMATES ==========
         input.set_estimates({{0, 2592}, {0, 1968}});
@@ -99,8 +104,8 @@ public:
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
-        sharpen_strength.set_estimate(1.0);
-        ca_correction_strength.set_estimate(1.0);
+        sharpen_strength.set_estimate(1.0f);
+        ca_correction_strength.set_estimate(1.0f);
         blackLevel.set_estimate(25);
         whiteLevel.set_estimate(1023);
         processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
@@ -113,9 +118,7 @@ public:
             // Manual GPU schedule
             Expr out_width = processed.width();
             Expr out_height = processed.height();
-            processed.bound(c, 0, 3)
-                .bound(x, 0, (out_width / 2) * 2)
-                .bound(y, 0, (out_height / 2) * 2);
+            // Note: processed.bound(c, 0, 3) is already set above
 
             Var xi, yi;
             int tile_x = 28, tile_y = 12;
@@ -125,8 +128,6 @@ public:
             corrected.compute_at(processed, x).gpu_threads(x, y);
             demosaiced.compute_at(processed, x).gpu_threads(x, y);
             
-            // On the GPU, materializing intermediates can sometimes be better.
-            // We leave this schedule in place for GPU targets.
             for (Func f : demosaic_dispatcher.all_intermediates) {
                 if (f.dimensions() >= 2) {
                     f.compute_at(processed, x).gpu_threads(f.args()[0], f.args()[1]);
@@ -148,28 +149,43 @@ public:
             // Manual CPU schedule
             Expr out_width = processed.width();
             Expr out_height = processed.height();
+
             Expr strip_size = 32;
             int vec = get_target().natural_vector_size(UInt(16));
 
-            processed.compute_root().reorder(c, x, y)
-                .split(y, yo, yi, strip_size).parallel(yo).vectorize(x, vec);
+            processed.compute_root()
+                .reorder(c, x, y)
+                .split(y, yo, yi, strip_size)
+                .parallel(yo)
+                .vectorize(x, vec);
 
-            sharpened.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
-            curved.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
-            corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
-            demosaiced.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+            // `sharpened` is fused into `processed` by default (no schedule)
 
-            // ***** PERFORMANCE FIX *****
-            // The explicit scheduling loop for demosaic intermediates is REMOVED for the CPU.
-            // By giving the intermediates no schedule, we allow Halide to automatically
-            // fuse them into the 'demosaiced' Func, which is much more efficient.
-            /*
-            for (Func f : demosaic_dispatcher.all_intermediates) {
-                f.compute_at(processed, yi).store_at(processed, yo).vectorize(f.args()[0], vec);
-            }
-            */
+            curved.compute_at(processed, yi)
+                .store_at(processed, yo)
+                .reorder(c, x, y)
+                .vectorize(x, vec);
 
-            deinterleaved.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+            corrected.compute_at(curved, x)
+                .reorder(c, x, y)
+                .vectorize(x)
+                .unroll(c);
+
+            demosaiced.compute_at(curved, x)
+                .vectorize(x)
+                .reorder(c, x, y)
+                .unroll(c);
+
+            // Demosaic intermediates are left unscheduled to be fused.
+            
+            // ***** PERFORMANCE FIX 2 *****
+            // The .fold_storage() call has been removed. It was causing a
+            // potential out-of-bounds read with the current scheduling strategy.
+            deinterleaved.compute_at(processed, yi)
+                .store_at(processed, yo)
+                .reorder(c, x, y)
+                .vectorize(x, vec);
+
             ca_corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
@@ -178,6 +194,7 @@ public:
                     f.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
                 }
             }
+
             denoised.compute_root().parallel(y).vectorize(x, vec);
         }
     }
