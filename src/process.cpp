@@ -1,6 +1,17 @@
 #include "halide_benchmark.h"
+
+// Define BENCHMARK to enable timing runs
+#define BENCHMARK
+
 #include "camera_pipe.h"
+
+// By default, the auto-scheduled pipeline is not compiled or run.
+// To enable it, comment out the following line.
+#define NO_AUTO_SCHEDULE
+#ifndef NO_AUTO_SCHEDULE
 #include "camera_pipe_auto_schedule.h"
+#endif
+
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
@@ -148,26 +159,35 @@ int main(int argc, char **argv) {
     int blackLevel = 25;
     int whiteLevel = 1023;
 
+#ifdef BENCHMARK
     double best;
-
+    // Benchmark the manually-scheduled pipeline
     best = benchmark(cfg.timing_iterations, 1, [&]() {
-        // The new pipeline takes the tone curve LUT instead of gamma/contrast.
         camera_pipe(input, matrix_3200, matrix_7000,
                     cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                    tone_curve_lut,
-                    output);
+                    tone_curve_lut, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 
+    // Benchmark the auto-scheduled pipeline, if it's enabled
+#ifndef NO_AUTO_SCHEDULE
     best = benchmark(cfg.timing_iterations, 1, [&]() {
         camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
                                   cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                                  tone_curve_lut,
-                                  output);
+                                  tone_curve_lut, output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
+#endif  // NO_AUTO_SCHEDULE
+
+#else  // not BENCHMARK
+    // Just run the manually-scheduled pipeline once.
+    camera_pipe(input, matrix_3200, matrix_7000,
+                cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                tone_curve_lut, output);
+    output.device_sync();
+#endif  // BENCHMARK
 
     fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
     convert_and_save_image(output, cfg.output_path);
@@ -178,7 +198,6 @@ int main(int argc, char **argv) {
     if (tone_curve_util.render_curves_to_png(curve_png_path.c_str())) {
         fprintf(stderr, "curve:  %s\n", curve_png_path.c_str());
     }
-
 
     printf("Success!\n");
     return 0;

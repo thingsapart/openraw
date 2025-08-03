@@ -20,6 +20,17 @@ if(USE_LIBCAMERA)
 endif()
 
 
+# --- External Dependencies (stb) ---
+# Use FetchContent to automatically download stb_image_write.h at configure time.
+include(FetchContent)
+FetchContent_Declare(
+    stb_image_write
+    URL https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
+    URL_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
+    DOWNLOAD_NO_EXTRACT TRUE       # This is a single file, not an archive
+)
+FetchContent_MakeAvailable(stb_image_write)
+
 # === STAGE 1: The Generator ===
 # The add_halide_generator function defines an executable target for our generator.
 # The source file contains the logic from the official camera_pipe example.
@@ -59,6 +70,9 @@ target_link_libraries(process PRIVATE
     Halide::Tools    # For halide_benchmark.h
 )
 
+# Add the include directory for the downloaded stb header.
+# FetchContent makes the path available via the <name>_SOURCE_DIR variable.
+target_include_directories(process PRIVATE ${stb_image_write_SOURCE_DIR})
 # Add a define to the runner if the auto-scheduled target doesn't exist.
 if (NOT TARGET camera_pipe_auto_schedule)
     target_compile_definitions(process PRIVATE NO_AUTO_SCHEDULE)
