@@ -161,11 +161,9 @@ int main(int argc, char **argv) {
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
 
-    // If the user hasn't specified a white point, scan the image and suggest one.
     if (!args.count("white-point")) {
         std::atomic<uint16_t> max_val{0};
         input.for_each_value([&](uint16_t& val) {
-            // This is a simple atomic max operation.
             uint16_t current_max = max_val.load(std::memory_order_relaxed);
             if (val > current_max) {
                 max_val.store(val, std::memory_order_relaxed);
@@ -177,9 +175,10 @@ int main(int argc, char **argv) {
 
     Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
 
-    // Generate the tone curve LUT on the host side.
+    // Generate the combined tone curve and tonemapping LUT on the host side.
     ToneCurveUtils curve_util(cfg);
-    Buffer<uint16_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
+    // FIX: The LUT buffer is now uint8_t
+    Buffer<uint8_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
@@ -200,11 +199,12 @@ int main(int argc, char **argv) {
 
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
+        // FIX: Remove tonemap_algorithm from the argument list
         camera_pipe(input, cfg.black_point, cfg.white_point, cfg.exposure,
                     matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                     cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
                     cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                    cfg.tonemap_algorithm, output);
+                    output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
@@ -213,7 +213,7 @@ int main(int argc, char **argv) {
                 matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                 cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
                 cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                cfg.tonemap_algorithm, output);
+                output);
     output.device_sync();
 #endif
 
@@ -222,11 +222,12 @@ int main(int argc, char **argv) {
 #ifndef NO_AUTO_SCHEDULE
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
+        // FIX: Remove tonemap_algorithm from the argument list
         camera_pipe_auto_schedule(input, cfg.black_point, cfg.white_point, cfg.exposure,
                                   matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                                   cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
                                   cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                                  cfg.tonemap_algorithm, output);
+                                  output);
         output.device_sync();
     });
     fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
@@ -235,7 +236,7 @@ int main(int argc, char **argv) {
                               matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                               cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
                               cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                              cfg.tonemap_algorithm, output);
+                              output);
     output.device_sync();
 #endif
 #endif

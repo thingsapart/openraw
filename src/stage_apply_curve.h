@@ -3,7 +3,8 @@
 
 #include "Halide.h"
 
-// This stage takes a uint16 input and applies the pre-computed uint16 LUT.
+// This stage takes a uint16 input and applies the pre-computed uint8 LUT
+// to produce the final 8-bit output.
 inline Halide::Func pipeline_apply_curve(Halide::Func input_u16,
                                          Halide::Func tone_curves_lut,
                                          Halide::Expr lut_extent,
@@ -14,42 +15,57 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input_u16,
 
 #ifdef NO_APPLY_CURVE
     Func curved("curved_dummy");
-    curved(x, y, c) = input_u16(x, y, c);
+    // Dummy pass-through stage, now converts to u8
+    curved(x, y, c) = u8_sat(input_u16(x, y, c) >> 8);
     return curved;
 #else
     Func curved("curved");
 
     // --- Mode 1: RGB (per-channel) ---
+    // This path is already correct. It looks up the uint8 LUT and produces a uint8.
     Func curved_rgb("curved_rgb");
     {
-        // The input is already a clamped uint16, safe for LUT access.
-        // We cast to int32 for the LUT lookup as it's a common index type.
         Expr val = cast<int32_t>(input_u16(x, y, c));
         curved_rgb(x, y, c) = tone_curves_lut(val, c);
     }
 
-    // --- Mode 0: Luma ---
+    // --- Mode 0: Luma (Color Preserving) ---
+    // This path is now fixed to produce a uint8 result.
     Func curved_luma("curved_luma");
     {
-        Expr r = cast<float>(input_u16(x, y, 0));
-        Expr g = cast<float>(input_u16(x, y, 1));
-        Expr b = cast<float>(input_u16(x, y, 2));
+        // 1. Normalize the 16-bit input to a [0, 1] float range.
+        Expr r_f = cast<float>(input_u16(x, y, 0)) / 65535.f;
+        Expr g_f = cast<float>(input_u16(x, y, 1)) / 65535.f;
+        Expr b_f = cast<float>(input_u16(x, y, 2)) / 65535.f;
 
-        Expr luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-        Expr clamped_luma = clamp(cast<int32_t>(luma), 0, lut_extent - 1);
+        // 2. Calculate the original luma of the float pixel.
+        Expr luma_f = 0.2126f * r_f + 0.7152f * g_f + 0.0722f * b_f;
         
-        Expr new_luma = cast<float>(tone_curves_lut(clamped_luma, 1)); // Green curve
-        Expr luma_safe = select(luma > 1e-6f, luma, 1e-6f);
+        // 3. Use the original luma to look up the new 8-bit luma from the LUT.
+        // The LUT index must be scaled from the [0, 1] float range to the [0, 65535] integer range.
+        Expr lut_idx = clamp(cast<int32_t>(luma_f * (lut_extent - 1)), 0, lut_extent - 1);
+        Expr new_luma_u8 = tone_curves_lut(lut_idx, 1); // Use the Green curve for luma.
         
-        Expr r_new = r * new_luma / luma_safe;
-        Expr g_new = g * new_luma / luma_safe;
-        Expr b_new = b * new_luma / luma_safe;
+        // 4. Normalize the new 8-bit luma to a [0, 1] float.
+        Expr new_luma_f = cast<float>(new_luma_u8) / 255.f;
+
+        // 5. Calculate the scaling ratio and apply it to the original float RGB values to preserve hue.
+        Expr luma_f_safe = select(luma_f > 1e-6f, luma_f, 1e-6f);
+        Expr ratio = new_luma_f / luma_f_safe;
         
+        Expr r_new_f = r_f * ratio;
+        Expr g_new_f = g_f * ratio;
+        Expr b_new_f = b_f * ratio;
+        
+        // 6. Convert the final float RGB values to uint8, which is the final output type.
         curved_luma(x, y, c) = mux(c, {
-            u16_sat(r_new), u16_sat(g_new), u16_sat(b_new)
+            u8_sat(r_new_f * 255.f), 
+            u8_sat(g_new_f * 255.f), 
+            u8_sat(b_new_f * 255.f)
         });
     }
 
+    // Now both branches have a matching uint8 type.
     curved(x, y, c) = select(curve_mode == 0, curved_luma(x, y, c), curved_rgb(x, y, c));
     return curved;
 #endif

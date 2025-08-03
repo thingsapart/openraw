@@ -29,12 +29,12 @@ ToneCurveUtils::ToneCurveUtils(const ProcessConfig& cfg)
     bool has_b_curve = parse_curve_points(config.curve_b_str, b_pts);
     
     // Use the specific channel curve if provided, otherwise fall back to global, otherwise use gamma/contrast.
-    generate_lut_channel(has_r_curve ? r_pts : (has_global_curve ? global_pts : std::vector<Point>()), config, &lut_buffer(0, 0), lut_buffer.width());
-    generate_lut_channel(has_g_curve ? g_pts : (has_global_curve ? global_pts : std::vector<Point>()), config, &lut_buffer(0, 1), lut_buffer.width());
-    generate_lut_channel(has_b_curve ? b_pts : (has_global_curve ? global_pts : std::vector<Point>()), config, &lut_buffer(0, 2), lut_buffer.width());
+    generate_lut_channel(config, has_r_curve ? r_pts : (has_global_curve ? global_pts : std::vector<Point>()), &lut_buffer(0, 0), lut_buffer.width());
+    generate_lut_channel(config, has_g_curve ? g_pts : (has_global_curve ? global_pts : std::vector<Point>()), &lut_buffer(0, 1), lut_buffer.width());
+    generate_lut_channel(config, has_b_curve ? b_pts : (has_global_curve ? global_pts : std::vector<Point>()), &lut_buffer(0, 2), lut_buffer.width());
 }
 
-Halide::Runtime::Buffer<uint16_t, 2> ToneCurveUtils::get_lut_for_halide() {
+Halide::Runtime::Buffer<uint8_t, 2> ToneCurveUtils::get_lut_for_halide() {
     return lut_buffer;
 }
 
@@ -64,10 +64,10 @@ bool ToneCurveUtils::render_curves_to_png(const char* filename, int width, int h
 
     // 3. Draw the curve(s)
     auto draw_curve = [&](int channel_idx, uint8_t r, uint8_t g, uint8_t b) {
-        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 65535.0f * (height-1));
+        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 255.0f * (height-1));
         for(int x = 1; x < width; ++x) {
             int lut_idx = (int)(((float)x / (width-1)) * (lut_buffer.width()-1));
-            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 65535.0f * (height-1));
+            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 255.0f * (height-1));
             // Draw a line from (x-1, prev_y) to (x, y)
             int start_y = std::min(prev_y, y);
             int end_y = std::max(prev_y, y);
@@ -91,6 +91,12 @@ bool ToneCurveUtils::render_curves_to_png(const char* filename, int width, int h
 }
 
 // --- Static Helper Implementations ---
+
+// Helper for the filmic tonemapping curve calculation.
+static float uncharted2_tonemap_partial(float x) {
+    const float A = 0.22f, B = 0.30f, C = 0.10f, D = 0.20f, E = 0.01f, F = 0.30f;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
 
 bool ToneCurveUtils::parse_curve_points(const std::string& s, std::vector<Point>& points) {
     if (s.empty()) return false;
@@ -122,45 +128,51 @@ bool ToneCurveUtils::parse_curve_points(const std::string& s, std::vector<Point>
     return true;
 }
 
-void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points, const ProcessConfig& cfg, uint16_t* lut_col, int lut_size) {
-    bool useCustomCurve = !user_points.empty();
-    
-    if (useCustomCurve) {
-        // --- LOGIC for Custom Curves ---
-        // This logic assumes a normalized [0, 1] input and produces a [0, 1] output.
-        std::vector<Point> points = user_points;
-        bool has_start = false, has_end = false;
-        for(const auto& p : points) {
-            if (p.x == 0.0f) has_start = true;
-            if (p.x == 1.0f) has_end = true;
-        }
-        if (!has_start) points.insert(points.begin(), {0.0f, 0.0f});
-        if (!has_end) points.push_back({1.0f, 1.0f});
-        std::sort(points.begin(), points.end(), [](const Point& a, const Point& b) { return a.x < b.x; });
-        
-        std::vector<float> tangents;
-        if (points.size() > 1) {
-            tangents.resize(points.size());
-            if (points.size() == 2) {
-                tangents[0] = tangents[1] = (points[1].y - points[0].y) / (points[1].x - points[0].x);
-            } else {
-                tangents[0] = (points[1].y - points[0].y) / (points[1].x - points[0].x);
-                for (size_t i = 1; i < points.size() - 1; ++i) {
-                    float slope_prev = (points[i].y - points[i-1].y) / (points[i].x - points[i-1].x);
-                    float slope_next = (points[i+1].y - points[i].y) / (points[i+1].x - points[i].x);
-                    tangents[i] = (slope_prev * slope_next <= 0) ? 0 : (slope_prev + slope_next) / 2.0f;
-                }
-                tangents.back() = (points.back().y - points[points.size()-2].y) / (points.back().x - points[points.size()-2].x);
+void ToneCurveUtils::generate_lut_channel(const ProcessConfig& cfg, const std::vector<Point>& user_points, uint8_t* lut_col, int lut_size) {
+    for (int i = 0; i < lut_size; ++i) {
+        // The LUT index 'i' corresponds to a linear input value from the pipeline.
+        float linear_val = static_cast<float>(i) / (lut_size - 1.0f);
+
+        // OPTIMIZATION: Apply the selected global tonemapping operator first.
+        float tonemapped_val;
+        switch(cfg.tonemap_algorithm) {
+            case 0: // linear
+                tonemapped_val = linear_val;
+                break;
+            case 1: // reinhard
+            {
+                float reinhard_val = linear_val / (linear_val + 1.0f);
+                tonemapped_val = powf(reinhard_val, 1.0f / 1.5f);
+                break;
+            }
+            case 2: // filmic
+            {
+                const float exposure_bias = 2.0f;
+                const float W = 11.2f;
+                float curve_val = uncharted2_tonemap_partial(linear_val * exposure_bias);
+                float white_scale = 1.0f / uncharted2_tonemap_partial(W);
+                tonemapped_val = curve_val * white_scale;
+                break;
+            }
+            case 3: // gamma
+            default:
+            {
+                tonemapped_val = powf(linear_val, 1.0f / 2.2f);
+                break;
             }
         }
         
-        for (int i = 0; i < lut_size; ++i) {
-            float val_norm = (float)i / (lut_size - 1.0f);
-            float mapped_val;
+        // Now, apply the S-curve or custom curve to the already tonemapped value.
+        float final_val;
+        bool useCustomCurve = !user_points.empty();
+        if (useCustomCurve) {
+            std::vector<Point> points = user_points;
+            if (points.front().x > 1e-6) points.insert(points.begin(), {0.0f, 0.0f});
+            if (points.back().x < 1.0 - 1e-6) points.push_back({1.0f, 1.0f});
 
             size_t k = 0;
             for (size_t j = 0; j < points.size() - 1; ++j) {
-                if (val_norm >= points[j].x && val_norm <= points[j+1].x) {
+                if (tonemapped_val >= points[j].x && tonemapped_val <= points[j+1].x) {
                     k = j;
                     break;
                 }
@@ -168,46 +180,20 @@ void ToneCurveUtils::generate_lut_channel(const std::vector<Point>& user_points,
 
             const Point& p0 = points[k];
             const Point& p1 = points[k+1];
-            float m0 = tangents[k];
-            float m1 = tangents[k+1];
-            
-            float h = p1.x - p0.x;
-            if (h < 1e-6f) {
-                mapped_val = p0.y;
-            } else {
-                float t = (val_norm - p0.x) / h;
-                float t2 = t * t;
-                float t3 = t2 * t;
-                float h00 = 2*t3 - 3*t2 + 1;
-                float h10 = t3 - 2*t2 + t;
-                float h01 = -2*t3 + 3*t2;
-                float h11 = t3 - t2;
-                mapped_val = h00*p0.y + h10*h*m0 + h01*p1.y + h11*h*m1;
-            }
-            lut_col[i] = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, mapped_val * 65535.0f + 0.5f)));
-        }
-    } else {
-        // --- REVISED LOGIC for Gamma/Contrast S-Curve ---
-        // This LUT now assumes its input is normalized to [0, 1] from the linear pipeline stages.
-        // It is no longer responsible for black or white point adjustments.
-        for (int i = 0; i < lut_size; ++i) {
-            // 1. Input is already normalized to [0, 1] for the purpose of LUT generation
-            float linear_val = static_cast<float>(i) / (lut_size - 1.0f);
-            
-            // 2. Apply standard gamma correction to move to a perceptual space
-            float perceptual_val = pow(linear_val, 1.0f / cfg.gamma);
-
-            // 3. Apply contrast S-curve to the perceptually-encoded value
-            float b = 2.0f - pow(2.0f, cfg.contrast / 100.0f);
+            float t = (p1.x - p0.x < 1e-6) ? 0.0f : (tonemapped_val - p0.x) / (p1.x - p0.x);
+            final_val = p0.y * (1.0f - t) + p1.y * t; // Linear interpolation for now
+        } else {
+            // Default S-curve from the original pipeline
+            float b = 2.0f - powf(2.0f, cfg.contrast / 100.0f);
             float a = 2.0f - 2.0f * b;
-            float mapped_val;
-            if (perceptual_val > 0.5f) {
-                mapped_val = 1.0f - (a * (1.0f - perceptual_val) * (1.0f - perceptual_val) + b * (1.0f - perceptual_val));
+            if (tonemapped_val > 0.5f) {
+                final_val = 1.0f - (a * (1.0f - tonemapped_val) * (1.0f - tonemapped_val) + b * (1.0f - tonemapped_val));
             } else {
-                mapped_val = a * perceptual_val * perceptual_val + b * perceptual_val;
+                final_val = a * tonemapped_val * tonemapped_val + b * tonemapped_val;
             }
-            
-            lut_col[i] = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, mapped_val * 65535.0f + 0.5f)));
         }
+        
+        // Clamp and convert to the final 8-bit value for the LUT.
+        lut_col[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, final_val * 255.0f + 0.5f)));
     }
 }

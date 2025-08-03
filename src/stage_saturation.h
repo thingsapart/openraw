@@ -80,7 +80,8 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         const float xn = 0.95047f, yn = 1.0f, zn = 1.08883f;
         const float delta_val = 6.0f / 29.0f;
         auto f = [&](Expr t) {
-            return select(t > delta_val * delta_val * delta_val, pow(t, 1.0f / 3.0f), t / (3.0f * delta_val * delta_val) + 4.0f / 29.0f);
+            // OPTIMIZATION: Replace pow() with fast_pow()
+            return select(t > delta_val * delta_val * delta_val, fast_pow(t, 1.0f / 3.0f), t / (3.0f * delta_val * delta_val) + 4.0f / 29.0f);
         };
         Expr fx = f(x_xyz / xn);
         Expr fy = f(y_xyz / yn);
