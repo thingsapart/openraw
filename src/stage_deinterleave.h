@@ -15,6 +15,7 @@ inline Halide::Func pipeline_deinterleave(Halide::Func raw, Halide::Var x, Halid
     Halide::Func deinterleaved("deinterleaved");
     // Deinterleave the color channels based on the sensor's GRBG bayer pattern.
     // The output dimensions will be (width/2, height/2, 4).
+    // The type of the input 'raw' Func is passed through to the output.
     deinterleaved(x, y, c) = Halide::mux(c,
                                  {raw(2 * x, 2 * y),       // G in a red row (G_r)
                                   raw(2 * x + 1, 2 * y),   // R

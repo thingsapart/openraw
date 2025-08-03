@@ -3,7 +3,10 @@
 
 #include "Halide.h"
 #include "halide_trace_config.h"
+#include "pipeline_helpers.h"
+#include <type_traits>
 
+template <typename T>
 inline Halide::Func pipeline_apply_curve(Halide::Func input,
                                          Halide::Expr blackLevel,
                                          Halide::Expr whiteLevel,
@@ -17,39 +20,42 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
 
 #ifdef NO_APPLY_CURVE
     Func curved("curved_dummy");
-    // Dummy stage: pass-through int16 to uint16
-    curved(x, y, c) = cast<uint16_t>(clamp(input(x, y, c), 0, 65535));
+    curved(x, y, c) = proc_type_sat<T>(input(x, y, c));
     return curved;
 #else
     Func curved("curved");
-
-    // This stage applies the pre-computed 16-bit tone curve LUT.
-    // The input is int16 from the color correction stage.
-    // The output is uint16.
     
-    // Normalize the input value from the camera's range to [0, 1]
     Expr val = input(x, y, c);
-    Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
-    Expr norm_val = (cast<float>(val) - blackLevel) * inv_range;
-    
+    Expr norm_val;
+
+    if (std::is_same<T, float>::value) {
+        // For the float path, the value is already normalized.
+        norm_val = val;
+    } else {
+        // For the uint16 path, normalize from the camera's range to [0, 1].
+        Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
+        norm_val = (cast<float>(val) - blackLevel) * inv_range;
+    }
+
     // Use the normalized value to index into the LUT.
     Expr lut_f_idx = clamp(norm_val, 0.0f, 1.0f) * (lut_size - 1.0f);
     Expr lut_idx = cast<int>(lut_f_idx);
+    
+    Expr lut_val = lut(lut_idx, c);
 
-    // Apply the per-channel LUT.
-    // A 65536-entry LUT is high enough resolution that we can use
-    // nearest-neighbor lookup instead of linear interpolation without
-    // visible posterization artifacts.
-    curved(x, y, c) = lut(lut_idx, c);
+    if (std::is_same<T, float>::value) {
+        // For the float path, the LUT value (uint16) must be scaled back to [0, 1].
+        curved(x, y, c) = cast<float>(lut_val) / 65535.0f;
+    } else {
+        // For the uint16 path, the LUT value is already in the correct format.
+        curved(x, y, c) = lut_val;
+    }
 
     if (!is_autoscheduled && target.has_gpu_feature()) {
         // The LUT is passed as an Input, so we just need to ensure it's copied to the GPU.
         // Halide handles this automatically. No scheduling for the LUT itself is needed here.
     }
     
-    // No tracing for the curve itself, as it's now an input.
-    // The visualization will be done by the C++ host code.
-
     return curved;
 #endif
 }

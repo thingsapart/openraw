@@ -1,37 +1,42 @@
 #include "halide_benchmark.h"
 
-// Define BENCHMARK to enable timing runs
-#define BENCHMARK
-
-#include "camera_pipe.h"
-
-// By default, the auto-scheduled pipeline is not compiled or run.
-// To enable it, comment out the following line.
-#define NO_AUTO_SCHEDULE
-#ifndef NO_AUTO_SCHEDULE
-#include "camera_pipe_auto_schedule.h"
-#endif
+#include <cstdint>
+#include <string>
+#include <map>
+#include <stdexcept>
+#include <iostream>
 
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
 #include "tone_curve_utils.h"
 
-#include <cassert>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <string>
-#include <map>
-#include <stdexcept>
-#include <iostream>
+// Conditionally include the generated pipeline headers based on the
+// macro defined by CMake.
+#if defined(PIPELINE_PRECISION_F32)
+#include "camera_pipe_f32_lib.h"
+#elif defined(PIPELINE_PRECISION_U16)
+#include "camera_pipe_u16_lib.h"
+#else
+#error "PIPELINE_PRECISION_F32 or PIPELINE_PRECISION_U16 must be defined"
+#endif
+
+// By default, the auto-scheduled pipeline is not compiled or run.
+#define NO_AUTO_SCHEDULE
+#ifndef NO_AUTO_SCHEDULE
+    #if defined(PIPELINE_PRECISION_F32)
+    #include "camera_pipe_f32_auto_schedule_lib.h"
+    #elif defined(PIPELINE_PRECISION_U16)
+    #include "camera_pipe_u16_auto_schedule_lib.h"
+    #endif
+#endif
 
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
 
-// Prints the usage message for the process executable.
 void print_usage() {
     printf("Usage: ./process --input <raw.png> --output <out.png> [options]\n\n"
+           "This executable is compiled for a specific precision. Run 'process_f32' or 'process_u16'.\n\n"
            "Required arguments:\n"
            "  --input <path>         Path to the input 16-bit RAW PNG file.\n"
            "  --output <path>        Path for the output 8-bit image file.\n\n"
@@ -54,6 +59,13 @@ void print_usage() {
            "  --help                 Display this help message.\n");
 }
 
+template<typename PipelineFunc, typename... Args>
+double benchmark_pipeline(int iterations, PipelineFunc func, Args... args) {
+    return benchmark(iterations, 1, [&]() {
+        func(args...);
+    });
+}
+
 int main(int argc, char **argv) {
     if (argc == 1) {
         print_usage();
@@ -62,22 +74,15 @@ int main(int argc, char **argv) {
 
     // --- Argument Parsing ---
     ProcessConfig cfg;
-    int demosaic_id = 3; // 0=ahd, 1=lmmse, 2=ri, 3=fast (default)
+    int demosaic_id = 3; // 0=ahd, 1=lmmse, 2=ri, 3=fast
 
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--help") {
-            print_usage();
-            return 0;
-        }
+        if (arg == "--help") { print_usage(); return 0; }
         if (arg.rfind("--", 0) == 0) {
-            if (i + 1 < argc) {
-                args[arg.substr(2)] = argv[++i];
-            } else {
-                fprintf(stderr, "Error: Missing value for argument %s\n", arg.c_str());
-                return 1;
-            }
+            if (i + 1 < argc) { args[arg.substr(2)] = argv[++i]; }
+            else { fprintf(stderr, "Error: Missing value for argument %s\n", arg.c_str()); return 1; }
         } else {
             fprintf(stderr, "Error: Unrecognized positional argument: %s\n", arg.c_str());
             print_usage();
@@ -119,8 +124,7 @@ int main(int argc, char **argv) {
             else { std::cerr << "Warning: unknown tonemap '" << args["tonemap"] << "'. Defaulting to gamma.\n"; }
         }
     } catch (const std::exception& e) {
-        fprintf(stderr, "Error parsing arguments: %s\n", e.what());
-        return 1;
+        fprintf(stderr, "Error parsing arguments: %s\n", e.what()); return 1;
     }
 
     if (cfg.input_path.empty() || cfg.output_path.empty()) {
@@ -128,33 +132,18 @@ int main(int argc, char **argv) {
         print_usage();
         return 1;
     }
-    // --- End Argument Parsing ---
-
-#ifdef HL_MEMINFO
-    halide_enable_malloc_trace();
-#endif
 
     fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
     Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
 
-    // Build the tone curve LUT from the command line parameters.
     ToneCurveUtils tone_curve_util(cfg);
     Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
 
-#ifdef HL_MEMINFO
-    info(input, "input");
-    stats(input, "input");
-    // dump(input, "input");
-#endif
-
-    // These color matrices are for the sensor in the Nokia N900 and are
-    // taken from the FCam source.
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
                                {-0.2175f, -1.8751f, 6.9640f, -26.6970f}};
-
     float _matrix_7000[][4] = {{2.2997f, -0.4478f, 0.1706f, -39.0923f},
                                {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
                                {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
@@ -169,41 +158,31 @@ int main(int argc, char **argv) {
     int blackLevel = 25;
     int whiteLevel = 1023;
 
-#ifdef BENCHMARK
     double best;
-    // Benchmark the manually-scheduled pipeline
-    best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe(input, demosaic_id, matrix_3200, matrix_7000,
-                    cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                    tone_curve_lut, output);
-        output.device_sync();
-    });
+
+#if defined(PIPELINE_PRECISION_F32)
+    fprintf(stderr, "Using float32 pipeline.\n");
+    best = benchmark_pipeline(cfg.timing_iterations, camera_pipe_f32, input, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                              tone_curve_lut, output);
+#elif defined(PIPELINE_PRECISION_U16)
+    fprintf(stderr, "Using uint16_t pipeline.\n");
+    best = benchmark_pipeline(cfg.timing_iterations, camera_pipe_u16, input, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
+                              tone_curve_lut, output);
+#endif
+
+    output.device_sync();
     fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
 
-    // Benchmark the auto-scheduled pipeline, if it's enabled
 #ifndef NO_AUTO_SCHEDULE
-    best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe_auto_schedule(input, demosaic_id, matrix_3200, matrix_7000,
-                                  cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                                  tone_curve_lut, output);
-        output.device_sync();
-    });
-    fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
-#endif  // NO_AUTO_SCHEDULE
-
-#else  // not BENCHMARK
-    // Just run the manually-scheduled pipeline once.
-    camera_pipe(input, demosaic_id, matrix_3200, matrix_7000,
-                cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                tone_curve_lut, output);
-    output.device_sync();
-#endif  // BENCHMARK
+    // Auto-schedule benchmarking would go here, with a similar if/else structure
+#endif
 
     fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
     convert_and_save_image(output, cfg.output_path);
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
-    // Also render the curve for visual inspection
     std::string curve_png_path = cfg.output_path.substr(0, cfg.output_path.find_last_of('.')) + "_curve.png";
     if (tone_curve_util.render_curves_to_png(curve_png_path.c_str())) {
         fprintf(stderr, "curve:  %s\n", curve_png_path.c_str());

@@ -2,31 +2,24 @@
 #define STAGE_CA_CORRECT_H
 
 #include "Halide.h"
+#include "pipeline_helpers.h"
 #include <vector>
+#include <type_traits>
 
 /*
     This stage implements a chromatic aberration correction algorithm.
     The implementation is a simplified version of the algorithm found in darktable,
     which itself is based on RawTherapee code.
-
-    Original authors:
-    Copyright (c) 2008-2010  Emil Martinec <ejmartin@uchicago.edu>
-    Copyright (c) for improvements 2018 Ingo Weyrich <heckflosse67@gmx.de>
-    This Halide implementation by the user of this model.
-
-    The original algorithm uses a global polynomial fit to model CA, which is
-    difficult to implement efficiently in Halide. This version approximates that
-    step by calculating shifts on a coarse grid and then blurring them to get
-    a smooth, global shift field.
 */
 
 #ifdef NO_CA_CORRECT
-class CACorrectBuilder {
+template <typename T>
+class CACorrectBuilder_T {
 public:
     Halide::Func output;
     std::vector<Halide::Func> intermediates;
 
-    CACorrectBuilder(Halide::Func input_raw,
+    CACorrectBuilder_T(Halide::Func input_raw,
                      Halide::Var x, Halide::Var y,
                      Halide::Expr strength,
                      Halide::Expr blackLevel, Halide::Expr whiteLevel,
@@ -82,12 +75,13 @@ inline Halide::Expr bilinear(Halide::Func f, Halide::Expr x, Halide::Expr y, Hal
 } // namespace
 
 
-class CACorrectBuilder {
+template <typename T>
+class CACorrectBuilder_T {
 public:
     Halide::Func output;
     std::vector<Halide::Func> intermediates;
 
-    CACorrectBuilder(Halide::Func input_raw,
+    CACorrectBuilder_T(Halide::Func input_raw,
                      Halide::Var x, Halide::Var y,
                      Halide::Expr strength,
                      Halide::Expr blackLevel, Halide::Expr whiteLevel,
@@ -98,9 +92,10 @@ public:
         using namespace Halide::ConciseCasts;
 
         output = Halide::Func("ca_corrected");
+        Halide::Type proc_type = input_raw.type();
 
-        // 1. Normalize input to float [0, 1]
-        Func norm_raw("norm_raw");
+        // 1. Normalize input to float [0, 1] for internal calculations.
+        Func norm_raw("norm_raw_ca");
         norm_raw(x, y) = (cast<float>(input_raw(x, y)) - blackLevel) / (whiteLevel - blackLevel);
 
         // 2. Determine color of each pixel from GRBG Bayer pattern
@@ -176,12 +171,7 @@ public:
             Expr shift = select(v == 0, shift_v, shift_h);
 
             block_shifts(bx, by, c, v) = clamp(shift, -bslim, bslim);
-
-            // Add estimates to help the autoscheduler determine the buffer size.
-            // This MUST be done after the function is defined.
-            Expr bx_extent = (width + ts - 1) / ts;
-            Expr by_extent = (height + ts - 1) / ts;
-            block_shifts.set_estimates({ {0, bx_extent}, {0, by_extent}, {0, 2}, {0, 2} });
+            block_shifts.set_estimates({ {0, (width + ts - 1) / ts}, {0, (height + ts - 1) / ts}, {0, 2}, {0, 2} });
         }
 
         // 5. Blur the block_shifts to get a smooth global shift field.
@@ -206,9 +196,6 @@ public:
             Expr f_bx = cast<float>(x) / 32.f;
             Expr f_by = cast<float>(y) / 32.f;
 
-            // The auto-scheduler needs to know the bounds of the resampling offsets.
-            // Although the shifts are clamped earlier, we clamp them again here
-            // to make the bounds explicit for the static analysis.
             const float shift_bound = 4.0f;
             Expr shift_vr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 0), -shift_bound, shift_bound) * strength;
             Expr shift_hr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 1), -shift_bound, shift_bound) * strength;
@@ -222,14 +209,15 @@ public:
             corrected_f(x, y) = select(is_r, r_new, is_b, b_new, norm_raw(x, y));
         }
 
-        // 7. Denormalize and convert back to uint16
+        // 7. Denormalize and convert back to the target processing type
         Func denormalized("denormalized");
-        denormalized(x, y) = corrected_f(x, y) * (whiteLevel - blackLevel) + blackLevel;
+        Expr denorm_val = corrected_f(x, y) * (whiteLevel - blackLevel) + blackLevel;
+        denormalized(x, y) = cast(proc_type, proc_type_sat<T>(denorm_val));
 
         // This stage is a no-op if strength is zero.
         output(x, y) = select(strength < 0.001f,
                               input_raw(x, y),
-                              cast<uint16_t>(clamp(denormalized(x, y), 0, 65535)));
+                              denormalized(x,y));
 
         intermediates.push_back(norm_raw);
         intermediates.push_back(g_interp);

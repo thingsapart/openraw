@@ -11,11 +11,13 @@
 #include "demosaic_fast.h"
 
 // This class acts as a dispatcher for multiple demosaicing algorithms.
+// It is now templated to support different processing precisions.
 // It instantiates all available algorithms and uses Halide's 'select'
 // primitive to choose one at runtime based on a parameter. Halide's JIT
 // compiler will then perform dead-code elimination on the inactive
 // algorithm paths, resulting in zero runtime overhead for the selection.
-class DemosaicDispatcher {
+template<typename T>
+class DemosaicDispatcherT {
 public:
     // The final, selected output Func
     Halide::Func output;
@@ -24,21 +26,21 @@ public:
     // This is needed so the generator can schedule them.
     std::vector<Halide::Func> all_intermediates;
 
-    DemosaicDispatcher(Halide::Func deinterleaved, Halide::Expr algo_id, Halide::Var x, Halide::Var y, Halide::Var c) {
+    DemosaicDispatcherT(Halide::Func deinterleaved, Halide::Expr algo_id, Halide::Var x, Halide::Var y, Halide::Var c) {
         
         // --- Instantiate all demosaic algorithms ---
         
         // Algorithm 0: AHD
-        DemosaicAHD ahd_builder(deinterleaved, x, y, c);
+        DemosaicAHD_T<T> ahd_builder(deinterleaved, x, y, c);
         
         // Algorithm 1: LMMSE
-        DemosaicLMMSE lmmse_builder(deinterleaved, x, y, c);
+        DemosaicLMMSE_T<T> lmmse_builder(deinterleaved, x, y, c);
         
         // Algorithm 2: RI
-        DemosaicRI ri_builder(deinterleaved, x, y, c);
+        DemosaicRI_T<T> ri_builder(deinterleaved, x, y, c);
         
         // Algorithm 3: Fast (the original algorithm)
-        DemosaicFast fast_builder(deinterleaved, x, y, c);
+        DemosaicFastT<T> fast_builder(deinterleaved, x, y, c);
 
         // --- Use 'select' to create the final dispatcher Func ---
         output = Halide::Func("demosaiced");

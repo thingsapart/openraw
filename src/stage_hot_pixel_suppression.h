@@ -11,7 +11,7 @@ inline Halide::Func pipeline_hot_pixel_suppression(Halide::Func input, Halide::V
     return denoised;
 #else
     Halide::Func denoised("denoised");
-    // Real implementation
+    // Works on any numeric type thanks to Halide's generic max/clamp
     Halide::Expr max_neighbor = max(input(x - 2, y), input(x + 2, y),
                                   input(x, y - 2), input(x, y + 2));
 

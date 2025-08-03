@@ -4,7 +4,9 @@
 #include "Halide.h"
 #include "halide_trace_config.h"
 #include "pipeline_helpers.h"
+#include <type_traits>
 
+template <typename T>
 inline Halide::Func pipeline_sharpen(Halide::Func input,
                                      Halide::Expr sharpen_strength,
                                      Halide::Var x, Halide::Var y, Halide::Var c,
@@ -15,29 +17,12 @@ inline Halide::Func pipeline_sharpen(Halide::Func input,
 
 #ifdef NO_SHARPEN
     Func sharpened("sharpened_dummy");
-    // Dummy pass-through stage
     sharpened(x, y, c) = input(x, y, c);
     return sharpened;
 #else
     Func sharpened("sharpened");
 
-    Func sharpen_strength_x32("sharpen_strength_x32");
-    // The sharpening factor is small, so u8 is fine.
-    sharpen_strength_x32() = u8_sat(sharpen_strength * 32);
-    if (!is_autoscheduled) {
-        sharpen_strength_x32.compute_root();
-        if (target.has_gpu_feature()) {
-            sharpen_strength_x32.gpu_single_thread();
-        }
-    }
-
-    Halide::Trace::FuncConfig cfg;
-    cfg.labels = {{"sharpen strength"}};
-    cfg.pos = {10, 1000};
-    sharpen_strength_x32.add_trace_tag(cfg.to_trace_tag());
-
     // Create a blurred version of the image (unsharp mask)
-    // The input is now uint16.
     Func unsharp_y("unsharp_y");
     unsharp_y(x, y, c) = blur121(input(x, y - 1, c), input(x, y, c), input(x, y + 1, c));
 
@@ -45,14 +30,18 @@ inline Halide::Func pipeline_sharpen(Halide::Func input,
     unsharp(x, y, c) = blur121(unsharp_y(x - 1, y, c), unsharp_y(x, y, c), unsharp_y(x + 1, y, c));
 
     // Calculate the sharpening mask (difference between original and blurred)
-    // Cast to a wider signed type for the subtraction.
-    Func mask("mask");
-    mask(x, y, c) = cast<int32_t>(input(x, y, c)) - cast<int32_t>(unsharp(x, y, c));
+    // Use a wider signed type for the subtraction if the input is integer.
+    Expr mask;
+    if (std::is_same<T, uint16_t>::value) {
+        mask = cast<int32_t>(input(x, y, c)) - cast<int32_t>(unsharp(x, y, c));
+    } else {
+        mask = input(x, y, c) - unsharp(x, y, c);
+    }
 
     // Add the scaled mask back to the original image.
-    // Use a wider intermediate type to prevent overflow before clamping.
-    Expr sharpened_val = cast<int32_t>(input(x, y, c)) + (mask(x, y, c) * sharpen_strength_x32()) / 32;
-    sharpened(x, y, c) = u16_sat(sharpened_val);
+    Expr sharpened_val = input(x, y, c) + mask * sharpen_strength;
+    
+    sharpened(x, y, c) = proc_type_sat<T>(sharpened_val);
     
     return sharpened;
 #endif
