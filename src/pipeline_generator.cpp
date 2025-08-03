@@ -39,11 +39,9 @@ public:
     Input<int> saturation_algorithm{"saturation_algorithm"};
     Input<int> demosaic_algorithm{"demosaic_algorithm"};
     Input<int> curve_mode{"curve_mode"};
-    // FIX: The LUT is now uint8, as it contains the final 8-bit values.
     Input<Buffer<uint8_t, 2>> tone_curves{"tone_curves"};
     Input<float> sharpen_strength{"sharpen_strength"};
     Input<float> ca_correction_strength{"ca_correction_strength"};
-    // Note: tonemap_algorithm is now passed to the host-side LUT generator, not Halide.
     Output<Buffer<uint8_t, 3>> processed{"processed"};
 
     void generate() {
@@ -51,14 +49,11 @@ public:
         Expr out_width_est = 2592 - 32;
         Expr out_height_est = 1968 - 24;
 
-        // Stage 0: Shift input
         Func shifted("shifted");
         shifted(x, y) = input(x + 16, y + 12);
 
-        // Stage 1: Hot pixel suppression
         Func denoised = pipeline_hot_pixel_suppression(shifted, x, y);
 
-        // Stage 1.5: Chromatic Aberration Correction
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,
                                     1, 4095,
@@ -66,40 +61,28 @@ public:
                                     get_target(), using_autoscheduler());
         Func ca_corrected = ca_builder.output;
 
-        // Stage 1.7: Normalization and Exposure to Float32
         Func normalized = pipeline_normalize_and_expose(ca_corrected, black_point, white_point, exposure, x, y);
 
-        // Stage 2: Deinterleave
         Func deinterleaved = pipeline_deinterleave(normalized, x, y, c);
 
-        // Stage 3: Demosaic
         DemosaicBuilder demosaic_builder(deinterleaved, x, y, c, demosaic_algorithm, out_width_est, out_height_est);
         Func demosaiced = demosaic_builder.output;
 
-        // Stage 4: Color correction
         Func color_corrected = pipeline_color_correct(demosaiced, matrix_3200, matrix_7000,
                                                       color_temp, tint, white_point, x, y, c,
                                                       get_target(), using_autoscheduler());
 
-        // Stage 5: Saturation
         Func saturated = pipeline_saturation(color_corrected, saturation, saturation_algorithm, x, y, c);
 
-        // OPTIMIZATION: Sharpening is now done in linear float space for better quality.
-        // We declare the intermediate blur Funcs here so they can be scheduled.
         Func unsharp("unsharp"), unsharp_y("unsharp_y");
         Func sharpened = pipeline_sharpen(saturated, sharpen_strength, x, y, c, unsharp, unsharp_y);
 
-        // OPTIMIZATION: Final tonemapping is now a single LUT lookup.
-        // The complex math is pre-calculated on the host.
-        // First, convert the linear float data to a uint16 index for the LUT.
         Func to_uint16_for_lut("to_uint16_for_lut");
         to_uint16_for_lut(x, y, c) = cast<uint16_t>(clamp(sharpened(x, y, c) * 65535.0f, 0.0f, 65535.0f));
 
-        // The LUT now contains the final 8-bit values.
         Expr lut_extent = tone_curves.dim(0).extent();
         Func curved = pipeline_apply_curve(to_uint16_for_lut, tone_curves, lut_extent, curve_mode, x, y, c);
 
-        // Set the final output Func
         processed(x, y, c) = curved(x, y, c);
 
         // ========== ESTIMATES ==========
@@ -120,12 +103,10 @@ public:
         ca_correction_strength.set_estimate(1.0);
         processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
-
         // ========== SCHEDULE ==========
         if (using_autoscheduler()) {
             // Let the auto-scheduler do its thing.
         } else if (get_target().has_gpu_feature()) {
-            // Manual GPU schedule
             Var xi, yi;
             processed.compute_root().gpu_tile(x, y, xi, yi, 28, 12);
             curved.compute_at(processed, xi).gpu_threads(xi, yi);
@@ -150,27 +131,34 @@ public:
             normalized.compute_at(processed, xi).gpu_threads(xi, yi);
             ca_corrected.compute_at(processed, xi).gpu_threads(xi, yi);
             denoised.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
-
         } else {
             // Manual CPU schedule
             int vec = get_target().natural_vector_size(Float(32));
             Expr strip_size = 32;
+            Var x_outer("x_outer");
 
             processed.compute_root()
                 .split(y, yo, yi, strip_size)
                 .parallel(yo)
-                .vectorize(x, vec * 2);
-
-            // Stages are computed per strip, from output backwards.
-            curved.compute_at(processed, yi).vectorize(x, vec * 2);
-            to_uint16_for_lut.compute_at(processed, yi).vectorize(x, vec);
-            sharpened.compute_at(processed, yi).vectorize(x, vec);
-
-            // OPTIMIZATION: Schedule intermediate sharpening blurs to avoid recomputation.
-            unsharp_y.compute_at(processed, yi).vectorize(x, vec);
-            unsharp.compute_at(processed, yi).vectorize(x, vec);
+                .split(x, x_outer, xi, vec * 2)
+                .vectorize(xi);
             
+            // The vertical blur is computed per scanline within the strip (`yi`),
+            // which creates an efficient sliding window.
+            // FIX: Use `yi` as the scheduling point, not the original `y`.
+            unsharp_y.compute_at(processed, yi).vectorize(x, vec);
+
+            // The pointwise operations are computed per strip.
             saturated.compute_at(processed, yi).vectorize(x, vec);
+
+            // The remaining final stages are computed inline within the `processed` loop.
+            // This keeps their data entirely in registers.
+            unsharp.compute_inline();
+            sharpened.compute_inline();
+            to_uint16_for_lut.compute_inline();
+            curved.compute_inline();
+            
+            // The earlier, more expensive stages are also computed per strip.
             color_corrected.compute_at(processed, yi).vectorize(x, vec);
             demosaiced.compute_at(processed, yi).vectorize(x, vec);
             
@@ -191,6 +179,7 @@ public:
             normalized.compute_at(processed, yi).vectorize(x, vec);
             ca_corrected.compute_at(processed, yi).vectorize(x, get_target().natural_vector_size(UInt(16)));
             
+            // Expensive root-level stages
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name() == "norm_raw") {
                     f.compute_root().vectorize(f.args()[0], vec);

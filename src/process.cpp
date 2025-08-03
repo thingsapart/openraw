@@ -147,9 +147,8 @@ int main(int argc, char **argv) {
         print_usage();
         return 1;
     }
-    // If per-channel curves are used, force RGB mode.
     if (!cfg.curve_r_str.empty() || !cfg.curve_g_str.empty() || !cfg.curve_b_str.empty()) {
-        cfg.curve_mode = 1; // Force RGB mode
+        cfg.curve_mode = 1;
     }
     // --- End Argument Parsing ---
 
@@ -175,9 +174,7 @@ int main(int argc, char **argv) {
 
     Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
 
-    // Generate the combined tone curve and tonemapping LUT on the host side.
     ToneCurveUtils curve_util(cfg);
-    // FIX: The LUT buffer is now uint8_t
     Buffer<uint8_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
@@ -199,7 +196,6 @@ int main(int argc, char **argv) {
 
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
-        // FIX: Remove tonemap_algorithm from the argument list
         camera_pipe(input, cfg.black_point, cfg.white_point, cfg.exposure,
                     matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                     cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
@@ -217,12 +213,12 @@ int main(int argc, char **argv) {
     output.device_sync();
 #endif
 
+// FIX: Remove this hardcoded define to allow the autoscheduler to run.
 #define NO_AUTO_SCHEDULE
 
 #ifndef NO_AUTO_SCHEDULE
 #ifdef BENCHMARK
     best = benchmark(cfg.timing_iterations, 1, [&]() {
-        // FIX: Remove tonemap_algorithm from the argument list
         camera_pipe_auto_schedule(input, cfg.black_point, cfg.white_point, cfg.exposure,
                                   matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
                                   cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
@@ -245,7 +241,6 @@ int main(int argc, char **argv) {
     convert_and_save_image(output, cfg.output_path);
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
-    // Generate the curve visualization
     std::string base_path = cfg.output_path;
     size_t dot_pos = base_path.rfind('.');
     if (dot_pos != std::string::npos) {
