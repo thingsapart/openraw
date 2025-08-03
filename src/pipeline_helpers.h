@@ -9,6 +9,12 @@ inline Halide::Expr avg(Halide::Expr a, Halide::Expr b) {
     return Halide::cast(a.type(), (Halide::cast(wider, a) + b + 1) / 2);
 }
 
+// Average four positive values rounding up
+inline Halide::Expr avg(Halide::Expr a, Halide::Expr b, Halide::Expr c, Halide::Expr d) {
+    Halide::Type wider = a.type().with_bits(a.type().bits() * 2);
+    return Halide::cast(a.type(), (Halide::cast(wider, a) + b + c + d + 2) / 4);
+}
+
 // 1-2-1 blur
 inline Halide::Expr blur121(Halide::Expr a, Halide::Expr b, Halide::Expr c) {
     return avg(avg(a, c), b);

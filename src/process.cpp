@@ -35,7 +35,8 @@ void print_usage() {
            "Required arguments:\n"
            "  --input <path>         Path to the input 16-bit RAW PNG file.\n"
            "  --output <path>        Path for the output 8-bit image file.\n\n"
-           "Basic Adjustment Options:\n"
+           "Pipeline Options:\n"
+           "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
@@ -61,6 +62,8 @@ int main(int argc, char **argv) {
 
     // --- Argument Parsing ---
     ProcessConfig cfg;
+    int demosaic_id = 3; // 0=ahd, 1=lmmse, 2=ri, 3=fast (default)
+
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -85,6 +88,13 @@ int main(int argc, char **argv) {
     try {
         if (args.count("input")) cfg.input_path = args["input"];
         if (args.count("output")) cfg.output_path = args["output"];
+        if (args.count("demosaic")) {
+            if (args["demosaic"] == "ahd") demosaic_id = 0;
+            else if (args["demosaic"] == "lmmse") demosaic_id = 1;
+            else if (args["demosaic"] == "ri") demosaic_id = 2;
+            else if (args["demosaic"] == "fast") demosaic_id = 3;
+            else { std::cerr << "Warning: unknown demosaic algorithm '" << args["demosaic"] << "'. Defaulting to fast.\n"; }
+        }
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
@@ -163,7 +173,7 @@ int main(int argc, char **argv) {
     double best;
     // Benchmark the manually-scheduled pipeline
     best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe(input, matrix_3200, matrix_7000,
+        camera_pipe(input, demosaic_id, matrix_3200, matrix_7000,
                     cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                     tone_curve_lut, output);
         output.device_sync();
@@ -173,7 +183,7 @@ int main(int argc, char **argv) {
     // Benchmark the auto-scheduled pipeline, if it's enabled
 #ifndef NO_AUTO_SCHEDULE
     best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe_auto_schedule(input, matrix_3200, matrix_7000,
+        camera_pipe_auto_schedule(input, demosaic_id, matrix_3200, matrix_7000,
                                   cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                                   tone_curve_lut, output);
         output.device_sync();
@@ -183,7 +193,7 @@ int main(int argc, char **argv) {
 
 #else  // not BENCHMARK
     // Just run the manually-scheduled pipeline once.
-    camera_pipe(input, matrix_3200, matrix_7000,
+    camera_pipe(input, demosaic_id, matrix_3200, matrix_7000,
                 cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
                 tone_curve_lut, output);
     output.device_sync();
