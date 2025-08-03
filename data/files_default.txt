@@ -1,3 +1,7 @@
 README.md
+doc/intro.md
+doc/HL_CEFD.md
 src/*
 Makefile
+doc/HL_Optimize.md
+TODO.md
