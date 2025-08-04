@@ -172,28 +172,28 @@ public:
             deinterleaved.compute_at(sharpened, x).gpu_threads(x,y);
 
         } else {
-            // Manual CPU schedule: Hybrid tiled/fused execution.
-            Var xo("xo");
+            // Manual CPU schedule: High-performance strip-fused schedule with sliding windows.
             int vec = this->get_target().natural_vector_size(halide_proc_type);
-            int tile_w = 16, tile_h = 16;
+            Expr strip_size = 32;
 
-            // --- Root-level pre-computation ---
+            // --- Root-level pre-computation for complex stages ---
             denoised_raw.compute_root().parallel(y).vectorize(x, vec);
             ca_corrected.compute_root().parallel(y).vectorize(x, vec);
 
-            // --- Main Tiled Pipeline ---
+            // --- Main Fused Pipeline ---
             final_stage.compute_root()
                 .reorder(c, x, y)
-                .tile(x, y, xo, yo, xi, yi, tile_w, tile_h)
-                .parallel(yo);
-
-            // Stages computed once per row of tiles (`yo`)
-            deinterleaved.compute_at(final_stage, yo).vectorize(x, vec);
+                .split(y, yo, yi, strip_size)
+                .parallel(yo)
+                .vectorize(x, vec);
+            
+            // Stages computed once per strip
             demosaiced.compute_at(final_stage, yo).vectorize(x, vec);
-
-            // Stages computed once per tile (`xo`)
-            curved.compute_at(final_stage, xo).vectorize(x, vec);
-            sharpened.compute_at(final_stage, xo).vectorize(x, vec);
+            deinterleaved.compute_at(final_stage, yo).vectorize(x, vec);
+            
+            // Stages computed per-scanline within each parallel strip.
+            curved.compute_at(final_stage, yi).vectorize(x, vec);
+            sharpened.compute_at(final_stage, yi).vectorize(x, vec);
             
             // --- Schedule Helpers ---
             corrected.compute_inline();
@@ -206,10 +206,9 @@ public:
             auto& blurred_luma = sharpen_builder.intermediates[3];
             gaussian_kernel.compute_root();
             
-            // The horizontal blur is computed per row of tiles.
-            luma_x.compute_at(final_stage, yo).vectorize(x, vec);
-            // The vertical blur is computed per tile.
-            blurred_luma.compute_at(final_stage, xo).vectorize(x, vec);
+            // SLIDING WINDOW OPTIMIZATION:
+            luma_x.store_at(final_stage, yo).compute_at(final_stage, yi).vectorize(x, vec);
+            blurred_luma.compute_at(sharpened, x).vectorize(x, vec);
 
             // Helpers for the root-computed CA stage
             for (Func f : ca_builder.intermediates) {

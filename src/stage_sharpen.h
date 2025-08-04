@@ -50,10 +50,10 @@ public:
 
         // Normalize the kernel
         Expr kernel_sum = sum(gaussian_kernel(r_blur.x), "sharpen_kernel_sum");
-        
+
         // Horizontal pass
         luma_x(x, y) = sum(luma_clamped(x + r_blur.x - kernel_center, y) * gaussian_kernel(r_blur.x), "sharpen_blur_x_sum") / kernel_sum;
-        
+
         // Vertical pass
         Func luma_x_clamped = BoundaryConditions::repeat_edge(luma_x, {{0, width}, {0, height}});
         blurred_luma(x, y) = sum(luma_x_clamped(x, y + r_blur.x - kernel_center) * gaussian_kernel(r_blur.x), "sharpen_blur_y_sum") / kernel_sum;
@@ -66,9 +66,9 @@ public:
         // --- 5. Apply Gain to color channels ---
         Expr gain = sharpened_luma / (luma(x, y) + 1e-6f); // Add epsilon for stability
         Expr sharpened_val = input(x, y, c) * gain;
-        
+
         output(x, y, c) = proc_type_sat<T>(sharpened_val);
-        
+
         intermediates.push_back(luma);
         intermediates.push_back(gaussian_kernel);
         intermediates.push_back(luma_x);
