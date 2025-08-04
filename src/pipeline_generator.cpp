@@ -46,7 +46,6 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> sharpen_strength{"sharpen_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_correction_strength{"ca_correction_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_strength{"denoise_strength"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_radius{"denoise_radius"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_eps{"denoise_eps"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> blackLevel{"blackLevel"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> whiteLevel{"whiteLevel"};
@@ -66,7 +65,7 @@ public:
         initial_raw(x, y) = input(x + 16, y + 12);
         
         DenoiseBuilder_T<T> denoise_builder{initial_raw, x, y,
-                                            denoise_strength, denoise_radius, denoise_eps,
+                                            denoise_strength, denoise_eps,
                                             blackLevel, whiteLevel,
                                             this->get_target(), this->using_autoscheduler()};
         
@@ -144,7 +143,6 @@ public:
         sharpen_strength.set_estimate(1.0f);
         ca_correction_strength.set_estimate(1.0f);
         denoise_strength.set_estimate(0.5f);
-        denoise_radius.set_estimate(2.0f);
         denoise_eps.set_estimate(0.01f);
         blackLevel.set_estimate(25);
         whiteLevel.set_estimate(1023);
@@ -186,15 +184,8 @@ public:
             // --- Independent Denoise Stage ---
             denoised_raw.compute_root().parallel(y).vectorize(x, vec);
 
-            // This nested specialization structure mirrors the nested select in the
-            // Func definition, which is critical for the Halide prover.
-            // 1. Create a specialization for the "denoise is off" case.
-            // 2. The unspecialized path becomes the "denoise is on" case.
-            // 3. Apply radius specializations to the "on" path.
+            // The only specialization needed now is to turn denoising on or off.
             denoised_raw.specialize(denoise_strength < 0.001f);
-            denoised_raw.specialize(denoise_radius <= 1.5f);
-            denoised_raw.specialize(denoise_radius <= 3.0f);
-            denoised_raw.specialize(denoise_radius <= 6.0f);
 
 
             // --- Fused Main Pipeline (Restored Original Schedule) ---
@@ -234,6 +225,17 @@ public:
             }
         }
         
+        // --- DEBUGGING ---
+        // Uncomment the line below to generate an HTML file showing the final,
+        // lowered pseudo-code for the denoising stage.
+        /*
+        denoised_raw.compile_to_lowered_stmt("denoised_raw_lowered.html",
+            {input, demosaic_algorithm_id, matrix_3200, matrix_7000, color_temp,
+             tint, sharpen_strength, ca_correction_strength, denoise_strength,
+             denoise_eps, blackLevel, whiteLevel, tone_curve_lut},
+            HTML);
+        */
+
         // Finally, assign the fully-defined and scheduled Func to the output.
         processed = final_stage;
         // The .bound() call should be on the final Func as well.

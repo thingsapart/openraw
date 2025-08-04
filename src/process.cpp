@@ -48,9 +48,8 @@ void print_usage() {
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
-           "Denoise Options:\n"
+           "Denoise Options (Radius is fixed at 2.0):\n"
            "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
-           "  --denoise-radius <val>   Denoise filter radius in pixels (default: 2.0).\n"
            "  --denoise-eps <val>      Denoise filter epsilon (default: 0.01).\n\n"
            "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
@@ -106,7 +105,6 @@ int main(int argc, char **argv) {
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
-        if (args.count("denoise-radius")) cfg.denoise_radius = std::stof(args["denoise-radius"]);
         if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
         if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
         if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
@@ -168,12 +166,12 @@ int main(int argc, char **argv) {
         #if defined(PIPELINE_PRECISION_F32)
             camera_pipe_f32(input, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
-                              denoise_strength_norm, cfg.denoise_radius, cfg.denoise_eps,
+                              denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut, output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
-                              denoise_strength_norm, cfg.denoise_radius, cfg.denoise_eps,
+                              denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut, output);
         #endif
         output.device_sync();
