@@ -5,3 +5,4 @@ src/*
 Makefile
 doc/HL_Optimize.md
 TODO.md
+NOTES.md

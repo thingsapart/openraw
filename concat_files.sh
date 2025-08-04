@@ -92,6 +92,8 @@ Please print out whole files, only those that you have changed. Do not give me j
 
 NOTE:
 
+Do not add comments like "FIX: ..." that describe what was fixed in _this step_/session, they will be obsolete soon enough and just clutter the file. Only add comments describing long-term pre-conditions, explaining the code as-written and so on.
+
 Format every file output the following way: start with a "!>>> {filename}" followed by a markdown code block and end with "!<<< end".
 
 EG:

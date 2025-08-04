@@ -7,7 +7,7 @@
 #include <type_traits>
 
 // Include the individual pipeline stages
-#include "stage_hot_pixel_suppression.h"
+#include "stage_denoise.h"
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h" // Now the dispatcher
@@ -23,6 +23,13 @@ Var x("x"), y("y"), c("c"), yi("yi"), yo("yo"), yii("yii"), xi("xi");
 template <typename T>
 class CameraPipeGenerator : public Halide::Generator<CameraPipeGenerator<T>> {
 public:
+    // --- Generator Parameters for build-time features ---
+    // These are switches that control what features are compiled into the pipeline.
+    // The Halide build system automatically enables features when it sees these
+    // specific names (e.g., 'profile', 'trace') set to true.
+    GeneratorParam<bool> profile{"profile", false};
+    GeneratorParam<bool> trace{"trace", false};
+
     // --- Define the processing type for this pipeline variant ---
     using proc_type = T;
     const Halide::Type halide_proc_type = Halide::type_of<proc_type>();
@@ -38,6 +45,9 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> tint{"tint"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> sharpen_strength{"sharpen_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_correction_strength{"ca_correction_strength"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_strength{"denoise_strength"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_radius{"denoise_radius"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_eps{"denoise_eps"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> blackLevel{"blackLevel"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> whiteLevel{"whiteLevel"};
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<uint16_t, 2>> tone_curve_lut{"tone_curve_lut"};
@@ -50,24 +60,31 @@ public:
         // ========== THE ALGORITHM ==========
         Expr out_width_est = 2592 - 32;
         Expr out_height_est = 1968 - 24;
-
-        // Stage 0: Shift and convert input to the processing type
-        Func raw_norm("raw_norm");
-        Expr shifted_val = input(x + 16, y + 12);
-        if (std::is_same<proc_type, float>::value) {
-            // For float path, normalize to [0, 1]
-            raw_norm(x, y) = (cast<float>(shifted_val) - blackLevel) / (whiteLevel - blackLevel);
+        
+        // Stage -1: Denoise raw data as a completely separate, materialized step.
+        Func initial_raw("initial_raw");
+        initial_raw(x, y) = input(x + 16, y + 12);
+        
+        DenoiseBuilder_T<T> denoise_builder{initial_raw, x, y,
+                                            denoise_strength, denoise_radius, denoise_eps,
+                                            blackLevel, whiteLevel,
+                                            this->get_target(), this->using_autoscheduler()};
+        
+        Func denoised_raw("denoised_raw");
+        Expr passthrough_val;
+        if (std::is_same<T, float>::value) {
+            passthrough_val = (cast<float>(initial_raw(x, y)) - blackLevel) / (whiteLevel - blackLevel);
         } else {
-            // U16 FIX: Perform subtraction in a signed type and then saturate.
-            // This prevents uint16 from wrapping around on negative results.
-            raw_norm(x, y) = u16_sat(cast<int32_t>(shifted_val) - blackLevel);
+            passthrough_val = initial_raw(x, y);
         }
-
-        // Stage 1: Hot pixel suppression
-        Func denoised = pipeline_hot_pixel_suppression(raw_norm, x, y);
+        
+        denoised_raw(x, y) = select(denoise_strength < 0.001f,
+                                    passthrough_val,
+                                    denoise_builder.output(x, y));
         
         // Stage 1.5: Chromatic Aberration Correction
-        CACorrectBuilder_T<T> ca_builder{denoised, x, y,
+        // This now consumes the output of the denoise stage directly.
+        CACorrectBuilder_T<T> ca_builder{denoised_raw, x, y,
                                        ca_correction_strength,
                                        blackLevel, whiteLevel,
                                        out_width_est, out_height_est,
@@ -102,15 +119,19 @@ public:
         Func sharpened = pipeline_sharpen<T>(curved, sharpen_strength, x, y, c,
                                           this->get_target(), this->using_autoscheduler());
 
-        // Final stage: Convert to 8-bit for output
+        // Final stage: Create an explicit Func for the output.
+        Func final_stage("final_stage");
         Expr final_val = sharpened(x, y, c);
         if (std::is_same<proc_type, float>::value) {
-            processed(x, y, c) = u8_sat(final_val * 255.0f);
+            final_stage(x, y, c) = u8_sat(final_val * 255.0f);
         } else {
-            processed(x, y, c) = u8_sat(final_val >> 8);
+            final_stage(x, y, c) = u8_sat(final_val >> 8);
         }
 
-        processed.bound(c, 0, 3);
+        // ========== Pipeline-level Tracing and Profiling Control ==========
+        if (trace) {
+            final_stage.trace_stores();
+        }
 
         // ========== ESTIMATES ==========
         input.set_estimates({{0, 2592}, {0, 1968}});
@@ -122,9 +143,12 @@ public:
         tint.set_estimate(0.0f);
         sharpen_strength.set_estimate(1.0f);
         ca_correction_strength.set_estimate(1.0f);
+        denoise_strength.set_estimate(0.5f);
+        denoise_radius.set_estimate(2.0f);
+        denoise_eps.set_estimate(0.01f);
         blackLevel.set_estimate(25);
         whiteLevel.set_estimate(1023);
-        processed.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
+        final_stage.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
         // ========== SCHEDULE ==========
         if (this->using_autoscheduler()) {
@@ -134,40 +158,54 @@ public:
             Var xi, yi;
             int tile_x = 28, tile_y = 12;
 
-            processed.compute_root().reorder(c, x, y).gpu_tile(x, y, xi, yi, tile_x, tile_y);
-            curved.compute_at(processed, x).gpu_threads(x, y);
-            corrected.compute_at(processed, x).gpu_threads(x, y);
-            demosaiced.compute_at(processed, x).gpu_threads(x, y);
-            
+            denoised_raw.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
+            final_stage.compute_root().reorder(c, x, y).gpu_tile(x, y, xi, yi, tile_x, tile_y);
+            curved.compute_at(final_stage, x).gpu_threads(x, y);
+            corrected.compute_at(final_stage, x).gpu_threads(x, y);
+            demosaiced.compute_at(final_stage, x).gpu_threads(x, y);
             for (Func f : demosaic_dispatcher.all_intermediates) {
                 if (f.dimensions() >= 2) {
-                    f.compute_at(processed, x).gpu_threads(f.args()[0], f.args()[1]);
+                    f.compute_at(final_stage, x).gpu_threads(f.args()[0], f.args()[1]);
                 }
             }
-            deinterleaved.compute_at(processed, x).unroll(x, 2).gpu_threads(x, y).reorder(c, x, y).unroll(c);
-            ca_corrected.compute_at(processed, x).gpu_threads(x, y);
+            deinterleaved.compute_at(final_stage, x).unroll(x, 2).gpu_threads(x, y).reorder(c, x, y).unroll(c);
+            ca_corrected.compute_at(final_stage, x).gpu_threads(x, y);
             for (Func f : ca_builder.intermediates) {
-                if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name().find("norm_raw") != std::string::npos) {
+                if (f.name().find("shifts") != std::string::npos) {
                     f.compute_root().gpu_tile(f.args()[0], f.args()[1], xi, yi, 16, 16);
                 } else {
-                    f.compute_at(processed, x).gpu_threads(x,y);
+                    f.compute_at(final_stage, x).gpu_threads(x,y);
                 }
             }
-            denoised.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
 
         } else {
             // Manual CPU schedule
             Expr strip_size = 32;
             int vec = this->get_target().natural_vector_size(halide_proc_type);
 
-            processed.compute_root()
+            // --- Independent Denoise Stage ---
+            denoised_raw.compute_root().parallel(y).vectorize(x, vec);
+
+            // This nested specialization structure mirrors the nested select in the
+            // Func definition, which is critical for the Halide prover.
+            // 1. Create a specialization for the "denoise is off" case.
+            // 2. The unspecialized path becomes the "denoise is on" case.
+            // 3. Apply radius specializations to the "on" path.
+            denoised_raw.specialize(denoise_strength < 0.001f);
+            denoised_raw.specialize(denoise_radius <= 1.5f);
+            denoised_raw.specialize(denoise_radius <= 3.0f);
+            denoised_raw.specialize(denoise_radius <= 6.0f);
+
+
+            // --- Fused Main Pipeline (Restored Original Schedule) ---
+            final_stage.compute_root()
                 .reorder(c, x, y)
                 .split(y, yo, yi, strip_size)
                 .parallel(yo)
                 .vectorize(x, vec);
 
-            curved.compute_at(processed, yi)
-                .store_at(processed, yo)
+            curved.compute_at(final_stage, yi)
+                .store_at(final_stage, yo)
                 .reorder(c, x, y)
                 .vectorize(x, vec);
             
@@ -181,21 +219,25 @@ public:
                 .reorder(c, x, y)
                 .unroll(c);
 
-            deinterleaved.compute_at(processed, yi)
-                .store_at(processed, yo)
+            deinterleaved.compute_at(final_stage, yi)
+                .store_at(final_stage, yo)
                 .reorder(c, x, y)
                 .vectorize(x, vec);
 
-            ca_corrected.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+            ca_corrected.compute_at(final_stage, yi).store_at(final_stage, yo).vectorize(x, vec);
             for (Func f : ca_builder.intermediates) {
                 if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name().find("norm_raw") != std::string::npos) {
                     f.compute_root().parallel(f.args()[1]).vectorize(f.args()[0], vec);
                 } else {
-                    f.compute_at(processed, yi).store_at(processed, yo).vectorize(x, vec);
+                    f.compute_at(final_stage, yi).store_at(final_stage, yo).vectorize(x, vec);
                 }
             }
-            denoised.compute_root().parallel(y).vectorize(x, vec);
         }
+        
+        // Finally, assign the fully-defined and scheduled Func to the output.
+        processed = final_stage;
+        // The .bound() call should be on the final Func as well.
+        final_stage.bound(c, 0, 3);
     }
 };
 

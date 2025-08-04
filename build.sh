@@ -1,5 +1,7 @@
 #!/bin/bash
 rm -rf build
-mkdir build && cd build
-cmake ..
+cmake -S . -B build -DCMAKE_HALIDE_TARGET=host-profile
+# mkdir build && cd build
+# cmake ..
+cd build
 cmake --build .

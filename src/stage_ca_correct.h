@@ -145,22 +145,22 @@ public:
 
             // --- Horizontal shifts (v=1) ---
             Expr gdiff_h = clamped_g_interp(tile_x + 1, tile_y) - clamped_g_interp(tile_x - 1, tile_y);
-            Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f));
-            Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f));
+            Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f), "ca_num_h_r_sum");
+            Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f), "ca_den_h_r_sum");
             Expr shift_h_r = num_h_r / (den_h_r + 1e-5f);
 
-            Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f));
-            Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f));
+            Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f), "ca_num_h_b_sum");
+            Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f), "ca_den_h_b_sum");
             Expr shift_h_b = num_h_b / (den_h_b + 1e-5f);
 
             // --- Vertical shifts (v=0) ---
             Expr gdiff_v = clamped_g_interp(tile_x, tile_y + 1) - clamped_g_interp(tile_x, tile_y - 1);
-            Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f));
-            Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f));
+            Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f), "ca_num_v_r_sum");
+            Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f), "ca_den_v_r_sum");
             Expr shift_v_r = num_v_r / (den_v_r + 1e-5f);
 
-            Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f));
-            Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f));
+            Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f), "ca_num_v_b_sum");
+            Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f), "ca_den_v_b_sum");
             Expr shift_v_b = num_v_b / (den_v_b + 1e-5f);
             
             const float bslim = 3.99f;
@@ -183,8 +183,8 @@ public:
             
             Func blur_x("blur_x_shifts"), blur_y("blur_y_shifts");
             RDom r_blur(-4, 9);
-            blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v));
-            blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v));
+            blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v), "ca_shifts_blur_x_sum");
+            blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v), "ca_shifts_blur_y_sum");
             blurred_shifts(bx, by, c, v) = blur_y(bx, by, c, v) / 81.0f;
             intermediates.push_back(blur_x);
             intermediates.push_back(blur_y);

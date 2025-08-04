@@ -3,34 +3,35 @@
 
 #include "Halide.h"
 #include <vector>
+#include <string>
 
 namespace Halide {
 
 /**
  * Box filter specialization for 2D (single-channel) Funcs.
+ * FIX: Now accepts the Vars `x` and `y` to operate on.
  */
-inline Func box_filter_2d(Func f, int width, int height) {
-    Func blur_x("box_blur_x_2d"), blur_y("box_blur_y_2d");
-    Var x("bf2d_x"), y("bf2d_y");
+inline Func box_filter_2d(Func f, int width, int height, const std::string &name_prefix, Var x, Var y) {
+    Func blur_x(name_prefix + "_blur_x"), blur_y(name_prefix + "_blur_y");
     RDom dom_x(-width / 2, width);
     RDom dom_y(-height / 2, height);
 
-    blur_x(x, y) = sum(f(x + dom_x, y));
-    blur_y(x, y) = sum(blur_x(x, y + dom_y));
+    blur_x(x, y) = sum(f(x + dom_x, y), name_prefix + "_sum_x");
+    blur_y(x, y) = sum(blur_x(x, y + dom_y), name_prefix + "_sum_y");
     return blur_y;
 }
 
 /**
  * Box filter specialization for 3D (multi-channel) Funcs.
+ * FIX: Now accepts the Vars `x`, `y`, and `c` to operate on.
  */
-inline Func box_filter_3d(Func f, int width, int height) {
-    Func blur_x("box_blur_x_3d"), blur_y("box_blur_y_3d");
-    Var x("bf3d_x"), y("bf3d_y"), c("bf3d_c");
+inline Func box_filter_3d(Func f, int width, int height, const std::string &name_prefix, Var x, Var y, Var c) {
+    Func blur_x(name_prefix + "_blur_x"), blur_y(name_prefix + "_blur_y");
     RDom dom_x(-width / 2, width);
     RDom dom_y(-height / 2, height);
 
-    blur_x(x, y, c) = sum(f(x + dom_x, y, c));
-    blur_y(x, y, c) = sum(blur_x(x, y + dom_y, c));
+    blur_x(x, y, c) = sum(f(x + dom_x, y, c), name_prefix + "_sum_x");
+    blur_y(x, y, c) = sum(blur_x(x, y + dom_y, c), name_prefix + "_sum_y");
     return blur_y;
 }
 
@@ -52,7 +53,7 @@ public:
 
     // --- Constructor ---
     // It now accepts the Vars to use for defining the final output Func.
-    GuidedFilterBuilder(Func image, Func guide, Var x, Var y, Var c, int radius = 16, float eps = 0.01f) {
+    GuidedFilterBuilder(Func image, Func guide, Var x, Var y, Var c, int radius = 16, Expr eps = 0.01f) {
         // Internal Vars for intermediate funcs to avoid name conflicts.
         Var xi("gf_xi"), yi("gf_yi"), ci("gf_ci");
 
@@ -81,15 +82,14 @@ public:
         intermediates.push_back(box_Ip);
 
         // --- Convolve moments with a box filter ---
-        Func mean_I("mean_I"), mean_II("mean_II");
-        mean_I(xi, yi) = box_filter_2d(box_I, R, R)(xi, yi);
-        mean_II(xi, yi) = box_filter_2d(box_II, R, R)(xi, yi);
+        // FIX: Pass the correct Vars (`xi`, `yi`, `ci`) to the box filter helpers.
+        Func mean_I = box_filter_2d(box_I, R, R, "mean_I", xi, yi);
+        Func mean_II = box_filter_2d(box_II, R, R, "mean_II", xi, yi);
         intermediates.push_back(mean_I);
         intermediates.push_back(mean_II);
 
-        Func mean_p("mean_p"), mean_Ip("mean_Ip");
-        mean_p(xi, yi, ci) = box_filter_3d(box_p, R, R)(xi, yi, ci);
-        mean_Ip(xi, yi, ci) = box_filter_3d(box_Ip, R, R)(xi, yi, ci);
+        Func mean_p = box_filter_3d(box_p, R, R, "mean_p", xi, yi, ci);
+        Func mean_Ip = box_filter_3d(box_Ip, R, R, "mean_Ip", xi, yi, ci);
         intermediates.push_back(mean_p);
         intermediates.push_back(mean_Ip);
 

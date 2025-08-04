@@ -28,6 +28,9 @@ struct ProcessConfig {
     int curve_mode = 1; // 0=Luma, 1=RGB
     float sharpen = 1.0f;
     float ca_strength = 0.0f; // Default to off
+    float denoise_strength = 50.0f;
+    float denoise_radius = 2.0f;
+    float denoise_eps = 0.01f;
     int timing_iterations = 5;
     int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
 };
@@ -61,3 +64,4 @@ private:
 };
 
 #endif // TONE_CURVE_UTILS_H
+

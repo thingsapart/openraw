@@ -1,10 +1,11 @@
-#include "halide_benchmark.h"
-
 #include <cstdint>
 #include <string>
 #include <map>
 #include <stdexcept>
 #include <iostream>
+#include <cstdlib> // For getenv
+#include <chrono>  // For timing
+#include <limits>  // For numeric_limits
 
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
@@ -47,6 +48,10 @@ void print_usage() {
            "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
+           "Denoise Options:\n"
+           "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
+           "  --denoise-radius <val>   Denoise filter radius in pixels (default: 2.0).\n"
+           "  --denoise-eps <val>      Denoise filter epsilon (default: 0.01).\n\n"
            "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
@@ -57,13 +62,6 @@ void print_usage() {
            "  --curve-b <str>        Blue channel curve points. Overrides --curve-points for blue.\n"
            "  --curve-mode <name>    Curve mode. 'luma' or 'rgb' (default: rgb).\n\n"
            "  --help                 Display this help message.\n");
-}
-
-template<typename PipelineFunc, typename... Args>
-double benchmark_pipeline(int iterations, PipelineFunc func, Args... args) {
-    return benchmark(iterations, 1, [&]() {
-        func(args...);
-    });
 }
 
 int main(int argc, char **argv) {
@@ -107,6 +105,9 @@ int main(int argc, char **argv) {
         if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
+        if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
+        if (args.count("denoise-radius")) cfg.denoise_radius = std::stof(args["denoise-radius"]);
+        if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
         if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
         if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
         if (args.count("curve-g")) cfg.curve_g_str = args["curve-g"];
@@ -157,23 +158,44 @@ int main(int argc, char **argv) {
 
     int blackLevel = 25;
     int whiteLevel = 1023;
+    float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
 
-    double best;
+    // --- Simple Timing/Profiling Loop ---
+    double best_time = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < cfg.timing_iterations; i++) {
+        auto start = std::chrono::high_resolution_clock::now();
 
-#if defined(PIPELINE_PRECISION_F32)
-    fprintf(stderr, "Using float32 pipeline.\n");
-    best = benchmark_pipeline(cfg.timing_iterations, camera_pipe_f32, input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                              tone_curve_lut, output);
-#elif defined(PIPELINE_PRECISION_U16)
-    fprintf(stderr, "Using uint16_t pipeline.\n");
-    best = benchmark_pipeline(cfg.timing_iterations, camera_pipe_u16, input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength, blackLevel, whiteLevel,
-                              tone_curve_lut, output);
-#endif
+        #if defined(PIPELINE_PRECISION_F32)
+            camera_pipe_f32(input, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
+                              denoise_strength_norm, cfg.denoise_radius, cfg.denoise_eps,
+                              blackLevel, whiteLevel, tone_curve_lut, output);
+        #elif defined(PIPELINE_PRECISION_U16)
+            camera_pipe_u16(input, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
+                              denoise_strength_norm, cfg.denoise_radius, cfg.denoise_eps,
+                              blackLevel, whiteLevel, tone_curve_lut, output);
+        #endif
+        output.device_sync();
 
-    output.device_sync();
-    fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end - start;
+        if (elapsed.count() < best_time) {
+            best_time = elapsed.count();
+        }
+    }
+
+    // The profiler will print its report to stderr automatically when the program
+    // exits, so we just need to print our own timing results.
+    // Check if profiling was enabled to avoid printing benchmark time when it's not relevant.
+    if (getenv("HL_PROFILE") == nullptr) {
+        #if defined(PIPELINE_PRECISION_F32)
+            fprintf(stderr, "Using float32 pipeline.\n");
+        #elif defined(PIPELINE_PRECISION_U16)
+            fprintf(stderr, "Using uint16_t pipeline.\n");
+        #endif
+        fprintf(stderr, "Halide (manual):\t%gus\n", best_time * 1e6);
+    }
 
 #ifndef NO_AUTO_SCHEDULE
     // Auto-schedule benchmarking would go here, with a similar if/else structure
