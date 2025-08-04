@@ -129,7 +129,7 @@ public:
         Var bx("bx"), by("by"), c("c_ca"), v("v_ca");
         {
             int ts = 32;
-            RDom r(0, ts, 0, ts);
+            RDom r(0, ts, 0, ts, "ca_rdom");
             Expr tile_x = bx * ts + r.x;
             Expr tile_y = by * ts + r.y;
 
@@ -182,7 +182,7 @@ public:
             Func clamped_shifts = BoundaryConditions::repeat_edge(block_shifts, block_bounds);
             
             Func blur_x("blur_x_shifts"), blur_y("blur_y_shifts");
-            RDom r_blur(-4, 9);
+            RDom r_blur(-4, 9, "ca_blur_rdom");
             blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v), "ca_shifts_blur_x_sum");
             blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v), "ca_shifts_blur_y_sum");
             blurred_shifts(bx, by, c, v) = blur_y(bx, by, c, v) / 81.0f;

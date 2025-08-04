@@ -27,6 +27,8 @@ struct ProcessConfig {
     std::string curve_b_str;
     int curve_mode = 1; // 0=Luma, 1=RGB
     float sharpen = 1.0f;
+    float sharpen_radius = 1.0f;
+    float sharpen_threshold = 0.02f;
     float ca_strength = 0.0f; // Default to off
     float denoise_strength = 50.0f;
     float denoise_eps = 0.01f;

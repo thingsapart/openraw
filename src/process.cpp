@@ -45,9 +45,12 @@ void print_usage() {
            "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
-           "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
+           "Sharpening Options (applied in linear space):\n"
+           "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
+           "  --sharpen-radius <px>  Sharpening radius in pixels (default: 1.0).\n"
+           "  --sharpen-threshold <val> Sharpening mask threshold (0-1, default: 0.02).\n\n"
            "Denoise Options (Radius is fixed at 2.0):\n"
            "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
            "  --denoise-eps <val>      Denoise filter epsilon (default: 0.01).\n\n"
@@ -102,6 +105,8 @@ int main(int argc, char **argv) {
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
         if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
         if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
+        if (args.count("sharpen-radius")) cfg.sharpen_radius = std::stof(args["sharpen-radius"]);
+        if (args.count("sharpen-threshold")) cfg.sharpen_threshold = std::stof(args["sharpen-threshold"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
@@ -165,12 +170,12 @@ int main(int argc, char **argv) {
 
         #if defined(PIPELINE_PRECISION_F32)
             camera_pipe_f32(input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.sharpen_radius, cfg.sharpen_threshold, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut, output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.sharpen_radius, cfg.sharpen_threshold, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut, output);
         #endif

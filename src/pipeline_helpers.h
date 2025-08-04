@@ -42,4 +42,13 @@ inline Halide::Expr blur121(Halide::Expr a, Halide::Expr b, Halide::Expr c) {
     return avg(avg(a, c), b);
 }
 
+// GLSL-style smoothstep function.
+inline Halide::Expr smoothstep(Halide::Expr edge0, Halide::Expr edge1, Halide::Expr x) {
+    using namespace Halide;
+    // Scale, bias and saturate x to 0..1 range
+    Expr t = clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    // Evaluate polynomial
+    return t * t * (3.0f - 2.0f * t);
+}
+
 #endif // PIPELINE_HELPERS_H

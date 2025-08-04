@@ -12,8 +12,8 @@
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h" // Now the dispatcher
 #include "stage_color_correct.h"
-#include "stage_apply_curve.h"
 #include "stage_sharpen.h"
+#include "stage_apply_curve.h"
 
 using namespace Halide;
 
@@ -44,6 +44,8 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> color_temp{"color_temp"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> tint{"tint"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> sharpen_strength{"sharpen_strength"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> sharpen_radius{"sharpen_radius"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> sharpen_threshold{"sharpen_threshold"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_correction_strength{"ca_correction_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_strength{"denoise_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_eps{"denoise_eps"};
@@ -98,29 +100,28 @@ public:
         Func demosaiced = demosaic_dispatcher.output;
 
         // Stage 4: Color correction
-        Func corrected = pipeline_color_correct(demosaiced, halide_proc_type, matrix_3200, matrix_7000,
-                                                color_temp, tint, x, y, c, whiteLevel, blackLevel,
-                                                this->get_target(), this->using_autoscheduler());
+        ColorCorrectBuilder_T<T> color_correct_builder(demosaiced, halide_proc_type, matrix_3200, matrix_7000,
+                                                       color_temp, tint, x, y, c, whiteLevel, blackLevel);
+        Func corrected = color_correct_builder.output;
 
-        // Stage 5: Apply tone curve from LUT
+        // Stage 5: Sharpen the image (now on linear data)
+        SharpenBuilder_T<T> sharpen_builder(corrected, sharpen_strength, sharpen_radius, sharpen_threshold,
+                                            out_width_est, out_height_est, x, y, c);
+        Func sharpened = sharpen_builder.output;
+
+        // Stage 6: Apply tone curve from LUT (now after sharpening)
         Func tone_curve_func("tone_curve_func");
         Var lut_x("lut_x_var"), lut_c("lut_c_var");
         tone_curve_func(lut_x, lut_c) = tone_curve_lut(lut_x, lut_c);
         Expr lut_size_expr = tone_curve_lut.dim(0).extent();
 
-        // Correctly call the templated function
-        Func curved = pipeline_apply_curve<T>(corrected, blackLevel, whiteLevel,
+        Func curved = pipeline_apply_curve<T>(sharpened, blackLevel, whiteLevel,
                                            tone_curve_func, lut_size_expr, x, y, c,
                                            this->get_target(), this->using_autoscheduler());
         
-        // Stage 6: Sharpen the image
-        // Correctly call the templated function
-        Func sharpened = pipeline_sharpen<T>(curved, sharpen_strength, x, y, c,
-                                          this->get_target(), this->using_autoscheduler());
-
-        // Final stage: Create an explicit Func for the output.
+        // Final stage: Create an explicit Func for the output, consuming the curved result.
         Func final_stage("final_stage");
-        Expr final_val = sharpened(x, y, c);
+        Expr final_val = curved(x, y, c);
         if (std::is_same<proc_type, float>::value) {
             final_stage(x, y, c) = u8_sat(final_val * 255.0f);
         } else {
@@ -141,6 +142,8 @@ public:
         color_temp.set_estimate(3700);
         tint.set_estimate(0.0f);
         sharpen_strength.set_estimate(1.0f);
+        sharpen_radius.set_estimate(1.0f);
+        sharpen_threshold.set_estimate(0.02f);
         ca_correction_strength.set_estimate(1.0f);
         denoise_strength.set_estimate(0.5f);
         denoise_eps.set_estimate(0.01f);
@@ -157,70 +160,65 @@ public:
             int tile_x = 28, tile_y = 12;
 
             denoised_raw.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
+            ca_corrected.compute_root().gpu_tile(x, y, xi, yi, 16, 8);
+            sharpened.compute_root().reorder(c, x, y).gpu_tile(x, y, xi, yi, tile_x, tile_y);
+
             final_stage.compute_root().reorder(c, x, y).gpu_tile(x, y, xi, yi, tile_x, tile_y);
             curved.compute_at(final_stage, x).gpu_threads(x, y);
-            corrected.compute_at(final_stage, x).gpu_threads(x, y);
-            demosaiced.compute_at(final_stage, x).gpu_threads(x, y);
-            for (Func f : demosaic_dispatcher.all_intermediates) {
-                if (f.dimensions() >= 2) {
-                    f.compute_at(final_stage, x).gpu_threads(f.args()[0], f.args()[1]);
-                }
-            }
-            deinterleaved.compute_at(final_stage, x).unroll(x, 2).gpu_threads(x, y).reorder(c, x, y).unroll(c);
-            ca_corrected.compute_at(final_stage, x).gpu_threads(x, y);
-            for (Func f : ca_builder.intermediates) {
-                if (f.name().find("shifts") != std::string::npos) {
-                    f.compute_root().gpu_tile(f.args()[0], f.args()[1], xi, yi, 16, 16);
-                } else {
-                    f.compute_at(final_stage, x).gpu_threads(x,y);
-                }
-            }
+
+            // Helpers for root stages must also be scheduled for GPU
+            corrected.compute_at(sharpened, x).gpu_threads(x,y);
+            demosaiced.compute_at(sharpened, x).gpu_threads(x,y);
+            deinterleaved.compute_at(sharpened, x).gpu_threads(x,y);
 
         } else {
-            // Manual CPU schedule
-            Expr strip_size = 32;
+            // Manual CPU schedule: Hybrid tiled/fused execution.
+            Var xo("xo");
             int vec = this->get_target().natural_vector_size(halide_proc_type);
+            int tile_w = 16, tile_h = 16;
 
-            // --- Independent Denoise Stage ---
+            // --- Root-level pre-computation ---
             denoised_raw.compute_root().parallel(y).vectorize(x, vec);
+            ca_corrected.compute_root().parallel(y).vectorize(x, vec);
 
-            // The only specialization needed now is to turn denoising on or off.
-            denoised_raw.specialize(denoise_strength < 0.001f);
-
-
-            // --- Fused Main Pipeline (Restored Original Schedule) ---
+            // --- Main Tiled Pipeline ---
             final_stage.compute_root()
                 .reorder(c, x, y)
-                .split(y, yo, yi, strip_size)
-                .parallel(yo)
-                .vectorize(x, vec);
+                .tile(x, y, xo, yo, xi, yi, tile_w, tile_h)
+                .parallel(yo);
 
-            curved.compute_at(final_stage, yi)
-                .store_at(final_stage, yo)
-                .reorder(c, x, y)
-                .vectorize(x, vec);
+            // Stages computed once per row of tiles (`yo`)
+            deinterleaved.compute_at(final_stage, yo).vectorize(x, vec);
+            demosaiced.compute_at(final_stage, yo).vectorize(x, vec);
+
+            // Stages computed once per tile (`xo`)
+            curved.compute_at(final_stage, xo).vectorize(x, vec);
+            sharpened.compute_at(final_stage, xo).vectorize(x, vec);
             
-            corrected.compute_at(curved, x)
-                .reorder(c, x, y)
-                .vectorize(x)
-                .unroll(c);
+            // --- Schedule Helpers ---
+            corrected.compute_inline();
+            for (Func f : color_correct_builder.intermediates) {
+                f.compute_root();
+            }
+
+            auto& gaussian_kernel = sharpen_builder.intermediates[1];
+            auto& luma_x = sharpen_builder.intermediates[2];
+            auto& blurred_luma = sharpen_builder.intermediates[3];
+            gaussian_kernel.compute_root();
             
-            demosaiced.compute_at(curved, x)
-                .vectorize(x)
-                .reorder(c, x, y)
-                .unroll(c);
+            // The horizontal blur is computed per row of tiles.
+            luma_x.compute_at(final_stage, yo).vectorize(x, vec);
+            // The vertical blur is computed per tile.
+            blurred_luma.compute_at(final_stage, xo).vectorize(x, vec);
 
-            deinterleaved.compute_at(final_stage, yi)
-                .store_at(final_stage, yo)
-                .reorder(c, x, y)
-                .vectorize(x, vec);
-
-            ca_corrected.compute_at(final_stage, yi).store_at(final_stage, yo).vectorize(x, vec);
+            // Helpers for the root-computed CA stage
             for (Func f : ca_builder.intermediates) {
-                if (f.name().find("shifts") != std::string::npos || f.name() == "g_interp" || f.name().find("norm_raw") != std::string::npos) {
+                if (f.name().find("shifts") != std::string::npos ||
+                    f.name() == "g_interp" ||
+                    f.name().find("norm_raw_ca") != std::string::npos) {
                     f.compute_root().parallel(f.args()[1]).vectorize(f.args()[0], vec);
                 } else {
-                    f.compute_at(final_stage, yi).store_at(final_stage, yo).vectorize(x, vec);
+                    f.compute_at(ca_corrected, y).vectorize(x, vec);
                 }
             }
         }
@@ -229,9 +227,9 @@ public:
         // Uncomment the line below to generate an HTML file showing the final,
         // lowered pseudo-code for the denoising stage.
         /*
-        denoised_raw.compile_to_lowered_stmt("denoised_raw_lowered.html",
+        final_stage.compile_to_lowered_stmt("final_stage_lowered.html",
             {input, demosaic_algorithm_id, matrix_3200, matrix_7000, color_temp,
-             tint, sharpen_strength, ca_correction_strength, denoise_strength,
+             tint, sharpen_strength, sharpen_radius, sharpen_threshold, ca_correction_strength, denoise_strength,
              denoise_eps, blackLevel, whiteLevel, tone_curve_lut},
             HTML);
         */
