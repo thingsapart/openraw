@@ -23,8 +23,6 @@ if (this->using_autoscheduler()) {
 
     // --- ROOT-LEVEL LOOKUP TABLES ---
     color_correct_builder.cc_matrix.compute_root();
-    local_laplacian_builder.remap_detail.compute_root();
-    local_laplacian_builder.cube_root_lut.compute_root();
     tone_curve_func.compute_root();
 
     // --- MAIN TILED EXECUTION ---
@@ -36,7 +34,6 @@ if (this->using_autoscheduler()) {
         .vectorize(xi, vec);
 
     // --- "PER-STRIP" STAGES (Strip Waterfall) ---
-    // These stages are computed for an entire strip before tiling begins for that strip.
     denoised_raw.compute_at(final_stage, yo).vectorize(x, vec);
     ca_corrected.compute_at(final_stage, yo).vectorize(x, vec);
     for (Halide::Func f : ca_builder.intermediates) {
@@ -54,15 +51,14 @@ if (this->using_autoscheduler()) {
     const int J = local_laplacian_builder.pyramid_levels;
     const int cutover = 4;
 
-    // Schedule the LOW-FI path to also be computed per-strip.
+    // LOW-FI path is computed per-strip.
     for (auto& f : local_laplacian_builder.low_fi_intermediates) {
         f.compute_at(final_stage, yo).vectorize(f.args()[0], vec);
     }
     // LOW-FREQUENCY pyramid levels and their helpers are computed per-strip.
     for (int j = cutover; j < J; j++) {
         local_laplacian_builder.gPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
-        local_laplacian_builder.inGPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.inGPyramid[j].args()[0], vec);
-        local_laplacian_builder.lPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.lPyramid[j].args()[0], vec);
+        local_laplacian_builder.inLPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
         local_laplacian_builder.outLPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
         local_laplacian_builder.outGPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
     }
@@ -73,8 +69,7 @@ if (this->using_autoscheduler()) {
     // HIGH-FREQUENCY pyramid levels and their helpers are computed per-tile.
     for (int j = 0; j < cutover; j++) {
         local_laplacian_builder.gPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
-        local_laplacian_builder.inGPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.inGPyramid[j].args()[0], vec);
-        local_laplacian_builder.lPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.lPyramid[j].args()[0], vec);
+        local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
         local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
         local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
     }
@@ -84,7 +79,7 @@ if (this->using_autoscheduler()) {
     
     // Fused, pointwise stages are scheduled per-tile.
     for (auto& f : local_laplacian_builder.high_fi_intermediates) {
-        f.compute_at(final_stage, xo); // Let Halide fuse these
+        f.compute_at(final_stage, xo);
     }
     for (auto& f : local_laplacian_builder.reconstruction_intermediates) {
         f.compute_at(final_stage, xo).vectorize(x, vec);
