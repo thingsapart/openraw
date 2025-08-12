@@ -6,6 +6,9 @@
 #include <type_traits>
 #include <vector>
 
+// This header should NOT define NO_SHARPEN itself. It should only check for it.
+// The definition should be controlled by the consuming generator or build system.
+
 template <typename T>
 class SharpenBuilder_T {
 public:

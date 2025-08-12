@@ -47,10 +47,13 @@ void print_usage() {
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
-           "Sharpening Options (applied in linear space):\n"
-           "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
-           "  --sharpen-radius <px>  Sharpening radius in pixels (default: 1.0).\n"
-           "  --sharpen-threshold <val> Sharpening mask threshold (0-1, default: 0.02).\n\n"
+           "Local Laplacian Adjustments:\n"
+           "  --ll-detail <val>      Detail enhancement strength, 0-200 (default: 100).\n"
+           "  --ll-clarity <val>     Local contrast (clarity), 0-100 (default: 0).\n"
+           "  --ll-shadows <val>     Shadow lift, -100 to 100 (default: 0).\n"
+           "  --ll-highlights <val>  Highlight compression, -100 to 100 (default: 0).\n"
+           "  --ll-blacks <val>      Adjust black point, -100 to 100 (default: 0).\n"
+           "  --ll-whites <val>      Adjust white point, -100 to 100 (default: 0).\n\n"
            "Denoise Options (Radius is fixed at 2.0):\n"
            "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
            "  --denoise-eps <val>      Denoise filter epsilon (default: 0.01).\n\n"
@@ -59,9 +62,6 @@ void print_usage() {
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
            "  --contrast <val>       Contrast enhancement value (default: 50.0). Used if no curve is given.\n"
            "  --curve-points <str>   Global curve points, e.g. \"0:0,0.5:0.4,1:1\". Overrides gamma/contrast.\n"
-           "  --curve-r <str>        Red channel curve points. Overrides --curve-points for red.\n"
-           "  --curve-g <str>        Green channel curve points. Overrides --curve-points for green.\n"
-           "  --curve-b <str>        Blue channel curve points. Overrides --curve-points for blue.\n"
            "  --curve-mode <name>    Curve mode. 'luma' or 'rgb' (default: rgb).\n\n"
            "  --help                 Display this help message.\n");
 }
@@ -75,6 +75,8 @@ int main(int argc, char **argv) {
     // --- Argument Parsing ---
     ProcessConfig cfg;
     int demosaic_id = 3; // 0=ahd, 1=lmmse, 2=ri, 3=fast
+    float ll_detail = 100.0f, ll_clarity = 0.0f, ll_shadows = 0.0f,
+          ll_highlights = 0.0f, ll_blacks = 0.0f, ll_whites = 0.0f;
 
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
@@ -104,17 +106,11 @@ int main(int argc, char **argv) {
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
         if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
-        if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
-        if (args.count("sharpen-radius")) cfg.sharpen_radius = std::stof(args["sharpen-radius"]);
-        if (args.count("sharpen-threshold")) cfg.sharpen_threshold = std::stof(args["sharpen-threshold"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
         if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
         if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
-        if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
-        if (args.count("curve-g")) cfg.curve_g_str = args["curve-g"];
-        if (args.count("curve-b")) cfg.curve_b_str = args["curve-b"];
         if (args.count("curve-mode")) {
             if (args["curve-mode"] == "luma") cfg.curve_mode = 0;
             else if (args["curve-mode"] == "rgb") cfg.curve_mode = 1;
@@ -127,6 +123,13 @@ int main(int argc, char **argv) {
             else if (args["tonemap"] == "gamma") cfg.tonemap_algorithm = 3;
             else { std::cerr << "Warning: unknown tonemap '" << args["tonemap"] << "'. Defaulting to gamma.\n"; }
         }
+        // Local Laplacian arguments
+        if (args.count("ll-detail")) ll_detail = std::stof(args["ll-detail"]);
+        if (args.count("ll-clarity")) ll_clarity = std::stof(args["ll-clarity"]);
+        if (args.count("ll-shadows")) ll_shadows = std::stof(args["ll-shadows"]);
+        if (args.count("ll-highlights")) ll_highlights = std::stof(args["ll-highlights"]);
+        if (args.count("ll-blacks")) ll_blacks = std::stof(args["ll-blacks"]);
+        if (args.count("ll-whites")) ll_whites = std::stof(args["ll-whites"]);
     } catch (const std::exception& e) {
         fprintf(stderr, "Error parsing arguments: %s\n", e.what()); return 1;
     }
@@ -140,7 +143,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
-    Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
+    // The pipeline crops the borders, so we calculate the final size.
+    int output_w = input.width() - 32;
+    int output_h = input.height() - 24;
+    Buffer<uint8_t, 3> output(output_w, output_h, 3);
+    fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
+    fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
     ToneCurveUtils tone_curve_util(cfg);
     Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
@@ -170,14 +178,24 @@ int main(int argc, char **argv) {
 
         #if defined(PIPELINE_PRECISION_F32)
             camera_pipe_f32(input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.sharpen_radius, cfg.sharpen_threshold, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
-                              blackLevel, whiteLevel, tone_curve_lut, output);
+                              blackLevel, whiteLevel, tone_curve_lut,
+                              // Sharpening (dummy)
+                              1.0f, 1.0f, 0.0f,
+                              // Local Laplacian
+                              ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
+                              output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.sharpen, cfg.sharpen_radius, cfg.sharpen_threshold, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
-                              blackLevel, whiteLevel, tone_curve_lut, output);
+                              blackLevel, whiteLevel, tone_curve_lut,
+                              // Sharpening (dummy)
+                              1.0f, 1.0f, 0.0f,
+                              // Local Laplacian
+                              ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
+                              output);
         #endif
         output.device_sync();
 
@@ -188,9 +206,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // The profiler will print its report to stderr automatically when the program
-    // exits, so we just need to print our own timing results.
-    // Check if profiling was enabled to avoid printing benchmark time when it's not relevant.
     if (getenv("HL_PROFILE") == nullptr) {
         #if defined(PIPELINE_PRECISION_F32)
             fprintf(stderr, "Using float32 pipeline.\n");
@@ -201,12 +216,10 @@ int main(int argc, char **argv) {
     }
 
 #ifndef NO_AUTO_SCHEDULE
-    // Auto-schedule benchmarking would go here, with a similar if/else structure
+    // Auto-schedule benchmarking would go here
 #endif
 
-    fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
     convert_and_save_image(output, cfg.output_path);
-    fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
     std::string curve_png_path = cfg.output_path.substr(0, cfg.output_path.find_last_of('.')) + "_curve.png";
     if (tone_curve_util.render_curves_to_png(curve_png_path.c_str())) {
