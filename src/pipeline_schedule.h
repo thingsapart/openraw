@@ -121,17 +121,7 @@ void schedule_pipeline(
                 local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             }
         }
-
-        // --- COMMON PER-TILE AND RECONSTRUCTION SCHEDULE ---
-        for (auto& f : local_laplacian_builder.high_freq_pyramid_helpers) {
-            f.compute_at(final_stage, xo).store_at(final_stage, yo);
-        }
-        for (auto& f : local_laplacian_builder.high_fi_intermediates) {
-            f.compute_at(final_stage, xo).store_at(final_stage, yo);
-        }
-        for (auto& f : local_laplacian_builder.reconstruction_intermediates) {
-            f.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec);
-        }
+        
 #else
         // Schedule for the BYPASS debug path
         for (auto& f : local_laplacian_builder.high_fi_intermediates) {
