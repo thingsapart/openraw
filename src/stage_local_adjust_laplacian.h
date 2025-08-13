@@ -150,9 +150,10 @@ public:
         high_fi_intermediates = {lab_hifi, L_norm_hifi, a_chan, b_chan};
 
         // --- PATH 2: Low-Fidelity Path ---
-        // This path produces a half-resolution L* image, equivalent in size
-        // and content to gPyramid[1] from the hi-fi path.
-        Func L_norm_lowfi_halfres("L_norm_lowfi_halfres");
+        // This path produces an L* image at the resolution of gPyramid[cutover_level].
+        // We do this by downsampling the cheap RGB data significantly *before* the
+        // expensive color space conversions.
+        Func lowfi_spliced_L("lowfi_spliced_L");
         {
             Var hx("hx_lf"), hy("hy_lf"); // Local vars for the half-resolution grid.
             Func deinterleaved_raw = pipeline_deinterleave(raw_input, hx, hy, c);
@@ -175,9 +176,20 @@ public:
                 (b_f_sensor - blackLevel) * inv_range
             });
 
-            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, hx, hy, c, "xyz_lowfi"), lab_f_lut, hx, hy, c, "lab_lowfi");
-            L_norm_lowfi_halfres(hx, hy) = lab_lowfi(hx, hy, 0) / 100.0f;
-            low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lab_lowfi, L_norm_lowfi_halfres};
+            // Downsample the cheap, corrected RGB data to the target splice-point resolution.
+            // The low-fi path starts at half-resolution, so we need (cutover_level - 1) more downsamples.
+            Func lowfi_rgb_downsampled = corrected_lowfi_norm;
+            for (int j = 1; j < cutover_level; j++) {
+                Func prev = lowfi_rgb_downsampled;
+                downsample(prev, "lowfi_rgb_ds_"+std::to_string(j), lowfi_rgb_downsampled, low_freq_pyramid_helpers);
+            }
+
+            // Now, perform the expensive color conversion on the tiny image.
+            Var dx("dx_lf"), dy("dy_lf");
+            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(lowfi_rgb_downsampled, dx, dy, c, "xyz_lowfi"), lab_f_lut, dx, dy, c, "lab_lowfi");
+            lowfi_spliced_L(dx, dy) = lab_lowfi(dx, dy, 0) / 100.0f;
+
+            low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lowfi_rgb_downsampled, lab_lowfi, lowfi_spliced_L};
         }
 
         // --- Build Input Pyramids (Gaussian and Laplacian) with Splicing ---
@@ -193,17 +205,9 @@ public:
                 downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
             }
 
-            // Prepare the low-fi branch for splicing.
-            // The low-fi path starts at half-resolution, equivalent to pyramid level 1.
-            // We need to downsample it (cutover_level - 1) more times to match gPyramid[cutover_level].
-            Func lowfi_spliced = L_norm_lowfi_halfres;
-            for (int j = 1; j < cutover_level; j++) {
-                Func prev = lowfi_spliced;
-                downsample(prev, "lowfi_ds_"+std::to_string(j), lowfi_spliced, low_freq_pyramid_helpers);
-            }
-
-            // Perform the splice.
-            gPyramid[cutover_level] = lowfi_spliced;
+            // Perform the splice. The low-fi path already produced an L* image
+            // at the correct gPyramid[cutover_level] resolution.
+            gPyramid[cutover_level] = lowfi_spliced_L;
 
             // Continue building the pyramid from the spliced-in low-fi branch.
             for (int j = cutover_level + 1; j < pyramid_levels; j++) {
