@@ -16,7 +16,9 @@
 class CACorrectBuilder {
 public:
     Halide::Func output;
-    std::vector<Halide::Func> intermediates;
+    // Empty members for API compatibility with the scheduled pipeline.
+    Halide::Func g_interp, block_shifts, blur_x, blur_y;
+    Halide::Var bx, by;
 
     CACorrectBuilder(Halide::Func input_float,
                      Halide::Var x, Halide::Var y,
@@ -76,18 +78,30 @@ inline Halide::Expr bilinear(Halide::Func f, Halide::Expr x, Halide::Expr y, Hal
 class CACorrectBuilder {
 public:
     Halide::Func output;
-    std::vector<Halide::Func> intermediates;
+    // Expose key internal funcs for scheduling
+    Halide::Func g_interp;
+    Halide::Func block_shifts;
+    Halide::Func blur_x;
+    Halide::Func blur_y;
+    // Expose the vars used for the coarse grid for scheduling
+    Halide::Var bx, by;
+
 
     CACorrectBuilder(Halide::Func input_float,
                      Halide::Var x, Halide::Var y,
                      Halide::Expr strength,
                      Halide::Expr width, Halide::Expr height,
                      const Halide::Target &target,
-                     bool is_autoscheduled) {
+                     bool is_autoscheduled) :
+        output("ca_corrected"),
+        g_interp("ca_g_interp"),
+        block_shifts("ca_block_shifts"),
+        blur_x("ca_blur_x"),
+        blur_y("ca_blur_y"),
+        bx("ca_bx"), by("ca_by")
+    {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-
-        output = Halide::Func("ca_corrected");
         
         // The input 'norm_raw' is already a normalized [0,1] float.
         Func norm_raw = input_float;
@@ -103,7 +117,6 @@ public:
         Expr is_b = (cfa_y == 1 && cfa_x == 0);
 
         // 3. Interpolate Green channel to R and B sites.
-        Func g_interp("g_interp");
         {
             Func clamped_norm = BoundaryConditions::repeat_edge(norm_raw, {{Expr(0), width}, {Expr(0), height}});
             Expr g_n = clamped_norm(x, y - 1);
@@ -121,8 +134,7 @@ public:
         }
 
         // 4. Estimate shifts on a coarse grid.
-        Func block_shifts("block_shifts");
-        Var bx("bx"), by("by"), c("c_ca"), v("v_ca");
+        Var c_ca("c_ca"), v_ca("v_ca");
         {
             RDom r(0, ts, 0, ts, "ca_rdom");
             Expr tile_x = bx * ts + r.x;
@@ -161,11 +173,11 @@ public:
             const float bslim = 3.99f;
             // c=0 is R, c=1 is B
             // v=0 is vert, v=1 is horiz
-            Expr shift_v = select(c == 0, shift_v_r, shift_v_b);
-            Expr shift_h = select(c == 0, shift_h_r, shift_h_b);
-            Expr shift = select(v == 0, shift_v, shift_h);
+            Expr shift_v = select(c_ca == 0, shift_v_r, shift_v_b);
+            Expr shift_h = select(c_ca == 0, shift_h_r, shift_h_b);
+            Expr shift = select(v_ca == 0, shift_v, shift_h);
 
-            block_shifts(bx, by, c, v) = clamp(shift, -bslim, bslim);
+            block_shifts(bx, by, c_ca, v_ca) = clamp(shift, -bslim, bslim);
             block_shifts.set_estimates({ {0, (width + ts - 1) / ts}, {0, (height + ts - 1) / ts}, {0, 2}, {0, 2} });
         }
 
@@ -175,13 +187,10 @@ public:
             Region block_bounds = {{0, (width+ts-1)/ts}, {0, (height+ts-1)/ts}, {0,2}, {0,2}};
             Func clamped_shifts = BoundaryConditions::repeat_edge(block_shifts, block_bounds);
             
-            Func blur_x("blur_x_shifts"), blur_y("blur_y_shifts");
             RDom r_blur(-4, 9, "ca_blur_rdom");
-            blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v), "ca_shifts_blur_x_sum");
-            blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v), "ca_shifts_blur_y_sum");
-            blurred_shifts(bx, by, c, v) = blur_y(bx, by, c, v) / 81.0f;
-            intermediates.push_back(blur_x);
-            intermediates.push_back(blur_y);
+            blur_x(bx, by, c_ca, v_ca) = sum(clamped_shifts(bx + r_blur, by, c_ca, v_ca), "ca_shifts_blur_x_sum");
+            blur_y(bx, by, c_ca, v_ca) = sum(blur_x(bx, by + r_blur, c_ca, v_ca), "ca_shifts_blur_y_sum");
+            blurred_shifts(bx, by, c_ca, v_ca) = blur_y(bx, by, c_ca, v_ca) / 81.0f;
         }
 
         // 6. Apply the correction to R and B channels
@@ -208,10 +217,8 @@ public:
                               input_float(x, y),
                               clamp(corrected_f(x,y), 0.0f, 1.0f));
 
-        intermediates.push_back(g_interp);
-        intermediates.push_back(block_shifts);
-        intermediates.push_back(blurred_shifts);
-        intermediates.push_back(corrected_f);
+        // The pointwise helpers 'blurred_shifts' and 'corrected_f' will be inlined
+        // by default because they are not scheduled.
     }
 };
 

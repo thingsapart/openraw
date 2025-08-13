@@ -45,6 +45,7 @@ void schedule_pipeline(
     } else {
         // High-performance manual CPU schedule implementing the Strip -> Tile architecture.
         int vec = target.template natural_vector_size<P>();
+        int vec_f = target.template natural_vector_size<float>();
         const int strip_size = 32;
         const int tile_size_x = 256;
 
@@ -64,17 +65,24 @@ void schedule_pipeline(
         // --- "PER-STRIP" STAGES (Strip Waterfall) ---
         denoised.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
+        // Schedule for Chromatic Aberration Correction.
+        // The loops that iterated over `ca_builder.intermediates` and `demosaic_dispatcher.all_intermediates`
+        // have been removed. This allows the `.compute_inline()` directives inside the demosaic helpers
+        // to take effect, fusing them as intended. We now schedule the CA builder's key components explicitly.
         ca_builder.output.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
-        for (Func f : ca_builder.intermediates) {
-            f.compute_at(final_stage, yo).store_at(final_stage, yo);
-        }
+        ca_builder.g_interp.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec_f);
+        ca_builder.block_shifts.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(ca_builder.bx, vec_f);
+
+        // Schedule for the separable blur on the CA shifts.
+        // This producer-consumer schedule enables storage folding for `blur_x`.
+        ca_builder.blur_y.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(ca_builder.bx, vec_f);
+        ca_builder.blur_x.compute_at(ca_builder.blur_y, ca_builder.by).vectorize(ca_builder.bx, vec_f);
+
 
         deinterleaved_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         demosaiced.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         demosaiced.bound(c, 0, 3).unroll(c);
-        for (Func f : demosaic_dispatcher.all_intermediates) {
-            f.compute_at(final_stage, yo).store_at(final_stage, yo);
-        }
+        
         corrected_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         corrected_hi_fi.bound(c, 0, 3).unroll(c);
         sharpened.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
