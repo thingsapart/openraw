@@ -135,7 +135,7 @@ void schedule_pipeline(
         }
 #endif
         local_laplacian_builder.output.compute_at(final_stage, xo).vectorize(x, vec);
-        curved.compute_at(final_stage, xo).vectorize(x, vec);
+        curved.compute_at(final_stage, yi).vectorize(x, vec);
     }
 }
 #endif // PIPELINE_SCHEDULE_H
