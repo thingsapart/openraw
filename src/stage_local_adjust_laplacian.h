@@ -75,29 +75,33 @@ inline Halide::Func xyz_to_linear_srgb(Halide::Func xyz, Halide::Var x, Halide::
     Expr r = 3.2404542f*X - 1.5371385f*Y - 0.4985314f*Z, g = -0.9692660f*X + 1.8760108f*Y + 0.0415560f*Z, b = 0.0556434f*X - 0.2040259f*Y + 1.0572252f*Z;
     Func srgb(name); srgb(x, y, c) = mux(c, {r, g, b}); return srgb;
 }
-void downsample(Halide::Func f, const std::string& name_prefix, Halide::Func &output, std::vector<Halide::Func> &intermediates) {
-    using namespace Halide;
-    Func downx(name_prefix + "_downx"), downy(name_prefix + "_downy");
-    Var x, y;
-    downx(x, y, _) = (f(2*x - 1, y, _) + 3.f*f(2*x, y, _) + 3.f*f(2*x + 1, y, _) + f(2*x + 2, y, _)) / 8.f;
-    downy(x, y, _) = (downx(x, 2*y - 1, _) + 3.f*downx(x, 2*y, _) + 3.f*downx(x, 2*y + 1, _) + downx(x, 2*y + 2, _)) / 8.f;
-    output = downy;
-    intermediates.push_back(downx);
-}
-void upsample(Halide::Func f, const std::string& name_prefix, Halide::Func &output, std::vector<Halide::Func> &intermediates) {
-    using namespace Halide;
-    Func upx(name_prefix + "_upx"), upy(name_prefix + "_upy");
-    Var x, y;
-    Expr xf = (cast<float>(x) + 0.5f) / 2.0f; Expr xi = cast<int>(xf);
-    upx(x, y, _) = lerp(f(xi, y, _), f(xi + 1, y, _), xf - xi);
-    Expr yf = (cast<float>(y) + 0.5f) / 2.0f; Expr yi = cast<int>(yf);
-    upy(x, y, _) = lerp(upx(x, yi, _), upx(x, yi + 1, _), yf - yi);
-    output = upy;
-    intermediates.push_back(upx);
-}
 } // anonymous namespace
 
 class LocalLaplacianBuilder {
+private:
+    // Self-contained, safe pyramid helpers. They assume the caller is handling boundary conditions.
+    static void downsample(Halide::Func f_in, const std::string& name_prefix, Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
+        using namespace Halide;
+        Func downx(name_prefix + "_downx"), downy(name_prefix + "_downy");
+        Var x, y;
+        downx(x, y, _) = (f_in(2*x - 1, y, _) + 3.f*f_in(2*x, y, _) + 3.f*f_in(2*x + 1, y, _) + f_in(2*x + 2, y, _)) / 8.f;
+        downy(x, y, _) = (downx(x, 2*y - 1, _) + 3.f*downx(x, 2*y, _) + 3.f*downx(x, 2*y + 1, _) + downx(x, 2*y + 2, _)) / 8.f;
+        f_out = downy;
+        intermediates.push_back(downx);
+    }
+    static void upsample(Halide::Func f_in, const std::string& name_prefix, Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
+        using namespace Halide;
+        Func upx(name_prefix + "_upx"), upy(name_prefix + "_upy");
+        Var x, y;
+        Expr xf = (cast<float>(x) / 2.0f) - 0.25f;
+        Expr xi = cast<int>(floor(xf));
+        upx(x, y, _) = lerp(f_in(xi, y, _), f_in(xi + 1, y, _), xf - xi);
+        Expr yf = (cast<float>(y) / 2.0f) - 0.25f;
+        Expr yi = cast<int>(floor(yf));
+        upy(x, y, _) = lerp(upx(x, yi, _), upx(x, yi + 1, _), yf - yi);
+        f_out = upy;
+        intermediates.push_back(upx);
+    }
 public:
     Halide::Func output;
     std::vector<Halide::Func> gPyramid, inLPyramid, outGPyramid, outLPyramid;

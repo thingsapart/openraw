@@ -92,6 +92,9 @@ public:
         // The input 'norm_raw' is already a normalized [0,1] float.
         Func norm_raw = input_float;
 
+        // The tile size for the coarse-grid shift estimation.
+        const int ts = 16;
+
         // 2. Determine color of each pixel from GRBG Bayer pattern
         Expr cfa_y = y % 2;
         Expr cfa_x = x % 2;
@@ -122,7 +125,6 @@ public:
         Func block_shifts("block_shifts");
         Var bx("bx"), by("by"), c("c_ca"), v("v_ca");
         {
-            int ts = 32;
             RDom r(0, ts, 0, ts, "ca_rdom");
             Expr tile_x = bx * ts + r.x;
             Expr tile_y = by * ts + r.y;
@@ -171,7 +173,6 @@ public:
         // 5. Blur the block_shifts to get a smooth global shift field.
         Func blurred_shifts("blurred_shifts");
         {
-            int ts = 32;
             Region block_bounds = {{0, (width+ts-1)/ts}, {0, (height+ts-1)/ts}, {0,2}, {0,2}};
             Func clamped_shifts = BoundaryConditions::repeat_edge(block_shifts, block_bounds);
             
@@ -187,8 +188,8 @@ public:
         // 6. Apply the correction to R and B channels
         Func corrected_f("corrected_f");
         {
-            Expr f_bx = cast<float>(x) / 32.f;
-            Expr f_by = cast<float>(y) / 32.f;
+            Expr f_bx = cast<float>(x) / (float)ts;
+            Expr f_by = cast<float>(y) / (float)ts;
 
             const float shift_bound = 4.0f;
             Expr shift_vr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 0), -shift_bound, shift_bound) * strength;
