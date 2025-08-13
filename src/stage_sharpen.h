@@ -6,9 +6,6 @@
 #include <type_traits>
 #include <vector>
 
-// This header should NOT define NO_SHARPEN itself. It should only check for it.
-// The definition should be controlled by the consuming generator or build system.
-
 template <typename T>
 class SharpenBuilder_T {
 public:
@@ -29,12 +26,20 @@ public:
 #ifdef NO_SHARPEN
         output(x, y, c) = input(x, y, c);
 #else
+        // --- 0. Normalize to a common float [0,1] space for calculations ---
+        Func input_f("sharpen_input_f");
+        if (std::is_same<T, float>::value) {
+            input_f(x, y, c) = input(x, y, c);
+        } else {
+            input_f(x, y, c) = cast<float>(input(x, y, c)) / 65535.0f;
+        }
+
         // --- 1. Calculate Luminance ---
         // The input is linear RGB, so a simple weighted sum is correct.
         Func luma("luma");
-        Expr r_ch = input(x, y, 0);
-        Expr g_ch = input(x, y, 1);
-        Expr b_ch = input(x, y, 2);
+        Expr r_ch = input_f(x, y, 0);
+        Expr g_ch = input_f(x, y, 1);
+        Expr b_ch = input_f(x, y, 2);
         luma(x, y) = 0.299f * r_ch + 0.587f * g_ch + 0.114f * b_ch;
 
         // --- 2. Create 1D Gaussian Kernel ---
@@ -68,11 +73,18 @@ public:
 
         // --- 5. Apply Gain to color channels ---
         Expr gain = sharpened_luma / (luma(x, y) + 1e-6f); // Add epsilon for stability
-        Expr sharpened_val = input(x, y, c) * gain;
+        Expr sharpened_val = input_f(x, y, c) * gain;
 
-        output(x, y, c) = proc_type_sat<T>(sharpened_val);
+        // --- 6. Convert back to the pipeline's processing type ---
+        Expr final_val;
+        if (std::is_same<T, float>::value) {
+            final_val = sharpened_val;
+        } else {
+            final_val = sharpened_val * 65535.0f;
+        }
+        output(x, y, c) = proc_type_sat<T>(final_val);
 
-        intermediates.push_back(luma);
+        intermediates.push_back(input_f);
         intermediates.push_back(gaussian_kernel);
         intermediates.push_back(luma_x);
         intermediates.push_back(blurred_luma);

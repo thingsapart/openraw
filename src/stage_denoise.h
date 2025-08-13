@@ -82,7 +82,56 @@ public:
 
 } // namespace
 
+// This untemplated version of the denoiser works on normalized float data.
+class DenoiseBuilder {
+public:
+    Halide::Func output;
 
+    DenoiseBuilder(Halide::Func input_float,
+                   Halide::Var x, Halide::Var y,
+                   Halide::Expr strength,
+                   Halide::Expr eps,
+                   const Halide::Target &target,
+                   bool is_autoscheduled) {
+        using namespace Halide;
+        using namespace Halide::ConciseCasts;
+
+        // The input is already a normalized [0,1] float.
+        
+        // --- 1. Apply Variance-Stabilizing Transform (Anscombe) ---
+        Func vst("vst");
+        vst(x, y) = 2.0f * sqrt(max(0.0f, input_float(x, y)) + 3.0f/8.0f);
+
+        // --- 2. Denoise in VST space using a Guided Filter with a FIXED radius ---
+        const int fixed_radius = 2;
+        GuidedFilter2DBuilder gf(vst, vst, x, y, fixed_radius, eps);
+
+        Func denoised_vst("denoised_vst");
+        denoised_vst(x, y) = gf.output(x, y);
+
+        // --- 3. Apply Inverse VST ---
+        Func inv_vst("inv_vst");
+        Expr vst_val = denoised_vst(x, y);
+        inv_vst(x, y) = (vst_val / 2.0f) * (vst_val / 2.0f) - 3.0f/8.0f;
+
+        // --- 4. Blend with original based on strength ---
+        Func blended("denoise_blended");
+        blended(x, y) = lerp(input_float(x, y), inv_vst(x, y), strength);
+        
+        // Inline the entire chain of operations to create one large expression
+        // for the final output. This is what allows specialize() to work.
+        vst.compute_inline();
+        denoised_vst.compute_inline();
+        inv_vst.compute_inline();
+        blended.compute_inline();
+
+        // --- 5. Output is the final normalized float result ---
+        output = Halide::Func("denoised_output");
+        output(x, y) = clamp(blended(x,y), 0.0f, 1.0f);
+    }
+};
+
+// This templated version is for the old Laplacian pipeline architecture.
 template <typename T>
 class DenoiseBuilder_T {
 public:

@@ -20,27 +20,44 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
 
 #ifdef NO_APPLY_CURVE
     Func curved("curved_dummy");
-    curved(x, y, c) = u8_sat(input(x, y, c) >> 8);
+    curved(x, y, c) = proc_type_sat<T>(input(x, y, c));
     return curved;
 #else
     Func curved("curved");
-
-    // The input to this stage is the output of the local adjustments, which is
-    // a display-referred image in the full uint16 range [0, 65535].
-    // The tone curve LUT is also defined over this [0, 65535] domain.
-    // We can therefore use the input value directly as an index.
+    
     Expr val = input(x, y, c);
+    Expr norm_val;
 
-    // The lut contains uint16 values representing the final 8-bit output
-    // scaled up (e.g., value 255 is stored as 65535). We need to shift
-    // it back down to the 8-bit range.
-    Expr lut_val_u16 = lut(val, c);
-    Expr final_val_u8 = cast<uint8_t>(lut_val_u16 >> 8);
+    if (std::is_same<T, float>::value) {
+        // For the float path, the value is already normalized to [0, 1].
+        norm_val = val;
+    } else {
+        // For the uint16 path, the data is in the full [0, 65535] range.
+        // Normalize it to [0, 1] to index into the curve.
+        norm_val = cast<float>(val) / 65535.0f;
+    }
 
-    curved(x, y, c) = final_val_u8;
+    // Use the normalized value to index into the LUT.
+    Expr lut_f_idx = clamp(norm_val, 0.0f, 1.0f) * (lut_size - 1.0f);
+    Expr lut_idx = cast<int>(lut_f_idx);
+    
+    Expr lut_val = lut(lut_idx, c);
 
+    if (std::is_same<T, float>::value) {
+        // For the float path, the LUT value (uint16) must be scaled back to [0, 1].
+        curved(x, y, c) = cast<float>(lut_val) / 65535.0f;
+    } else {
+        // For the uint16 path, the LUT value is already in the correct format.
+        curved(x, y, c) = lut_val;
+    }
+
+    if (!is_autoscheduled && target.has_gpu_feature()) {
+        // The LUT is passed as an Input, so we just need to ensure it's copied to the GPU.
+        // Halide handles this automatically. No scheduling for the LUT itself is needed here.
+    }
+    
     return curved;
-#endif // NO_APPLY_CURVE
+#endif
 }
 
 #endif // STAGE_APPLY_CURVE_H

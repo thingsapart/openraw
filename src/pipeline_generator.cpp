@@ -6,7 +6,7 @@
 #include <vector>
 #include <type_traits>
 
-// Keep sharpening disabled as requested for this feature update.
+// Sharpening is disabled to focus on the local adjustments.
 #define NO_SHARPEN 1
 
 // Include the individual pipeline stages
@@ -18,7 +18,8 @@
 #include "stage_sharpen.h"
 #include "stage_local_adjust_laplacian.h" // The new stage
 #include "stage_apply_curve.h"
-// DO NOT INCLUDE THE SCHEDULE HERE - It must be included inside the generate() method.
+
+#include "pipeline_schedule.h"
 
 using namespace Halide;
 
@@ -72,43 +73,34 @@ public:
         Expr out_width = input.width() - 32;
         Expr out_height = input.height() - 24;
 
+        // Define the crop to the valid sensor area.
         Func initial_raw("initial_raw");
         initial_raw(x, y) = input(x + 16, y + 12);
-
-        // --- Boundary Condition on the Ultimate Source ---
-        // This is the key fix. By applying the boundary condition here, all
-        // downstream stages (denoise, CA correct) can safely read beyond the
-        // original bounds, allowing their large stencils to work correctly
-        // within a strip-based schedule.
+        
+        // Create a bounded version of the raw data that is safe to read from.
         Func raw_bounded("raw_bounded");
         raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, out_width}, {0, out_height}});
+
+        // Normalize the safe, bounded raw data to [0,1] float for the hi-fi path.
+        Func normalized_input("normalized_input");
+        Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
+        normalized_input(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range;
         
-        // --- High-Fidelity Path ---
-        // The denoise builder now consumes the safely bounded raw image.
-        DenoiseBuilder_T<T> denoise_builder{raw_bounded, x, y,
-                                            denoise_strength, denoise_eps,
-                                            blackLevel, whiteLevel,
-                                            this->get_target(), this->using_autoscheduler()};
+        DenoiseBuilder denoise_builder(normalized_input, x, y,
+                                       denoise_strength, denoise_eps,
+                                       this->get_target(), this->using_autoscheduler());
+        Func denoised("denoised");
+        denoised(x, y) = select(denoise_strength < 0.001f, normalized_input(x, y), denoise_builder.output(x, y));
         
-        Func denoised_raw("denoised_raw");
-        Expr passthrough_val_hi_fi;
-        if (std::is_same<T, float>::value) {
-            Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
-            passthrough_val_hi_fi = (cast<float>(raw_bounded(x, y)) - blackLevel) * inv_range;
-        } else {
-            passthrough_val_hi_fi = raw_bounded(x, y);
-        }
-        denoised_raw(x, y) = select(denoise_strength < 0.001f, passthrough_val_hi_fi, denoise_builder.output(x, y));
-        
-        CACorrectBuilder_T<T> ca_builder{denoised_raw, x, y,
-                                       ca_correction_strength, blackLevel, whiteLevel,
-                                       out_width, out_height,
-                                       this->get_target(), this->using_autoscheduler()};
+        CACorrectBuilder ca_builder(denoised, x, y,
+                                    ca_correction_strength,
+                                    out_width, out_height,
+                                    this->get_target(), this->using_autoscheduler());
         Func ca_corrected = ca_builder.output;
 
         Func deinterleaved_hi_fi = pipeline_deinterleave(ca_corrected, x, y, c);
         
-        DemosaicDispatcherT<T> demosaic_dispatcher{deinterleaved_hi_fi, demosaic_algorithm_id, x, y, c};
+        DemosaicDispatcherT<float> demosaic_dispatcher{deinterleaved_hi_fi, demosaic_algorithm_id, x, y, c};
         Func demosaiced = demosaic_dispatcher.output;
         
         ColorCorrectBuilder_T<T> color_correct_builder(demosaiced, halide_proc_type, matrix_3200, matrix_7000,
@@ -119,19 +111,34 @@ public:
                                             out_width, out_height, x, y, c);
         Func sharpened = sharpen_builder.output;
         
-        // --- Forked Local Laplacian Stage ---
-        // The low-fi path also uses the bounded raw image.
-        LocalLaplacianBuilder_T<T> local_laplacian_builder(
-            sharpened, raw_bounded, color_correct_builder.cc_matrix,
+        // --- Local Laplacian Stage ---
+        // Create a normalized float version of the input for the builder.
+        Func laplacian_input("laplacian_input");
+        if (std::is_same<T, float>::value) {
+            laplacian_input(x, y, c) = sharpened(x, y, c);
+        } else {
+            laplacian_input(x, y, c) = cast<float>(sharpened(x, y, c)) / 65535.0f;
+        }
+
+        // The builder is now untemplated and works only on normalized floats.
+        LocalLaplacianBuilder local_laplacian_builder(
+            laplacian_input, raw_bounded, color_correct_builder.cc_matrix,
             x, y, c,
             ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
             blackLevel, whiteLevel,
             out_width, out_height);
-        Func local_adjustments = local_laplacian_builder.output;
+        Func local_adjustments_f = local_laplacian_builder.output;
 
-        // --- Final Tone Curve and Output ---
+        // Convert the float output back to the pipeline's processing type.
+        Func local_adjustments("local_adjustments");
+        if (std::is_same<T, float>::value) {
+            local_adjustments(x, y, c) = local_adjustments_f(x, y, c);
+        } else {
+            local_adjustments(x, y, c) = u16_sat(local_adjustments_f(x, y, c) * 65535.0f);
+        }
+
         Func tone_curve_func("tone_curve_func");
-        Var lut_x("lut_x"), lut_c("lut_c");
+        Var lut_x("lut_x_var"), lut_c("lut_c_var");
         tone_curve_func(lut_x, lut_c) = tone_curve_lut(lut_x, lut_c);
 
         Func curved = pipeline_apply_curve<T>(local_adjustments, blackLevel, whiteLevel,
@@ -139,7 +146,12 @@ public:
                                            this->get_target(), this->using_autoscheduler());
         
         Func final_stage("final_stage");
-        final_stage(x, y, c) = curved(x, y, c);
+        Expr final_val = curved(x, y, c);
+        if (std::is_same<proc_type, float>::value) {
+            final_stage(x, y, c) = u8_sat(final_val * 255.0f);
+        } else {
+            final_stage(x, y, c) = u8_sat(final_val >> 8);
+        }
 
         // ========== ESTIMATES ==========
         const int out_width_est = 2592 - 32;
@@ -150,21 +162,28 @@ public:
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
         final_stage.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
-        // Other params are fine with defaults.
 
         // ========== SCHEDULE ==========
-        #include "pipeline_schedule.h"
+        // The schedule is now complex enough to warrant its own file.
+        schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
+            denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
+            corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
+            color_correct_builder, tone_curve_func, halide_proc_type,
+            x, y, c, xo, xi, yo, yi);
         
         processed = final_stage;
     }
 };
 
 // Explicitly instantiate the generator for both float and uint16_t.
-class CameraPipe_u16 : public CameraPipeGenerator<uint16_t> {};
-HALIDE_REGISTER_GENERATOR(CameraPipe_u16, camera_pipe_u16)
+template class CameraPipeGenerator<float>;
+template class CameraPipeGenerator<uint16_t>;
 
-class CameraPipe_f32 : public CameraPipeGenerator<float> {};
-HALIDE_REGISTER_GENERATOR(CameraPipe_f32, camera_pipe_f32)
+// Create a non-templated alias for the f32 generator to satisfy
+// the existing build system which looks for "camera_pipe".
+class CameraPipe : public CameraPipeGenerator<float> {};
 
-class CameraPipe : public CameraPipeGenerator<uint16_t> {};
+// Register the old name for the build system, and the new specific names.
 HALIDE_REGISTER_GENERATOR(CameraPipe, camera_pipe)
+HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<float>, camera_pipe_f32)
+HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<uint16_t>, camera_pipe_u16)

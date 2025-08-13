@@ -61,8 +61,8 @@ target_link_libraries(pipeline_generator PRIVATE Halide::Halide Halide::Generato
 
 # --- Define pipeline variants ---
 # We create two versions of the pipeline, one for float and one for uint16.
-#set(PIPELINE_VARIANTS f32 u16)
-set(PIPELINE_VARIANTS u16)
+set(PIPELINE_VARIANTS f32 u16)
+# set(PIPELINE_VARIANTS u16)
 
 foreach(VARIANT ${PIPELINE_VARIANTS})
     set(PIPELINE_NAME "camera_pipe_${VARIANT}")

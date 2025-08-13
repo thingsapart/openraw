@@ -34,6 +34,13 @@ struct ProcessConfig {
     float denoise_eps = 0.01f;
     int timing_iterations = 5;
     int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
+    // Local Laplacian parameters
+    float ll_detail = 0.0f;
+    float ll_clarity = 0.0f;
+    float ll_shadows = 0.0f;
+    float ll_highlights = 0.0f;
+    float ll_blacks = 0.0f;
+    float ll_whites = 0.0f;
 };
 
 
