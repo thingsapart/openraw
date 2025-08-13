@@ -94,6 +94,7 @@ public:
 
         // The tile size for the coarse-grid shift estimation.
         const int ts = 16;
+        int vec = target.natural_vector_size<float>();
 
         // 2. Determine color of each pixel from GRBG Bayer pattern
         Expr cfa_y = y % 2;
@@ -115,7 +116,6 @@ public:
             Expr grad_h = absd(g_w, g_e);
 
             // Directionally-adaptive interpolation based on absolute difference.
-            // This is faster than the weighted average as it avoids division.
             Expr interp_val = select(grad_h < grad_v, avg(g_w, g_e), avg(g_n, g_s));
 
             g_interp(x, y) = select(is_g, norm_raw(x, y), interp_val);
@@ -126,11 +126,12 @@ public:
         Var bx("bx"), by("by"), c("c_ca"), v("v_ca");
         {
             RDom r(0, ts, 0, ts, "ca_rdom");
-            Expr tile_x = bx * ts + r.x;
-            Expr tile_y = by * ts + r.y;
-
+            
             Func clamped_g_interp = BoundaryConditions::repeat_edge(g_interp, {{0, width}, {0, height}});
             Func clamped_norm_raw = BoundaryConditions::repeat_edge(norm_raw, {{0, width}, {0, height}});
+            
+            Expr tile_x = bx * ts + r.x;
+            Expr tile_y = by * ts + r.y;
 
             Expr is_tile_r = ((tile_y % 2) == 0 && (tile_x % 2) == 1);
             Expr is_tile_b = ((tile_y % 2) == 1 && (tile_x % 2) == 0);
@@ -139,35 +140,46 @@ public:
             Expr G = clamped_g_interp(tile_x, tile_y);
             Expr deltgrb = G - C;
 
-            // --- Horizontal shifts (v=1) ---
             Expr gdiff_h = clamped_g_interp(tile_x + 1, tile_y) - clamped_g_interp(tile_x - 1, tile_y);
-            Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f), "ca_num_h_r_sum");
-            Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f), "ca_den_h_r_sum");
-            Expr shift_h_r = num_h_r / (den_h_r + 1e-5f);
-
-            Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f), "ca_num_h_b_sum");
-            Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f), "ca_den_h_b_sum");
-            Expr shift_h_b = num_h_b / (den_h_b + 1e-5f);
-
-            // --- Vertical shifts (v=0) ---
             Expr gdiff_v = clamped_g_interp(tile_x, tile_y + 1) - clamped_g_interp(tile_x, tile_y - 1);
-            Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f), "ca_num_v_r_sum");
-            Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f), "ca_den_v_r_sum");
-            Expr shift_v_r = num_v_r / (den_v_r + 1e-5f);
 
-            Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f), "ca_num_v_b_sum");
-            Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f), "ca_den_v_b_sum");
-            Expr shift_v_b = num_v_b / (den_v_b + 1e-5f);
+            Func sums("ca_sums");
+            Var p("ca_sum_component");
+            sums(bx, by, p) = 0.f; // Initialization
+
+            Expr num_h_r_term = select(is_tile_r, deltgrb * gdiff_h, 0.f);
+            Expr den_h_r_term = select(is_tile_r, gdiff_h * gdiff_h, 0.f);
+            Expr num_h_b_term = select(is_tile_b, deltgrb * gdiff_h, 0.f);
+            Expr den_h_b_term = select(is_tile_b, gdiff_h * gdiff_h, 0.f);
+            Expr num_v_r_term = select(is_tile_r, deltgrb * gdiff_v, 0.f);
+            Expr den_v_r_term = select(is_tile_r, gdiff_v * gdiff_v, 0.f);
+            Expr num_v_b_term = select(is_tile_b, deltgrb * gdiff_v, 0.f);
+            Expr den_v_b_term = select(is_tile_b, gdiff_v * gdiff_v, 0.f);
+
+            sums(bx, by, p) += mux(p, {num_h_r_term, den_h_r_term, num_h_b_term, den_h_b_term,
+                                       num_v_r_term, den_v_r_term, num_v_b_term, den_v_b_term});
             
+            // Schedule the reduction.
+            RVar rxo, rxi;
+            sums.update()
+                .atomic()
+                .split(r.x, rxo, rxi, vec)
+                .vectorize(rxi)
+                .unroll(p);
+
+            Expr shift_h_r = sums(bx, by, 0) / (sums(bx, by, 1) + 1e-5f);
+            Expr shift_h_b = sums(bx, by, 2) / (sums(bx, by, 3) + 1e-5f);
+            Expr shift_v_r = sums(bx, by, 4) / (sums(bx, by, 5) + 1e-5f);
+            Expr shift_v_b = sums(bx, by, 6) / (sums(bx, by, 7) + 1e-5f);
+
             const float bslim = 3.99f;
-            // c=0 is R, c=1 is B
-            // v=0 is vert, v=1 is horiz
             Expr shift_v = select(c == 0, shift_v_r, shift_v_b);
             Expr shift_h = select(c == 0, shift_h_r, shift_h_b);
             Expr shift = select(v == 0, shift_v, shift_h);
 
             block_shifts(bx, by, c, v) = clamp(shift, -bslim, bslim);
             block_shifts.set_estimates({ {0, (width + ts - 1) / ts}, {0, (height + ts - 1) / ts}, {0, 2}, {0, 2} });
+            intermediates.push_back(sums);
         }
 
         // 5. Blur the block_shifts to get a smooth global shift field.
@@ -178,8 +190,17 @@ public:
             
             Func blur_x("blur_x_shifts"), blur_y("blur_y_shifts");
             RDom r_blur(-4, 9, "ca_blur_rdom");
-            blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v), "ca_shifts_blur_x_sum");
-            blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v), "ca_shifts_blur_y_sum");
+
+            blur_x(bx, by, c, v) = 0.f; // Initialization
+            blur_x(bx, by, c, v) += clamped_shifts(bx + r_blur.x, by, c, v); // Update
+
+            blur_y(bx, by, c, v) = 0.f; // Initialization
+            blur_y(bx, by, c, v) += blur_x(bx, by + r_blur.x, c, v); // Update
+            
+            RVar rxo, rxi;
+            blur_x.update().atomic().split(r_blur.x, rxo, rxi, vec).vectorize(rxi);
+            blur_y.update().atomic().split(r_blur.x, rxo, rxi, vec).vectorize(rxi);
+
             blurred_shifts(bx, by, c, v) = blur_y(bx, by, c, v) / 81.0f;
             intermediates.push_back(blur_x);
             intermediates.push_back(blur_y);

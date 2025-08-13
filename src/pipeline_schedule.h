@@ -53,17 +53,15 @@ void schedule_pipeline(
         tone_curve_func.compute_root();
 
         // --- MAIN TILED EXECUTION ---
-        // Use tile() to create an explicit loop nest. This is more robust
-        // than multiple splits and gives us a handle to all loop levels.
         final_stage.compute_root()
             .tile(x, y, xo, yo, xi, yi, tile_size_x, strip_size)
             .reorder(xi, yi, c, xo, yo)
             .parallel(yo)
             .vectorize(xi, vec);
+        final_stage.bound(c, 0, 3).unroll(c);
+
 
         // --- "PER-STRIP" STAGES (Strip Waterfall) ---
-        // Using .store_at(final_stage, yo) allocates thread-local storage for
-        // each Func once per strip, drastically reducing malloc/free overhead.
         denoised.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
         ca_builder.output.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
@@ -73,11 +71,14 @@ void schedule_pipeline(
 
         deinterleaved_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         demosaiced.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        demosaiced.bound(c, 0, 3).unroll(c);
         for (Func f : demosaic_dispatcher.all_intermediates) {
             f.compute_at(final_stage, yo).store_at(final_stage, yo);
         }
         corrected_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        corrected_hi_fi.bound(c, 0, 3).unroll(c);
         sharpened.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        sharpened.bound(c, 0, 3).unroll(c);
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
         local_laplacian_builder.remap_lut.compute_root();
@@ -138,7 +139,10 @@ void schedule_pipeline(
         }
 #endif
         local_laplacian_builder.output.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec);
+        local_laplacian_builder.output.bound(c, 0, 3).unroll(c);
+
         curved.compute_at(final_stage, yi).vectorize(x, vec);
+        curved.bound(c, 0, 3).unroll(c);
     }
 }
 #endif // PIPELINE_SCHEDULE_H
