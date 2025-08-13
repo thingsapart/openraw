@@ -53,7 +53,8 @@ void schedule_pipeline(
         tone_curve_func.compute_root();
 
         // --- MAIN TILED EXECUTION ---
-        // Refactor the main loop structure for clarity and better scheduling control.
+        // Use tile() to create an explicit loop nest. This is more robust
+        // than multiple splits and gives us a handle to all loop levels.
         final_stage.compute_root()
             .tile(x, y, xo, yo, xi, yi, tile_size_x, strip_size)
             .reorder(xi, yi, c, xo, yo)
@@ -61,7 +62,8 @@ void schedule_pipeline(
             .vectorize(xi, vec);
 
         // --- "PER-STRIP" STAGES (Strip Waterfall) ---
-        // Storage is allocated once per parallel strip (yo).
+        // Using .store_at(final_stage, yo) allocates thread-local storage for
+        // each Func once per strip, drastically reducing malloc/free overhead.
         denoised.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
         ca_builder.output.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
