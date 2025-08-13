@@ -110,11 +110,13 @@ public:
         Func demosaiced = demosaic_dispatcher.output;
 
         // --- Bicubic Downscaling Step ---
-        // This stage resizes the full-resolution demosaiced image to the final output size.
-        // If downscale_factor is 1.0, it acts as a pass-through with minimal overhead.
-        Func downscaled = resize_bicubic(demosaiced, "downscaled",
-                                         full_res_width, full_res_height,
-                                         out_width, out_height, x, y, c);
+        ResizeBicubicBuilder resize_builder(demosaiced, "resize",
+                                            full_res_width, full_res_height,
+                                            out_width, out_height, x, y, c);
+        
+        Func downscaled("downscaled");
+        Expr is_no_op = abs(downscale_factor - 1.0f) < 1e-6f;
+        downscaled(x, y, c) = select(is_no_op, demosaiced(x, y, c), resize_builder.output(x, y, c));
 
         ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, matrix_3200, matrix_7000,
                                                        color_temp, tint, x, y, c, whiteLevel, blackLevel);
@@ -187,7 +189,7 @@ public:
         // The schedule is now complex enough to warrant its own file.
         schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
-            downscaled,
+            downscaled, is_no_op, resize_builder,
             corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, halide_proc_type,
             x, y, c, xo, xi, yo, yi,

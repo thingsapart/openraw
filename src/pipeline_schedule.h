@@ -4,6 +4,7 @@
 #include "Halide.h"
 #include "stage_ca_correct.h"
 #include "stage_demosaic.h"
+#include "stage_resize.h"
 #include "stage_local_adjust_laplacian.h"
 #include "stage_color_correct.h"
 
@@ -19,6 +20,8 @@ void schedule_pipeline(
     Halide::Func demosaiced,
     DemosaicDispatcherT<float>& demosaic_dispatcher,
     Halide::Func downscaled,
+    Halide::Expr is_no_op,
+    ResizeBicubicBuilder& resize_builder,
     Halide::Func corrected_hi_fi,
     Halide::Func sharpened,
     LocalLaplacianBuilder& local_laplacian_builder,
@@ -68,15 +71,9 @@ void schedule_pipeline(
         denoised.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
         // Schedule for Chromatic Aberration Correction.
-        // The loops that iterated over `ca_builder.intermediates` and `demosaic_dispatcher.all_intermediates`
-        // have been removed. This allows the `.compute_inline()` directives inside the demosaic helpers
-        // to take effect, fusing them as intended. We now schedule the CA builder's key components explicitly.
         ca_builder.output.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         ca_builder.g_interp.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec_f);
         ca_builder.block_shifts.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(ca_builder.bx, vec_f);
-
-        // Schedule for the separable blur on the CA shifts.
-        // This producer-consumer schedule enables storage folding for `blur_x`.
         ca_builder.blur_y.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(ca_builder.bx, vec_f);
         ca_builder.blur_x.compute_at(ca_builder.blur_y, ca_builder.by).vectorize(ca_builder.bx, vec_f);
 
@@ -85,9 +82,19 @@ void schedule_pipeline(
         demosaiced.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         demosaiced.bound(c, 0, 3).unroll(c);
         
-        // The new downscaling stage is also computed per strip. It consumes `demosaiced`.
+        // --- Schedule for the Downscaling Stage ---
+        // Create two versions of the code: one that bypasses the resize, one that does it.
+        downscaled.specialize(is_no_op);
         downscaled.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         downscaled.bound(c, 0, 3).unroll(c);
+
+        // Schedule the internal producer of the resize operation.
+        // It is computed per scanline of its consumer, `downscaled`.
+        // We vectorize over its own pure dimension, `x_coord`.
+        resize_builder.interp_y
+            .compute_at(downscaled, y)
+            .vectorize(resize_builder.x_coord, vec_f);
+
 
         corrected_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         corrected_hi_fi.bound(c, 0, 3).unroll(c);
