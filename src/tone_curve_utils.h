@@ -15,6 +15,7 @@ struct ProcessConfig {
     float white_point = 4095.0f;
     float exposure = 1.0f;
     int demosaic_algorithm = 1; // 0=simple, 1=vhg, 2=ahd, 3=lmmse
+    float downscale_factor = 1.0f;
     float color_temp = 3700.0f;
     float tint = 0.0f;
     float saturation = 1.0f;

@@ -18,6 +18,7 @@ void schedule_pipeline(
     Halide::Func deinterleaved_hi_fi,
     Halide::Func demosaiced,
     DemosaicDispatcherT<float>& demosaic_dispatcher,
+    Halide::Func downscaled,
     Halide::Func corrected_hi_fi,
     Halide::Func sharpened,
     LocalLaplacianBuilder& local_laplacian_builder,
@@ -40,6 +41,7 @@ void schedule_pipeline(
         final_stage.gpu_tile(x, y, block_x, block_y, thread_x, thread_y, 16, 16, c);
         denoised.compute_root();
         ca_builder.output.compute_root();
+        downscaled.compute_root();
         local_laplacian_builder.output.compute_root();
 
     } else {
@@ -83,6 +85,10 @@ void schedule_pipeline(
         demosaiced.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         demosaiced.bound(c, 0, 3).unroll(c);
         
+        // The new downscaling stage is also computed per strip. It consumes `demosaiced`.
+        downscaled.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        downscaled.bound(c, 0, 3).unroll(c);
+
         corrected_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         corrected_hi_fi.bound(c, 0, 3).unroll(c);
         sharpened.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);

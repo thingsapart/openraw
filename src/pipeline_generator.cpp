@@ -14,6 +14,7 @@
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h" // Now the dispatcher
+#include "stage_resize.h"
 #include "stage_color_correct.h"
 #include "stage_sharpen.h"
 #include "stage_local_adjust_laplacian.h" // The new stage
@@ -39,6 +40,7 @@ public:
 
     // --- Inputs ---
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<uint16_t, 2>> input{"input"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> downscale_factor{"downscale_factor"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> demosaic_algorithm_id{"demosaic_algorithm_id"};
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
@@ -70,8 +72,12 @@ public:
     void generate() {
         using namespace Halide::ConciseCasts;
         // ========== THE ALGORITHM ==========
-        Expr out_width = input.width() - 32;
-        Expr out_height = input.height() - 24;
+        Expr full_res_width = input.width() - 32;
+        Expr full_res_height = input.height() - 24;
+
+        // The final output dimensions are determined by the downscale factor.
+        Expr out_width = cast<int>(full_res_width / downscale_factor);
+        Expr out_height = cast<int>(full_res_height / downscale_factor);
 
         // Define the crop to the valid sensor area.
         Func initial_raw("initial_raw");
@@ -79,7 +85,7 @@ public:
 
         // Create a bounded version of the raw data that is safe to read from.
         Func raw_bounded("raw_bounded");
-        raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, out_width}, {0, out_height}});
+        raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, full_res_width}, {0, full_res_height}});
 
         // Normalize the safe, bounded raw data to [0,1] float for the hi-fi path.
         Func normalized_input("normalized_input");
@@ -94,7 +100,7 @@ public:
 
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,
-                                    out_width, out_height,
+                                    full_res_width, full_res_height,
                                     this->get_target(), this->using_autoscheduler());
         Func ca_corrected = ca_builder.output;
 
@@ -103,7 +109,14 @@ public:
         DemosaicDispatcherT<float> demosaic_dispatcher{deinterleaved_hi_fi, demosaic_algorithm_id, x, y, c};
         Func demosaiced = demosaic_dispatcher.output;
 
-        ColorCorrectBuilder_T<T> color_correct_builder(demosaiced, halide_proc_type, matrix_3200, matrix_7000,
+        // --- Bicubic Downscaling Step ---
+        // This stage resizes the full-resolution demosaiced image to the final output size.
+        // If downscale_factor is 1.0, it acts as a pass-through with minimal overhead.
+        Func downscaled = resize_bicubic(demosaiced, "downscaled",
+                                         full_res_width, full_res_height,
+                                         out_width, out_height, x, y, c);
+
+        ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, matrix_3200, matrix_7000,
                                                        color_temp, tint, x, y, c, whiteLevel, blackLevel);
         Func corrected_hi_fi = color_correct_builder.output;
 
@@ -160,16 +173,21 @@ public:
         const int out_width_est = 2592 - 32;
         const int out_height_est = 1968 - 24;
         input.set_estimates({{0, 2592}, {0, 1968}});
+        downscale_factor.set_estimate(1.0f);
         demosaic_algorithm_id.set_estimate(3);
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
+        // The output estimate must not depend on an Input parameter for the autoscheduler,
+        // so we use the full-resolution estimates. Halide's bounds inference will
+        // handle the actual size during JIT compilation.
         final_stage.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
         // ========== SCHEDULE ==========
         // The schedule is now complex enough to warrant its own file.
         schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
+            downscaled,
             corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, halide_proc_type,
             x, y, c, xo, xi, yo, yi,

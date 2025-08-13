@@ -43,6 +43,7 @@ void print_usage() {
            "  --output <path>        Path for the output 8-bit image file.\n\n"
            "Pipeline Options:\n"
            "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
+           "  --downscale <factor>   Downscale image by this factor (e.g., 2.0 for half size). 1.0=off (default: 1.0).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
@@ -103,6 +104,7 @@ int main(int argc, char **argv) {
             else if (args["demosaic"] == "fast") demosaic_id = 3;
             else { std::cerr << "Warning: unknown demosaic algorithm '" << args["demosaic"] << "'. Defaulting to fast.\n"; }
         }
+        if (args.count("downscale")) cfg.downscale_factor = std::stof(args["downscale"]);
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
@@ -148,7 +150,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
-    Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
+
+    // Calculate output dimensions based on crop and downscale factor
+    int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
+    int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
+    Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
     ToneCurveUtils tone_curve_util(cfg);
     Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
@@ -177,7 +183,7 @@ int main(int argc, char **argv) {
         auto start = std::chrono::high_resolution_clock::now();
 
         #if defined(PIPELINE_PRECISION_F32)
-            camera_pipe_f32(input, demosaic_id, matrix_3200, matrix_7000,
+            camera_pipe_f32(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
@@ -185,7 +191,7 @@ int main(int argc, char **argv) {
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
-            camera_pipe_u16(input, demosaic_id, matrix_3200, matrix_7000,
+            camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
