@@ -26,11 +26,22 @@ inline Halide::Expr lab_f(Halide::Expr t) {
     const float t_thresh = 0.008856451679035631f;
     return select(t > t_thresh, Halide::fast_pow(t, 1.0f / 3.0f), (7.787037037037037f * t) + (16.0f / 116.0f));
 }
-inline Halide::Func xyz_to_lab(Halide::Func xyz, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
+inline Halide::Func xyz_to_lab(Halide::Func xyz, Halide::Func lut, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
     using namespace Halide;
     const float Xn = 0.95047f, Yn = 1.0f, Zn = 1.08883f;
     Expr X_ = xyz(x, y, 0)/Xn, Y_ = xyz(x, y, 1)/Yn, Z_ = xyz(x, y, 2)/Zn;
-    Expr fX = lab_f(X_), fY = lab_f(Y_), fZ = lab_f(Z_);
+
+    auto lut_lookup = [&](Expr val) {
+        const int lut_size = 512;
+        // The domain of lab_f is roughly [0, 2]. We map this to the LUT.
+        Expr val_norm = val * (float)(lut_size - 1) / 2.0f;
+        Expr val_idx = clamp(val_norm, 0.0f, lut_size - 2.0f);
+        Expr vi = cast<int>(val_idx);
+        Expr vf = val_idx - vi;
+        return lerp(lut(vi), lut(vi + 1), vf);
+    };
+
+    Expr fX = lut_lookup(X_), fY = lut_lookup(Y_), fZ = lut_lookup(Z_);
     Expr L = 116.0f*fY - 16.0f, a = 500.0f*(fX - fY), b = 200.0f*(fY - fZ);
     Func lab(name); lab(x, y, c) = mux(c, {L, a, b}); return lab;
 }
@@ -39,12 +50,23 @@ inline Halide::Expr lab_f_inv(Halide::Expr t) {
     const float delta = 6.0f / 29.0f;
     return select(t > delta, t*t*t, 3.0f*delta*delta*(t - 16.0f/116.0f));
 }
-inline Halide::Func lab_to_xyz(Halide::Func lab, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
+inline Halide::Func lab_to_xyz(Halide::Func lab, Halide::Func lut, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
     using namespace Halide;
     const float Xn = 0.95047f, Yn = 1.0f, Zn = 1.08883f;
     Expr L = lab(x, y, 0), a = lab(x, y, 1), b = lab(x, y, 2);
     Expr fY = (L + 16.0f)/116.0f, fX = a/500.0f + fY, fZ = fY - b/200.0f;
-    Expr X = lab_f_inv(fX)*Xn, Y = lab_f_inv(fY)*Yn, Z = lab_f_inv(fZ)*Zn;
+
+    auto lut_lookup = [&](Expr val) {
+        const int lut_size = 512;
+        // The domain of lab_f_inv is roughly [-0.5, 1.5]. We map this to the LUT.
+        Expr val_norm = (val + 0.5f) * (float)(lut_size - 1) / 2.0f;
+        Expr val_idx = clamp(val_norm, 0.0f, lut_size - 2.0f);
+        Expr vi = cast<int>(val_idx);
+        Expr vf = val_idx - vi;
+        return lerp(lut(vi), lut(vi + 1), vf);
+    };
+
+    Expr X = lut_lookup(fX)*Xn, Y = lut_lookup(fY)*Yn, Z = lut_lookup(fZ)*Zn;
     Func xyz(name); xyz(x, y, c) = mux(c, {X, Y, Z}); return xyz;
 }
 inline Halide::Func xyz_to_linear_srgb(Halide::Func xyz, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
@@ -81,6 +103,7 @@ public:
     std::vector<Halide::Func> gPyramid, inLPyramid, outGPyramid, outLPyramid;
     std::vector<Halide::Func> low_fi_intermediates, high_fi_intermediates, high_freq_pyramid_helpers, low_freq_pyramid_helpers, reconstruction_intermediates;
     Halide::Func remap_lut;
+    Halide::Func lab_f_lut, lab_f_inv_lut;
     const int pyramid_levels;
 
     LocalLaplacianBuilder(Halide::Func input_rgb_normalized,
@@ -100,6 +123,20 @@ public:
         using namespace Halide;
         using namespace Halide::ConciseCasts;
 
+        // Create LUTs for the expensive Lab conversion functions
+        lab_f_lut = Func("lab_f_lut");
+        lab_f_inv_lut = Func("lab_f_inv_lut");
+        Var i("lut_i");
+        const int lut_size = 512;
+
+        // lab_f domain is roughly [0, 2]. We map this to [0, lut_size-1]
+        Expr t_f = cast<float>(i) * 2.0f / (lut_size - 1);
+        lab_f_lut(i) = lab_f(t_f);
+
+        // lab_f_inv domain is roughly [-0.5, 1.5]. We map this to [0, lut_size-1]
+        Expr t_inv = (cast<float>(i) / (lut_size - 1)) * 2.0f - 0.5f;
+        lab_f_inv_lut(i) = lab_f_inv(t_inv);
+
         Func input_f = input_rgb_normalized;
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
@@ -107,7 +144,7 @@ public:
         Func lab_hifi("lab_hifi"), L_norm_hifi("L_norm_hifi");
         Func a_chan("a_chan"), b_chan("b_chan");
 
-        lab_hifi = xyz_to_lab(linear_srgb_to_xyz(input_f, x, y, c, "xyz_hifi"), x, y, c, "lab_hifi");
+        lab_hifi = xyz_to_lab(linear_srgb_to_xyz(input_f, x, y, c, "xyz_hifi"), lab_f_lut, x, y, c, "lab_hifi");
         L_norm_hifi(x, y) = lab_hifi(x, y, 0) / 100.0f;
         a_chan(x, y) = lab_hifi(x, y, 1); b_chan(x, y) = lab_hifi(x, y, 2);
         high_fi_intermediates = {lab_hifi, L_norm_hifi, a_chan, b_chan};
@@ -138,7 +175,7 @@ public:
                 (b_f_sensor - blackLevel) * inv_range
             });
 
-            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, hx, hy, c, "xyz_lowfi"), hx, hy, c, "lab_lowfi");
+            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, hx, hy, c, "xyz_lowfi"), lab_f_lut, hx, hy, c, "lab_lowfi");
             L_norm_lowfi_halfres(hx, hy) = lab_lowfi(hx, hy, 0) / 100.0f;
             low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lab_lowfi, L_norm_lowfi_halfres};
         }
@@ -192,11 +229,11 @@ public:
 
         // --- Correctly modify the Laplacian pyramid levels ---
         remap_lut = Func("remap_lut");
-        Var i("i_remap");
-        Expr fi = cast<float>(i) / 255.0f;
+        Var i_remap("i_remap");
+        Expr fi = cast<float>(i_remap) / 255.0f;
         Expr tonal_gain = (shadows/100.f)*(1.f-smoothstep(0.f,0.5f,fi)) + (highlights/100.f)*smoothstep(0.5f,1.f,fi);
         // The LUT computes a remapped intensity value, e.g., using a gamma curve.
-        remap_lut(i) = fast_pow(fi, fast_pow(2.f, -tonal_gain));
+        remap_lut(i_remap) = fast_pow(fi, fast_pow(2.f, -tonal_gain));
 
         Expr clarity_gain = 1.0f + clarity / 100.0f;
 
@@ -238,7 +275,7 @@ public:
         }
 
         lab_out(x, y, c) = mux(c, {L_out(x, y), a_chan(x, y), b_chan(x, y)});
-        xyz_out = lab_to_xyz(lab_out, x, y, c, "final_xyz");
+        xyz_out = lab_to_xyz(lab_out, lab_f_inv_lut, x, y, c, "final_xyz");
         rgb_out_f = xyz_to_linear_srgb(xyz_out, x, y, c, "final_rgb_f");
         Expr blacks_level = blacks/250.f, whites_level = 1.f + whites/250.f;
         Expr remap_denom = whites_level - blacks_level;
@@ -254,8 +291,8 @@ public:
 
         // Round trip through the color spaces
         Func xyz_fwd = linear_srgb_to_xyz(input_f, x, y, c, "bypass_xyz_fwd");
-        Func lab = xyz_to_lab(xyz_fwd, x, y, c, "bypass_lab");
-        Func xyz_bwd = lab_to_xyz(lab, x, y, c, "bypass_xyz_bwd");
+        Func lab = xyz_to_lab(xyz_fwd, lab_f_lut, x, y, c, "bypass_lab");
+        Func xyz_bwd = lab_to_xyz(lab, lab_f_inv_lut, x, y, c, "bypass_xyz_bwd");
         Func rgb_out_f = xyz_to_linear_srgb(xyz_bwd, x, y, c, "bypass_rgb_out");
 
         // Store all intermediates so we can inspect them if needed.

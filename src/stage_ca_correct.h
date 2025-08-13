@@ -110,11 +110,11 @@ public:
 
             Expr grad_v = absd(g_n, g_s);
             Expr grad_h = absd(g_w, g_e);
-            Expr weight_v = 1.0f / (1e-5f + grad_v);
-            Expr weight_h = 1.0f / (1e-5f + grad_h);
 
-            Expr interp_val = (g_n + g_s) * weight_v + (g_w + g_e) * weight_h;
-            interp_val = interp_val / (2.f * weight_v + 2.f * weight_h);
+            // Directionally-adaptive interpolation based on absolute difference.
+            // This is faster than the weighted average as it avoids division.
+            Expr interp_val = select(grad_h < grad_v, avg(g_w, g_e), avg(g_n, g_s));
+
             g_interp(x, y) = select(is_g, norm_raw(x, y), interp_val);
         }
 

@@ -78,6 +78,8 @@ void schedule_pipeline(
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
         local_laplacian_builder.remap_lut.compute_root();
+        local_laplacian_builder.lab_f_lut.compute_root();
+        local_laplacian_builder.lab_f_inv_lut.compute_root();
 
         bool perform_splice = (cutover_level > 0 && cutover_level < J);
 
