@@ -76,7 +76,7 @@ public:
         // Define the crop to the valid sensor area.
         Func initial_raw("initial_raw");
         initial_raw(x, y) = input(x + 16, y + 12);
-        
+
         // Create a bounded version of the raw data that is safe to read from.
         Func raw_bounded("raw_bounded");
         raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, out_width}, {0, out_height}});
@@ -85,13 +85,13 @@ public:
         Func normalized_input("normalized_input");
         Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
         normalized_input(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range;
-        
+
         DenoiseBuilder denoise_builder(normalized_input, x, y,
                                        denoise_strength, denoise_eps,
                                        this->get_target(), this->using_autoscheduler());
         Func denoised("denoised");
         denoised(x, y) = select(denoise_strength < 0.001f, normalized_input(x, y), denoise_builder.output(x, y));
-        
+
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,
                                     out_width, out_height,
@@ -99,10 +99,10 @@ public:
         Func ca_corrected = ca_builder.output;
 
         Func deinterleaved_hi_fi = pipeline_deinterleave(ca_corrected, x, y, c);
-        
+
         DemosaicDispatcherT<float> demosaic_dispatcher{deinterleaved_hi_fi, demosaic_algorithm_id, x, y, c};
         Func demosaiced = demosaic_dispatcher.output;
-        
+
         ColorCorrectBuilder_T<T> color_correct_builder(demosaiced, halide_proc_type, matrix_3200, matrix_7000,
                                                        color_temp, tint, x, y, c, whiteLevel, blackLevel);
         Func corrected_hi_fi = color_correct_builder.output;
@@ -110,7 +110,7 @@ public:
         SharpenBuilder_T<T> sharpen_builder(corrected_hi_fi, sharpen_strength, sharpen_radius, sharpen_threshold,
                                             out_width, out_height, x, y, c);
         Func sharpened = sharpen_builder.output;
-        
+
         // --- Local Laplacian Stage ---
         // Create a normalized float version of the input for the builder.
         Func laplacian_input("laplacian_input");
@@ -121,12 +121,15 @@ public:
         }
 
         // The builder is now untemplated and works only on normalized floats.
+        const int J = 8;
+        const int cutover_level = 3; // Set J < cutover_level to test the pure hi-fi path
         LocalLaplacianBuilder local_laplacian_builder(
             laplacian_input, raw_bounded, color_correct_builder.cc_matrix,
             x, y, c,
             ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
             blackLevel, whiteLevel,
-            out_width, out_height);
+            out_width, out_height,
+            J, cutover_level);
         Func local_adjustments_f = local_laplacian_builder.output;
 
         // Convert the float output back to the pipeline's processing type.
@@ -144,7 +147,7 @@ public:
         Func curved = pipeline_apply_curve<T>(local_adjustments, blackLevel, whiteLevel,
                                            tone_curve_func, tone_curve_lut.dim(0).extent(), x, y, c,
                                            this->get_target(), this->using_autoscheduler());
-        
+
         Func final_stage("final_stage");
         Expr final_val = curved(x, y, c);
         if (std::is_same<proc_type, float>::value) {
@@ -169,8 +172,9 @@ public:
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
             corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, halide_proc_type,
-            x, y, c, xo, xi, yo, yi);
-        
+            x, y, c, xo, xi, yo, yi,
+            J, cutover_level);
+
         processed = final_stage;
     }
 };

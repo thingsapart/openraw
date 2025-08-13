@@ -11,7 +11,7 @@
 // To debug this stage, define this macro during compilation.
 // This will bypass the pyramid logic and only perform the color space conversions.
 // e.g., cmake -S . -B build -DBYPASS_LAPLACIAN_PYRAMID=ON
-#define BYPASS_LAPLACIAN_PYRAMID
+// #define BYPASS_LAPLACIAN_PYRAMID
 
 namespace {
 // This version of srgb_to_xyz is for LINEAR sRGB input.
@@ -82,7 +82,6 @@ public:
     std::vector<Halide::Func> low_fi_intermediates, high_fi_intermediates, high_freq_pyramid_helpers, low_freq_pyramid_helpers, reconstruction_intermediates;
     Halide::Func remap_lut;
     const int pyramid_levels;
-    Halide::Var qx, qy;
 
     LocalLaplacianBuilder(Halide::Func input_rgb_normalized,
                            Halide::Func raw_input,
@@ -96,7 +95,7 @@ public:
                            int J = 8, int cutover_level = 4)
         : output("local_adjustments_f"),
           gPyramid(J), inLPyramid(J), outGPyramid(J), outLPyramid(J),
-          pyramid_levels(J), qx("qx_lf"), qy("qy_lf")
+          pyramid_levels(J)
     {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
@@ -114,79 +113,130 @@ public:
         high_fi_intermediates = {lab_hifi, L_norm_hifi, a_chan, b_chan};
         
         // --- PATH 2: Low-Fidelity Path ---
-        Func L_norm_lowfi("L_norm_lowfi");
+        // This path produces a half-resolution L* image, equivalent in size
+        // and content to gPyramid[1] from the hi-fi path.
+        Func L_norm_lowfi_halfres("L_norm_lowfi_halfres");
         {
-            Func deinterleaved_raw = pipeline_deinterleave(raw_input, qx, qy, c);
+            Var hx("hx_lf"), hy("hy_lf"); // Local vars for the half-resolution grid.
+            Func deinterleaved_raw = pipeline_deinterleave(raw_input, hx, hy, c);
             Func rgb_lowfi_sensor("rgb_lowfi_sensor");
-            rgb_lowfi_sensor(qx,qy,c) = mux(c,{cast<float>(deinterleaved_raw(qx,qy,1)), avg(cast<float>(deinterleaved_raw(qx,qy,0)), cast<float>(deinterleaved_raw(qx,qy,3))), cast<float>(deinterleaved_raw(qx,qy,2))});
+            rgb_lowfi_sensor(hx,hy,c) = mux(c,{cast<float>(deinterleaved_raw(hx,hy,1)), avg(cast<float>(deinterleaved_raw(hx,hy,0)), cast<float>(deinterleaved_raw(hx,hy,3))), cast<float>(deinterleaved_raw(hx,hy,2))});
             
             // Mimic the main color correction stage: apply matrix to sensor-space data, then normalize.
-            Expr ir_sensor = rgb_lowfi_sensor(qx,qy,0);
-            Expr ig_sensor = rgb_lowfi_sensor(qx,qy,1);
-            Expr ib_sensor = rgb_lowfi_sensor(qx,qy,2);
+            Expr ir_sensor = rgb_lowfi_sensor(hx,hy,0);
+            Expr ig_sensor = rgb_lowfi_sensor(hx,hy,1);
+            Expr ib_sensor = rgb_lowfi_sensor(hx,hy,2);
             Expr r_f_sensor = cc_matrix(3, 0) + cc_matrix(0, 0) * ir_sensor + cc_matrix(1, 0) * ig_sensor + cc_matrix(2, 0) * ib_sensor;
             Expr g_f_sensor = cc_matrix(3, 1) + cc_matrix(0, 1) * ir_sensor + cc_matrix(1, 1) * ig_sensor + cc_matrix(2, 1) * ib_sensor;
             Expr b_f_sensor = cc_matrix(3, 2) + cc_matrix(0, 2) * ir_sensor + cc_matrix(1, 2) * ig_sensor + cc_matrix(2, 2) * ib_sensor;
             
             Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
             Func corrected_lowfi_norm("corrected_lowfi_norm");
-            corrected_lowfi_norm(qx,qy,c) = mux(c, {
+            corrected_lowfi_norm(hx,hy,c) = mux(c, {
                 (r_f_sensor - blackLevel) * inv_range,
                 (g_f_sensor - blackLevel) * inv_range,
                 (b_f_sensor - blackLevel) * inv_range
             });
             
-            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, qx, qy, c, "xyz_lowfi"), qx, qy, c, "lab_lowfi");
-            L_norm_lowfi(qx, qy) = lab_lowfi(qx, qy, 0) / 100.0f;
-            low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lab_lowfi, L_norm_lowfi};
+            Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, hx, hy, c, "xyz_lowfi"), hx, hy, c, "lab_lowfi");
+            L_norm_lowfi_halfres(hx, hy) = lab_lowfi(hx, hy, 0) / 100.0f;
+            low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lab_lowfi, L_norm_lowfi_halfres};
         }
 
-        // --- Build Input Pyramids (Gaussian and Laplacian) from original L* ---
+        // --- Build Input Pyramids (Gaussian and Laplacian) with Splicing ---
         gPyramid[0] = L_norm_hifi;
-        for (int j = 1; j < cutover_level; j++) {
-            downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
-        }
-        gPyramid[cutover_level] = L_norm_lowfi;
-        for (int j = cutover_level + 1; j < pyramid_levels; j++) {
-            downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], low_freq_pyramid_helpers);
+
+        // The splice only makes sense if there are at least two levels, and the
+        // cutover is strictly between the first and last level.
+        bool perform_splice = (cutover_level > 0 && cutover_level < pyramid_levels);
+
+        if (perform_splice) {
+            // Build hi-fi path up to the splice point
+            for (int j = 1; j < cutover_level; j++) {
+                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
+            }
+            
+            // Prepare the low-fi branch for splicing.
+            // The low-fi path starts at half-resolution, equivalent to pyramid level 1.
+            // We need to downsample it (cutover_level - 1) more times to match gPyramid[cutover_level].
+            Func lowfi_spliced = L_norm_lowfi_halfres;
+            for (int j = 1; j < cutover_level; j++) {
+                Func prev = lowfi_spliced;
+                downsample(prev, "lowfi_ds_"+std::to_string(j), lowfi_spliced, low_freq_pyramid_helpers);
+            }
+
+            // Perform the splice.
+            gPyramid[cutover_level] = lowfi_spliced;
+
+            // Continue building the pyramid from the spliced-in low-fi branch.
+            for (int j = cutover_level + 1; j < pyramid_levels; j++) {
+                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], low_freq_pyramid_helpers);
+            }
+        } else {
+            // No splice, just build a standard Gaussian pyramid from the hi-fi source.
+            for (int j = 1; j < pyramid_levels; j++) {
+                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
+            }
         }
         
-        inLPyramid[pyramid_levels-1] = gPyramid[pyramid_levels-1];
-        for(int j=pyramid_levels-2; j>=0; j--) {
-            inLPyramid[j] = Func("inLPyramid_"+std::to_string(j));
-            Func upsampled_g;
-            auto& helpers = (j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
-            upsample(gPyramid[j+1], "inLpyr_us_"+std::to_string(j), upsampled_g, helpers);
-            inLPyramid[j](x,y) = gPyramid[j](x,y) - upsampled_g(x,y);
+        if (pyramid_levels > 0) {
+            inLPyramid[pyramid_levels-1] = gPyramid[pyramid_levels-1];
+            for(int j=pyramid_levels-2; j>=0; j--) {
+                inLPyramid[j] = Func("inLPyramid_"+std::to_string(j));
+                Func upsampled_g;
+                auto& helpers = (perform_splice && j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
+                upsample(gPyramid[j+1], "inLpyr_us_"+std::to_string(j), upsampled_g, helpers);
+                inLPyramid[j](x,y) = gPyramid[j](x,y) - upsampled_g(x,y);
+            }
         }
 
-        // --- Remap detail and Reconstruct Output Pyramid ---
+        // --- Correctly modify the Laplacian pyramid levels ---
         remap_lut = Func("remap_lut");
         Var i("i_remap");
         Expr fi = cast<float>(i) / 255.0f;
         Expr tonal_gain = (shadows/100.f)*(1.f-smoothstep(0.f,0.5f,fi)) + (highlights/100.f)*smoothstep(0.5f,1.f,fi);
-        remap_lut(i) = tonal_gain;
+        // The LUT computes a remapped intensity value, e.g., using a gamma curve.
+        remap_lut(i) = pow(fi, pow(2.f, -tonal_gain));
+        
+        Expr clarity_gain = 1.0f + clarity / 100.0f;
 
-        for(int j=0; j<pyramid_levels; j++) {
-            outLPyramid[j] = Func("outLPyramid_"+std::to_string(j));
-            Expr g = gPyramid[j](x,y);
-            Expr idx = cast<int>(clamp(g * 255.0f, 0, 255));
-            Expr tonal_adjust = remap_lut(idx);
-            outLPyramid[j](x,y) = inLPyramid[j](x,y) * (1.f + clarity/100.f) + tonal_adjust;
+        // Apply tonal adjustments only to the base layer.
+        int base_level = pyramid_levels - 1;
+        if (base_level >= 0) {
+            outLPyramid[base_level] = Func("outLPyramid_" + std::to_string(base_level));
+            Expr g_base = gPyramid[base_level](x,y);
+            Expr idx = cast<int>(clamp(g_base * 255.0f, 0.f, 255.f));
+            outLPyramid[base_level](x,y) = remap_lut(idx);
         }
 
-        outGPyramid[pyramid_levels-1] = outLPyramid[pyramid_levels-1];
-        for(int j=pyramid_levels-2; j>=0; j--) {
-            outGPyramid[j] = Func("outGPyramid_"+std::to_string(j));
-            Func upsampled_out;
-            auto& helpers = (j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
-            upsample(outGPyramid[j+1], "outGpyr_us_"+std::to_string(j), upsampled_out, helpers);
-            outGPyramid[j](x,y) = upsampled_out(x,y) + outLPyramid[j](x,y);
+        // Apply clarity adjustments only to the detail/residual layers.
+        for(int j=0; j < base_level; j++) {
+            outLPyramid[j] = Func("outLPyramid_"+std::to_string(j));
+            outLPyramid[j](x,y) = inLPyramid[j](x,y) * clarity_gain;
+        }
+
+        // --- Reconstruct the output Gaussian pyramid ---
+        if (pyramid_levels > 0) {
+            outGPyramid[pyramid_levels-1] = outLPyramid[pyramid_levels-1];
+            for(int j=pyramid_levels-2; j>=0; j--) {
+                outGPyramid[j] = Func("outGPyramid_"+std::to_string(j));
+                Func upsampled_out;
+                auto& helpers = (perform_splice && j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
+                upsample(outGPyramid[j+1], "outGpyr_us_"+std::to_string(j), upsampled_out, helpers);
+                outGPyramid[j](x,y) = upsampled_out(x,y) + outLPyramid[j](x,y);
+            }
         }
 
         // --- Convert back to RGB ---
         Func L_out("L_out"), lab_out("lab_out"), xyz_out("xyz_out"), rgb_out_f("rgb_out_f"), final_adjustments("final_adjustments");
-        L_out(x, y) = outGPyramid[0](x, y) * 100.0f;
+        
+        if (pyramid_levels > 0) {
+            L_out(x, y) = outGPyramid[0](x, y) * 100.0f;
+        } else {
+            // Handle J=0 case, though it's unlikely. Just pass through Luma.
+            L_out(x, y) = L_norm_hifi(x,y) * 100.0f;
+        }
+
         lab_out(x, y, c) = mux(c, {L_out(x, y), a_chan(x, y), b_chan(x, y)});
         xyz_out = lab_to_xyz(lab_out, x, y, c, "final_xyz");
         rgb_out_f = xyz_to_linear_srgb(xyz_out, x, y, c, "final_rgb_f");
