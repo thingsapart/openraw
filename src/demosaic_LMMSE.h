@@ -47,6 +47,8 @@ public:
             Expr ghd_b = absd(gb_cm1_h, gb_c);
             g_at_b(qx, qy) = select(ghd_b < gvd_b, gh_b, gv_b);
         }
+        g_at_r.compute_inline();
+        g_at_b.compute_inline();
         intermediates.push_back(g_at_r);
         intermediates.push_back(g_at_b);
 
@@ -70,6 +72,8 @@ public:
             r_at_g(qx, qy) = deinterleaved_f(qx, qy, 0) + k_r;
             b_at_g(qx, qy) = deinterleaved_f(qx, qy, 0) + k_b;
         }
+        r_at_g.compute_inline();
+        b_at_g.compute_inline();
         intermediates.push_back(r_at_g);
         intermediates.push_back(b_at_g);
 
@@ -89,6 +93,8 @@ public:
             r_at_b(qx, qy) = g_at_b(qx, qy) + avg(r_nw - g_r_nw, r_ne - g_r_ne, r_sw - g_r_sw, r_se - g_r_se);
             b_at_r(qx, qy) = g_at_r(qx, qy) + avg(b_nw - g_b_nw, b_ne - g_b_ne, b_sw - g_b_sw, b_se - g_b_se);
         }
+        r_at_b.compute_inline();
+        b_at_r.compute_inline();
         intermediates.push_back(r_at_b);
         intermediates.push_back(b_at_r);
         
@@ -100,6 +106,8 @@ public:
                                    {mux(x_full % 2, {b_at_g(x_full/2,y_full/2), b_at_r(x_full/2,y_full/2)}),
                                     mux(x_full % 2, {deinterleaved_f(x_full/2,y_full/2, 2), b_at_g(x_full/2,y_full/2)})});
         
+        deinterleaved_f.compute_inline();
+
         output = Func("demosaic_lmmse");
         Expr r_final = proc_type_sat<T>(red(x_full, y_full));
         Expr g_final = proc_type_sat<T>(green(x_full, y_full));

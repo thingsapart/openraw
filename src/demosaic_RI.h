@@ -52,6 +52,16 @@ public:
             g_corrected_r(qx, qy) = g_tentative_r(qx, qy) + g_residual_interp_r(qx, qy);
             g_corrected_b(qx, qy) = g_tentative_b(qx, qy) + g_residual_interp_b(qx, qy);
 
+            // Inline all green-channel helpers
+            g_tentative_r.compute_inline();
+            g_tentative_b.compute_inline();
+            g_residual_gr.compute_inline();
+            g_residual_gb.compute_inline();
+            g_residual_interp_r.compute_inline();
+            g_residual_interp_b.compute_inline();
+            g_corrected_r.compute_inline();
+            g_corrected_b.compute_inline();
+
             // Interleave to create the final green channel
             g_final(x_full, y_full) = mux(y_full % 2,
                                           {mux(x_full % 2, {deinterleaved_f(x_full/2, y_full/2, 0), g_corrected_r(x_full/2, y_full/2)}),
@@ -78,6 +88,8 @@ public:
         Func r_final_f("r_final_f"), b_final_f("b_final_f");
         r_final_f(x_full, y_full) = g_final(x_full, y_full) + cd_r_interp(x_full, y_full);
         b_final_f(x_full, y_full) = g_final(x_full, y_full) + cd_b_interp(x_full, y_full);
+
+        deinterleaved_f.compute_inline();
 
         output = Func("demosaic_ri");
         Expr r_final = proc_type_sat<T>(r_final_f(x_full, y_full));

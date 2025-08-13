@@ -48,6 +48,8 @@ public:
             Expr ghd_b = absd(gb_cm1_h, gb_c);
             g_at_b(qx, qy) = select(ghd_b < gvd_b, gh_b, gv_b);
         }
+        g_at_r.compute_inline();
+        g_at_b.compute_inline();
         intermediates.push_back(g_at_r);
         intermediates.push_back(g_at_b);
 
@@ -72,6 +74,10 @@ public:
             Expr green_correction_b_gb = gb_val - avg(g_at_b(qx, qy), g_at_b(qx + 1, qy));
             b_at_gb(qx, qy) = green_correction_b_gb + avg(b_val, deinterleaved_f(qx + 1, qy, 2));
         }
+        r_at_gr.compute_inline();
+        b_at_gr.compute_inline();
+        r_at_gb.compute_inline();
+        b_at_gb.compute_inline();
         intermediates.insert(intermediates.end(), {r_at_gr, b_at_gr, r_at_gb, b_at_gb});
 
         // --- Interpolate R at B sites and B at R sites
@@ -95,6 +101,8 @@ public:
             Expr bnd_r = absd(deinterleaved_f(qx+1, qy, 2), deinterleaved_f(qx, qy-1, 2));
             b_at_r(qx, qy) = select(bpd_r < bnd_r, bp_r, bn_r);
         }
+        r_at_b.compute_inline();
+        b_at_r.compute_inline();
         intermediates.push_back(r_at_b);
         intermediates.push_back(b_at_r);
 
@@ -111,6 +119,8 @@ public:
         b_full(x_full, y_full) = mux(y_full % 2,
                                   {mux(x_full % 2, {b_at_gr(x_full/2, y_full/2), b_at_r(x_full/2, y_full/2)}),
                                    mux(x_full % 2, {deinterleaved_f(x_full/2, y_full/2, 2), b_at_gb(x_full/2, y_full/2)})});
+
+        deinterleaved_f.compute_inline();
 
         output = Func("demosaic_fast");
         Expr r_final = proc_type_sat<T>(r_full(x_full, y_full));
