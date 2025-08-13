@@ -24,7 +24,7 @@ inline Halide::Func linear_srgb_to_xyz(Halide::Func srgb_linear, Halide::Var x, 
 inline Halide::Expr lab_f(Halide::Expr t) {
     using namespace Halide;
     const float t_thresh = 0.008856451679035631f;
-    return select(t > t_thresh, Halide::pow(t, 1.0f / 3.0f), (7.787037037037037f * t) + (16.0f / 116.0f));
+    return select(t > t_thresh, Halide::fast_pow(t, 1.0f / 3.0f), (7.787037037037037f * t) + (16.0f / 116.0f));
 }
 inline Halide::Func xyz_to_lab(Halide::Func xyz, Halide::Var x, Halide::Var y, Halide::Var c, const std::string& name) {
     using namespace Halide;
@@ -99,19 +99,19 @@ public:
     {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-        
+
         Func input_f = input_rgb_normalized;
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
         // --- PATH 1: High-Fidelity Path ---
         Func lab_hifi("lab_hifi"), L_norm_hifi("L_norm_hifi");
         Func a_chan("a_chan"), b_chan("b_chan");
-        
+
         lab_hifi = xyz_to_lab(linear_srgb_to_xyz(input_f, x, y, c, "xyz_hifi"), x, y, c, "lab_hifi");
         L_norm_hifi(x, y) = lab_hifi(x, y, 0) / 100.0f;
         a_chan(x, y) = lab_hifi(x, y, 1); b_chan(x, y) = lab_hifi(x, y, 2);
         high_fi_intermediates = {lab_hifi, L_norm_hifi, a_chan, b_chan};
-        
+
         // --- PATH 2: Low-Fidelity Path ---
         // This path produces a half-resolution L* image, equivalent in size
         // and content to gPyramid[1] from the hi-fi path.
@@ -121,7 +121,7 @@ public:
             Func deinterleaved_raw = pipeline_deinterleave(raw_input, hx, hy, c);
             Func rgb_lowfi_sensor("rgb_lowfi_sensor");
             rgb_lowfi_sensor(hx,hy,c) = mux(c,{cast<float>(deinterleaved_raw(hx,hy,1)), avg(cast<float>(deinterleaved_raw(hx,hy,0)), cast<float>(deinterleaved_raw(hx,hy,3))), cast<float>(deinterleaved_raw(hx,hy,2))});
-            
+
             // Mimic the main color correction stage: apply matrix to sensor-space data, then normalize.
             Expr ir_sensor = rgb_lowfi_sensor(hx,hy,0);
             Expr ig_sensor = rgb_lowfi_sensor(hx,hy,1);
@@ -129,7 +129,7 @@ public:
             Expr r_f_sensor = cc_matrix(3, 0) + cc_matrix(0, 0) * ir_sensor + cc_matrix(1, 0) * ig_sensor + cc_matrix(2, 0) * ib_sensor;
             Expr g_f_sensor = cc_matrix(3, 1) + cc_matrix(0, 1) * ir_sensor + cc_matrix(1, 1) * ig_sensor + cc_matrix(2, 1) * ib_sensor;
             Expr b_f_sensor = cc_matrix(3, 2) + cc_matrix(0, 2) * ir_sensor + cc_matrix(1, 2) * ig_sensor + cc_matrix(2, 2) * ib_sensor;
-            
+
             Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
             Func corrected_lowfi_norm("corrected_lowfi_norm");
             corrected_lowfi_norm(hx,hy,c) = mux(c, {
@@ -137,7 +137,7 @@ public:
                 (g_f_sensor - blackLevel) * inv_range,
                 (b_f_sensor - blackLevel) * inv_range
             });
-            
+
             Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(corrected_lowfi_norm, hx, hy, c, "xyz_lowfi"), hx, hy, c, "lab_lowfi");
             L_norm_lowfi_halfres(hx, hy) = lab_lowfi(hx, hy, 0) / 100.0f;
             low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lab_lowfi, L_norm_lowfi_halfres};
@@ -155,7 +155,7 @@ public:
             for (int j = 1; j < cutover_level; j++) {
                 downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
             }
-            
+
             // Prepare the low-fi branch for splicing.
             // The low-fi path starts at half-resolution, equivalent to pyramid level 1.
             // We need to downsample it (cutover_level - 1) more times to match gPyramid[cutover_level].
@@ -178,7 +178,7 @@ public:
                 downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
             }
         }
-        
+
         if (pyramid_levels > 0) {
             inLPyramid[pyramid_levels-1] = gPyramid[pyramid_levels-1];
             for(int j=pyramid_levels-2; j>=0; j--) {
@@ -196,8 +196,8 @@ public:
         Expr fi = cast<float>(i) / 255.0f;
         Expr tonal_gain = (shadows/100.f)*(1.f-smoothstep(0.f,0.5f,fi)) + (highlights/100.f)*smoothstep(0.5f,1.f,fi);
         // The LUT computes a remapped intensity value, e.g., using a gamma curve.
-        remap_lut(i) = pow(fi, pow(2.f, -tonal_gain));
-        
+        remap_lut(i) = fast_pow(fi, fast_pow(2.f, -tonal_gain));
+
         Expr clarity_gain = 1.0f + clarity / 100.0f;
 
         // Apply tonal adjustments only to the base layer.
@@ -229,7 +229,7 @@ public:
 
         // --- Convert back to RGB ---
         Func L_out("L_out"), lab_out("lab_out"), xyz_out("xyz_out"), rgb_out_f("rgb_out_f"), final_adjustments("final_adjustments");
-        
+
         if (pyramid_levels > 0) {
             L_out(x, y) = outGPyramid[0](x, y) * 100.0f;
         } else {
@@ -244,20 +244,20 @@ public:
         Expr remap_denom = whites_level - blacks_level;
         final_adjustments(x,y,c) = (rgb_out_f(x,y,c) - blacks_level) / select(abs(remap_denom)<1e-5f, 1e-5f, remap_denom);
         reconstruction_intermediates = {L_out, lab_out, xyz_out, rgb_out_f, final_adjustments};
-        
+
         Expr is_default = clarity == 0 && shadows == 0 && highlights == 0 && blacks == 0 && whites == 0;
         output(x, y, c) = select(is_default, input_f(x, y, c), final_adjustments(x, y, c));
 
 #else
         // --- DEBUG PATH: BYPASS PYRAMID ---
         // This path tests only the color space conversions.
-        
+
         // Round trip through the color spaces
         Func xyz_fwd = linear_srgb_to_xyz(input_f, x, y, c, "bypass_xyz_fwd");
         Func lab = xyz_to_lab(xyz_fwd, x, y, c, "bypass_lab");
         Func xyz_bwd = lab_to_xyz(lab, x, y, c, "bypass_xyz_bwd");
         Func rgb_out_f = xyz_to_linear_srgb(xyz_bwd, x, y, c, "bypass_rgb_out");
-        
+
         // Store all intermediates so we can inspect them if needed.
         high_fi_intermediates = {input_f, xyz_fwd, lab, xyz_bwd, rgb_out_f};
 
