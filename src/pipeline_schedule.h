@@ -53,28 +53,29 @@ void schedule_pipeline(
         tone_curve_func.compute_root();
 
         // --- MAIN TILED EXECUTION ---
+        // Refactor the main loop structure for clarity and better scheduling control.
         final_stage.compute_root()
-            .split(y, yo, yi, strip_size)
-            .split(x, xo, xi, tile_size_x)
+            .tile(x, y, xo, yo, xi, yi, tile_size_x, strip_size)
             .reorder(xi, yi, c, xo, yo)
             .parallel(yo)
             .vectorize(xi, vec);
 
         // --- "PER-STRIP" STAGES (Strip Waterfall) ---
-        denoised.compute_at(final_stage, yo).vectorize(x, vec);
+        // Storage is allocated once per parallel strip (yo).
+        denoised.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
-        ca_builder.output.compute_at(final_stage, yo).vectorize(x, vec);
+        ca_builder.output.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         for (Func f : ca_builder.intermediates) {
-            f.compute_at(final_stage, yo);
+            f.compute_at(final_stage, yo).store_at(final_stage, yo);
         }
 
-        deinterleaved_hi_fi.compute_at(final_stage, yo).vectorize(x, vec);
-        demosaiced.compute_at(final_stage, yo).vectorize(x, vec);
+        deinterleaved_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        demosaiced.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
         for (Func f : demosaic_dispatcher.all_intermediates) {
-            f.compute_at(final_stage, yo);
+            f.compute_at(final_stage, yo).store_at(final_stage, yo);
         }
-        corrected_hi_fi.compute_at(final_stage, yo).vectorize(x, vec);
-        sharpened.compute_at(final_stage, yo).vectorize(x, vec);
+        corrected_hi_fi.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
+        sharpened.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(x, vec);
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
         local_laplacian_builder.remap_lut.compute_root();
@@ -87,54 +88,54 @@ void schedule_pipeline(
             // --- SPLICED PYRAMID SCHEDULE ---
             // LOW-FI path is computed per-strip.
             for (auto& f : local_laplacian_builder.low_fi_intermediates) {
-                f.compute_at(final_stage, yo).vectorize(f.args()[0], vec);
+                f.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(f.args()[0], vec);
             }
             // LOW-FREQUENCY pyramid levels (from splice point up) are computed per-strip.
             for (int j = cutover_level; j < J; j++) {
-                local_laplacian_builder.gPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
-                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
+                local_laplacian_builder.gPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
+                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             }
             for (auto& f : local_laplacian_builder.low_freq_pyramid_helpers) {
-                f.compute_at(final_stage, yo);
+                f.compute_at(final_stage, yo).store_at(final_stage, yo);
             }
 
             // HIGH-FREQUENCY pyramid levels (from base up to splice point) are computed per-tile.
             for (int j = 0; j < cutover_level; j++) {
-                local_laplacian_builder.gPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
-                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
+                local_laplacian_builder.gPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
+                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             }
         } else {
             // --- NON-SPLICED (STANDARD) PYRAMID SCHEDULE ---
             // All levels are considered "high frequency" and are computed per-tile for locality.
             for (int j = 0; j < J; j++) {
-                local_laplacian_builder.gPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
-                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
-                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
+                local_laplacian_builder.gPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec);
+                local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
+                local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             }
         }
 
         // --- COMMON PER-TILE AND RECONSTRUCTION SCHEDULE ---
         for (auto& f : local_laplacian_builder.high_freq_pyramid_helpers) {
-            f.compute_at(final_stage, xo);
+            f.compute_at(final_stage, xo).store_at(final_stage, yo);
         }
         for (auto& f : local_laplacian_builder.high_fi_intermediates) {
-            f.compute_at(final_stage, xo);
+            f.compute_at(final_stage, xo).store_at(final_stage, yo);
         }
         for (auto& f : local_laplacian_builder.reconstruction_intermediates) {
-            f.compute_at(final_stage, xo).vectorize(x, vec);
+            f.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec);
         }
 #else
         // Schedule for the BYPASS debug path
         for (auto& f : local_laplacian_builder.high_fi_intermediates) {
-            f.compute_at(final_stage, xo);
+            f.compute_at(final_stage, xo).store_at(final_stage, yo);
         }
 #endif
-        local_laplacian_builder.output.compute_at(final_stage, xo).vectorize(x, vec);
+        local_laplacian_builder.output.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec);
         curved.compute_at(final_stage, yi).vectorize(x, vec);
     }
 }
