@@ -7,7 +7,6 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # --- Add custom module path and Homebrew prefix ---
-# This tells CMake to look in our 'cmake' directory for find scripts.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 if(APPLE AND EXISTS "/opt/homebrew")
     list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
@@ -34,12 +33,10 @@ FetchContent_MakeAvailable(stb)
 
 # --- Build Options ---
 option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
+option(BUILD_LVGL_EDITOR "Build the LVGL-based editor executable" OFF)
 
-# --- Dependencies for Editor and Pipeline ---
-# FIX: Revert to separate find_package calls. CMake will now use our
-# custom FindSDL2_image.cmake script for the second call.
-find_package(SDL2 REQUIRED)
-find_package(SDL2_image REQUIRED)
+# --- Core Dependencies ---
+# PNG is used by both the pipeline and the optional editor
 find_package(PNG REQUIRED)
 
 
@@ -144,57 +141,65 @@ endif()
 
 
 # ===================================================================
-# New LVGL Editor Target (Appended to original file)
+# Optional LVGL Editor Target
 # ===================================================================
 
-# Add LVGL v9.x as a library, built from the 'lvgl' subdirectory.
-file(GLOB_RECURSE LVGL_SOURCES
-    "lvgl/src/*.c"
-    "lvgl/src/drivers/sdl/*.c"
-)
-add_library(lvgl STATIC ${LVGL_SOURCES})
-target_link_libraries(lvgl PRIVATE SDL2::SDL2 PNG::PNG)
-target_compile_definitions(lvgl PRIVATE
-    LV_CONF_PATH=<editor/lv_conf.h>
-    LV_BUILD_CONF_PATH=<editor/lv_conf.h>
-)
-target_include_directories(lvgl PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/lvgl"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
-)
+if(BUILD_LVGL_EDITOR)
+    message(STATUS "Building optional LVGL editor target.")
 
-# Create a helper library from the refactored 'editor' directory.
-add_library(lvgl_helpers STATIC
-    src/editor/sdl_viewer.c
-    src/editor/lvgl_assert_handler.c
-)
-target_link_libraries(lvgl_helpers PUBLIC
-    lvgl
-    SDL2::SDL2
-    # FIX: Use the target name defined in the custom find script (capital I).
-    SDL2::Image
-    m
-    PNG::PNG
-)
-target_include_directories(lvgl_helpers PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-)
-target_compile_definitions(lvgl_helpers PUBLIC
-    LV_CONF_PATH=<editor/lv_conf.h>
-    LV_BUILD_CONF_PATH=<editor/lv_conf.h>
-)
+    # Find editor-specific dependencies only when the option is enabled.
+    find_package(SDL2 REQUIRED)
+    find_package(SDL2_image REQUIRED)
 
-# Define the 'editor' executable.
-add_executable(editor src/editor/main.c)
-target_link_libraries(editor PRIVATE lvgl_helpers)
-target_compile_definitions(editor PRIVATE
-    _GNU_SOURCE
-    __DEV_MODE__
-)
+    # Add LVGL v9.x as a library, built from the 'lvgl' subdirectory.
+    file(GLOB_RECURSE LVGL_SOURCES
+        "lvgl/src/*.c"
+        "lvgl/src/drivers/sdl/*.c"
+    )
+    add_library(lvgl STATIC ${LVGL_SOURCES})
+    target_link_libraries(lvgl PRIVATE SDL2::SDL2 PNG::PNG)
+    target_compile_definitions(lvgl PRIVATE
+        LV_CONF_PATH=<editor/lv_conf.h>
+        LV_BUILD_CONF_PATH=<editor/lv_conf.h>
+    )
+    target_include_directories(lvgl PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/lvgl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
+    )
 
-# Use target_compile_options to apply flags correctly.
-target_compile_options(lvgl PRIVATE -Wall -g)
-target_compile_options(lvgl_helpers PRIVATE -Wall -g)
-target_compile_options(editor PRIVATE -Wall -g)
+    # Create a helper library from the refactored 'editor' directory.
+    add_library(lvgl_helpers STATIC
+        src/editor/sdl_viewer.c
+        src/editor/lvgl_assert_handler.c
+    )
+    target_link_libraries(lvgl_helpers PUBLIC
+        lvgl
+        SDL2::SDL2
+        SDL2::Image
+        m
+        PNG::PNG
+    )
+    target_include_directories(lvgl_helpers PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_compile_definitions(lvgl_helpers PUBLIC
+        LV_CONF_PATH=<editor/lv_conf.h>
+        LV_BUILD_CONF_PATH=<editor/lv_conf.h>
+    )
+
+    # Define the 'editor' executable.
+    add_executable(editor src/editor/main.c)
+    target_link_libraries(editor PRIVATE lvgl_helpers)
+    target_compile_definitions(editor PRIVATE
+        _GNU_SOURCE
+        __DEV_MODE__
+    )
+
+    # Use target_compile_options to apply flags correctly.
+    target_compile_options(lvgl PRIVATE -Wall -g)
+    target_compile_options(lvgl_helpers PRIVATE -Wall -g)
+    target_compile_options(editor PRIVATE -Wall -g)
+
+endif()
