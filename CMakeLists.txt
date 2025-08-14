@@ -32,7 +32,6 @@ endif()
 #  1. PIPELINE GENERATOR
 # ==============================================================================
 add_executable(pipeline_generator src/pipeline_generator.cpp)
-# Link against both Halide::Halide (for the compiler API) and Halide::Generator (for the main() entry point)
 target_link_libraries(pipeline_generator PRIVATE Halide::Halide Halide::Generator)
 target_include_directories(pipeline_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -55,11 +54,10 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
             $<TARGET_FILE:pipeline_generator>
             -g ${PIPELINE_NAME}
             -o ${GENERATED_PIPELINE_DIR}
-            -n ${FILE_BASE_NAME} # This flag is critical to name the outputs correctly
+            -n ${FILE_BASE_NAME}
             -e "static_library,c_header"
             target=${CMAKE_HALIDE_TARGET}
-            profile=true
-        # This explicit dependency list is crucial for correct rebuilds
+            profile=false
         DEPENDS
             pipeline_generator src/pipeline_generator.cpp src/pipeline_schedule.h
             src/demosaic_AHD.h src/demosaic_fast.h src/demosaic_LMMSE.h src/demosaic_RI.h
@@ -130,6 +128,11 @@ endif()
 # ==============================================================================
 #  5. NEW RAW Editor UI Application (`rawr`)
 # ==============================================================================
+find_package(SDL2 REQUIRED)
+find_package(OpenGL REQUIRED)
+message(STATUS "Found SDL2: ${SDL2_LIBRARY}")
+message(STATUS "Found OpenGL: ${OPENGL_gl_LIBRARY}")
+
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -140,13 +143,13 @@ FetchContent_Declare(
                   <SOURCE_DIR>/CMakeLists.txt
 )
 FetchContent_MakeAvailable(imgui)
+target_link_libraries(imgui PRIVATE SDL2::SDL2)
 
 # --- Download font and copy it to the build directory ---
 set(FONT_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/font_download)
 set(FONT_TTF_PATH ${FONT_DOWNLOAD_DIR}/extras/ttf/Inter-Regular.ttf)
-set(FONT_DESTINATION_DIR ${CMAKE_BINARY_DIR})
+set(FONT_DESTINATION_DIR ${CMAKE_BINARY_DIR}) 
 
-# Only download and extract the font if it doesn't already exist.
 if(NOT EXISTS ${FONT_TTF_PATH})
     message(STATUS "Inter font not found. Downloading...")
     set(FONT_ZIP_PATH ${FONT_DOWNLOAD_DIR}/Inter.zip)
@@ -162,36 +165,33 @@ if(NOT EXISTS ${FONT_TTF_PATH})
         WORKING_DIRECTORY ${FONT_DOWNLOAD_DIR}
     )
 endif()
-
-# This command copies the font to where the executable will be built.
 file(COPY ${FONT_TTF_PATH} DESTINATION ${FONT_DESTINATION_DIR})
-
-
-find_package(SDL2 REQUIRED)
-find_package(OpenGL REQUIRED)
-message(STATUS "Found SDL2: ${SDL2_LIBRARY}")
-message(STATUS "Found OpenGL: ${OPENGL_gl_LIBRARY}")
 
 add_executable(rawr
     src/editor/main.cpp
     src/editor/editor_ui.cpp
     src/editor/editor_theme.cpp
+    src/editor/halide_runner.cpp
+    src/editor/texture_utils.cpp
     src/process_options.cpp
     src/tone_curve_utils.cpp
 )
 
 target_link_libraries(rawr PRIVATE
-    imgui
-    SDL2::SDL2
+    imgui 
     OpenGL::GL
-    Halide::ImageIO # For load_and_convert_image
+    Halide::ImageIO 
     PNG::PNG
+    ${GENERATED_PIPELINE_DIR}/camera_pipe_f32_lib.a
+    Halide::Runtime
 )
+add_dependencies(rawr generate_camera_pipe_f32)
 
 target_include_directories(rawr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/editor # For new headers
-    ${SDL2_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/editor 
     ${stb_SOURCE_DIR}
+    ${GENERATED_PIPELINE_DIR} 
+    ${SDL2_INCLUDE_DIRS} # This line was missing and is the fix.
 )
 set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)

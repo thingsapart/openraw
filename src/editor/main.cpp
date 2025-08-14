@@ -8,17 +8,20 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include <SDL.h>
-#if defined(IMGUI_IMPL_OPENGL_ES2)
-#include <SDL_opengles2.h>
-#else
 #include <SDL_opengl.h>
-#endif
+// The glext header is no longer needed here
+// #include <SDL_opengl_glext.h>
 
 #include "process_options.h"
 #include "app_state.h"
 #include "editor_theme.h"
 #include "editor_ui.h"
+#include "halide_runner.h"
+#include "texture_utils.h"
+#include "halide_image_io.h"
 
+// The function pointer is now managed entirely within texture_utils.cpp
+// PFNGLGENERATEMIPMAPPROC glGenerateMipmap = NULL;
 
 int main(int argc, char** argv) {
     AppState app_state;
@@ -29,11 +32,24 @@ int main(int argc, char** argv) {
         print_usage();
         return 1;
     }
-    
+
     if (app_state.params.input_path.empty()) {
         std::cout << "Usage: ./rawr <path_to_image.png> [options...]" << std::endl;
         return 1;
     }
+
+    // --- Load Input Image ---
+    try {
+        app_state.input_image = Halide::Tools::load_and_convert_image(app_state.params.input_path);
+        std::cout << "Loaded image: " << app_state.params.input_path << " ("
+                  << app_state.input_image.width() << "x" << app_state.input_image.height() << ")" << std::endl;
+    } catch (const std::runtime_error& e) {
+        std::cerr << "Failed to load input image: " << e.what() << std::endl;
+        return 1;
+    }
+
+    app_state.next_render_time = std::chrono::steady_clock::now() + std::chrono::hours(24);
+    // app_state.params_changed = false;
 
     // Setup SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -72,6 +88,9 @@ int main(int argc, char** argv) {
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1); // Enable vsync
 
+    // The function pointer is now loaded lazily inside texture_utils.cpp
+    // glGenerateMipmap = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
+
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -102,28 +121,19 @@ int main(int argc, char** argv) {
     // Setup Platform/Renderer backends
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
-    
+
     // Main event-driven loop
     bool done = false;
+
     while (!done) {
         SDL_Event event;
-        if (SDL_WaitEvent(&event)) {
+        while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT || 
+            if (event.type == SDL_QUIT ||
                (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)))
             {
                 done = true;
             }
-            while(SDL_PollEvent(&event)) {
-                ImGui_ImplSDL2_ProcessEvent(&event);
-                 if (event.type == SDL_QUIT || 
-                    (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)))
-                 {
-                    done = true;
-                }
-            }
-        } else {
-            done = true;
         }
 
         // Start the Dear ImGui frame
@@ -131,7 +141,7 @@ int main(int argc, char** argv) {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        // Render all UI components
+        // Render all UI components and handle pipeline execution internally
         RenderUI(app_state);
 
         // Rendering
@@ -150,9 +160,13 @@ int main(int argc, char** argv) {
         }
 
         SDL_GL_SwapWindow(window);
+        SDL_Delay(1);
     }
 
     // Cleanup
+    DeleteTexture(app_state.main_texture_id);
+    DeleteTexture(app_state.thumb_texture_id);
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();

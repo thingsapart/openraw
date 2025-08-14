@@ -62,6 +62,7 @@ void schedule_pipeline(
         final_stage.compute_root()
             .tile(x, y, xo, yo, xi, yi, tile_size_x, strip_size)
             .reorder(xi, yi, c, xo, yo)
+            // No reorder_storage. Output will be planar: RRR...GGG...BBB...
             .parallel(yo)
             .vectorize(xi, vec);
         final_stage.bound(c, 0, 3).unroll(c);
