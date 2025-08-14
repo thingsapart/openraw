@@ -8,6 +8,8 @@
 
 #include <string>
 #include <iostream>
+#include <algorithm> // for std::max, std::min
+#include <cmath>     // for fabsf, powf
 
 // This function now renders all right-hand panels inside a single, scrollable window.
 static void RenderRightPanel(AppState& state) {
@@ -94,48 +96,45 @@ static void RenderMainView(AppState& state) {
     state.main_view_size = ImGui::GetContentRegionAvail();
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 cursor_screen_pos = ImGui::GetCursorScreenPos();
-    ImVec2 view_center_screen = cursor_screen_pos + state.main_view_size * 0.5f;
-
-    const float source_image_w = state.input_image.width() - 32;
-    const float source_image_h = state.input_image.height() - 24;
-
-    // Calculate the scale factor from source image pixels to screen pixels
-    float display_scale = state.main_view_size.x / (source_image_w * state.view_scale);
 
     if (ImGui::IsWindowHovered()) {
         if (io.MouseWheel != 0) {
-            // 1. Where is the mouse in normalized image coordinates?
-            ImVec2 mouse_pos_from_center_screen = ImGui::GetMousePos() - view_center_screen;
-            ImVec2 mouse_pos_from_center_norm = mouse_pos_from_center_screen / state.main_view_size * state.view_scale;
-            ImVec2 mouse_im_coords_norm = state.view_center_norm + mouse_pos_from_center_norm;
-
-            // 2. Apply zoom to the view scale
-            float zoom_delta = (io.MouseWheel > 0) ? 1.0f / 1.2f : 1.2f;
-            float old_view_scale = state.view_scale;
-            state.view_scale *= zoom_delta;
-            state.view_scale = std::max(0.001f, std::min(state.view_scale, 2.0f)); // Clamp zoom
-
-            // 3. Update the view center to keep the point under the mouse stationary
-            state.view_center_norm = mouse_im_coords_norm + (state.view_center_norm - mouse_im_coords_norm) * (state.view_scale / old_view_scale);
+            float old_zoom = state.zoom;
+            // The zoom factor is now updated instantly for smooth UI scaling
+            state.zoom *= (io.MouseWheel > 0) ? 1.1f : (1.0f / 1.1f);
             
+            ImVec2 mouse_pos_in_window = ImGui::GetMousePos() - cursor_screen_pos;
+            // Adjust the pan offset to keep the point under the mouse stationary
+            state.pan_offset = mouse_pos_in_window + (state.pan_offset - mouse_pos_in_window) * (state.zoom / old_zoom);
+
+            // Schedule a high-quality re-render for later
             state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
         }
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            state.view_center_norm.x -= io.MouseDelta.x / (source_image_w * display_scale);
-            state.view_center_norm.y -= io.MouseDelta.y / (source_image_h * display_scale);
+            // Direct "grab-a-pixel" panning
+            state.pan_offset = state.pan_offset + io.MouseDelta;
         }
     }
 
     if (state.main_texture_id != 0 && state.main_output_planar.data()) {
-        ImVec2 displayed_size = ImVec2(source_image_w * display_scale, source_image_h * display_scale);
-        ImVec2 top_left_im_pos = ImVec2(source_image_w * state.view_center_norm.x, source_image_h * state.view_center_norm.y);
-        ImVec2 top_left_screen_pos = view_center_screen - top_left_im_pos * display_scale;
+        // The display size is the full source image size, scaled by the UI zoom
+        const float source_w = state.input_image.width() - 32;
+        const float source_h = state.input_image.height() - 24;
 
-        ImGui::SetCursorPos(top_left_screen_pos - cursor_screen_pos);
-        ImGui::Image((void*)(intptr_t)state.main_texture_id, displayed_size, ImVec2(0, 1), ImVec2(1, 0));
+        // Calculate the base "fit-to-view" scale factor
+        float fit_scale_x = state.main_view_size.x / source_w;
+        float fit_scale_y = state.main_view_size.y / source_h;
+        float fit_scale = std::min(fit_scale_x, fit_scale_y);
+
+        // The final displayed size is the base fit size multiplied by the user's zoom
+        float img_w = source_w * fit_scale * state.zoom;
+        float img_h = source_h * fit_scale * state.zoom;
+        
+        ImGui::SetCursorPos(state.pan_offset);
+        ImGui::Image((void*)(intptr_t)state.main_texture_id, ImVec2(img_w, img_h), ImVec2(0, 1), ImVec2(1, 0));
     } else {
-        ImVec2 center_text_pos = cursor_screen_pos + state.main_view_size * 0.5f;
-        ImGui::GetWindowDrawList()->AddText(center_text_pos, IM_COL32(255,255,255,200), "Adjust a parameter to render the image.");
+        ImVec2 center = cursor_screen_pos + state.main_view_size * 0.5f;
+        ImGui::GetWindowDrawList()->AddText(center, IM_COL32(255,255,255,200), "Adjust a parameter to render the image.");
     }
 
     ImGui::End();
@@ -183,13 +182,30 @@ void RenderUI(AppState& state) {
     if (state.ui_ready && now >= state.next_render_time) {
         std::cout << "Debounce triggered: Rerunning Halide pipeline..." << std::endl;
         RunHalidePipelines(state);
-        CreateOrUpdateTexture(state.main_texture_id, state.main_output_planar.width(), state.main_output_planar.height(), state.main_output_interleaved);
-        CreateOrUpdateTexture(state.thumb_texture_id, state.thumb_output_planar.width(), state.thumb_output_planar.height(), state.thumb_output_interleaved);
+        if (state.main_output_planar.data()) {
+            CreateOrUpdateTexture(state.main_texture_id, state.main_output_planar.width(), state.main_output_planar.height(), state.main_output_interleaved);
+            CreateOrUpdateTexture(state.thumb_texture_id, state.thumb_output_planar.width(), state.thumb_output_planar.height(), state.thumb_output_interleaved);
+        }
         state.next_render_time = std::chrono::steady_clock::time_point::max();
     }
 
     if (!state.ui_ready && state.main_view_size.x > 1 && state.main_view_size.y > 1) {
         state.ui_ready = true;
+        
+        // Calculate initial "fit-to-view" pan and zoom
+        const float source_w = state.input_image.width() - 32;
+        const float source_h = state.input_image.height() - 24;
+        float fit_scale_x = state.main_view_size.x / source_w;
+        float fit_scale_y = state.main_view_size.y / source_h;
+        float fit_scale = std::min(fit_scale_x, fit_scale_y);
+        
+        // Zoom is a multiplier of this fit_scale, so it starts at 1.0
+        state.zoom = 1.0f; 
+        
+        // Pan is calculated to center the scaled image
+        state.pan_offset.x = (state.main_view_size.x - source_w * fit_scale) * 0.5f;
+        state.pan_offset.y = (state.main_view_size.y - source_h * fit_scale) * 0.5f;
+
         state.next_render_time = std::chrono::steady_clock::now();
     }
 }

@@ -40,12 +40,10 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     
     printf("\n--- Preparing Halide run for: %s ---\n", view_name.c_str());
     printf("  Downscale Factor: %.4f, Calculated Output: %d x %d\n", downscale_factor, out_width, out_height);
-
+    
+    // This check is now a fallback; the factor clamping should prevent this.
     if (out_width < 32 || out_height < 32) {
         printf("  SKIPPING: Output size is too small.\n");
-        if (output_buffer.data() != nullptr) {
-            output_buffer.data()[0] = 0;
-        }
         return;
     }
 
@@ -95,18 +93,26 @@ void RunHalidePipelines(AppState& state) {
         return;
     }
     
-    const float source_image_w = state.input_image.width() - 32;
+    const float source_w = state.input_image.width() - 32;
 
     // --- Main View Pipeline ---
-    float visible_image_width = source_image_w * state.view_scale;
-    float downscale_factor_main = visible_image_width / state.main_view_size.x;
-    downscale_factor_main = std::max(1.0f, downscale_factor_main); // Clamp to prevent upscaling
+    float fit_scale = std::min(state.main_view_size.x / source_w, state.main_view_size.y / (state.input_image.height() - 24));
+    float on_screen_width = source_w * fit_scale * state.zoom;
+    float downscale_factor_main = source_w / on_screen_width;
+
+    // Calculate the maximum safe downscale factor to avoid crashing the pipeline
+    const float min_pipeline_width = 256.0f;
+    float max_downscale_factor = source_w / min_pipeline_width;
+    // Use the smaller of the two: either what the user requested, or the max safe factor
+    downscale_factor_main = std::min(downscale_factor_main, max_downscale_factor);
+    // Always render at least 1:1, let the UI handle up-scaling
+    downscale_factor_main = std::max(1.0f, downscale_factor_main);
 
     run_pipeline_instance(state, downscale_factor_main, state.main_output_planar, "Main View");
     ConvertPlanarToInterleaved(state.main_output_planar, state.main_output_interleaved);
 
     // --- Thumbnail Pipeline ---
-    float downscale_factor_thumb = source_image_w / state.thumb_view_size.x;
+    float downscale_factor_thumb = source_w / state.thumb_view_size.x;
     downscale_factor_thumb = std::max(1.0f, downscale_factor_thumb);
     run_pipeline_instance(state, downscale_factor_thumb, state.thumb_output_planar, "Thumbnail");
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);

@@ -34,18 +34,17 @@ struct AppState {
     uint32_t main_texture_id = 0;
     uint32_t thumb_texture_id = 0;
 
-    // --- New Viewport "Camera" Model ---
-    // These are the "source of truth" for the view.
-    ImVec2 view_center_norm{0.5f, 0.5f}; // The point in the source image at the center of the view. (0-1)
-    float view_scale = 1.0f;              // Fraction of the source image width visible in the view. 1.0 = fit-width.
-
+    // --- Viewport State ---
+    float zoom = 1.0f;                      // The logical zoom level relative to "fit-to-view"
+    ImVec2 pan_offset{0, 0};                // Panning offset in screen pixels
+    
     // --- UI State (updated each frame) ---
-    ImVec2 main_view_size{1, 1};
+    ImVec2 main_view_size{1, 1};        
     ImVec2 thumb_view_size{1, 1};
 
     // --- Debounce State ---
     std::chrono::steady_clock::time_point next_render_time = std::chrono::steady_clock::time_point::max();
-    bool ui_ready = false;
+    bool ui_ready = false; 
 };
 
 #endif // APP_STATE_H

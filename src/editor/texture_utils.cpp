@@ -15,7 +15,7 @@ void CreateOrUpdateTexture(uint32_t& texture_id, int width, int height, const st
     if (!loader_initialized) {
         p_glGenerateMipmap = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
         if (!p_glGenerateMipmap) {
-            std::cerr << "Warning: glGenerateMipmap could not be loaded. Texture minification might be lower quality." << std::endl;
+            std::cerr << "Warning: glGenerateMipmap could not be loaded. Texture minification will be lower quality." << std::endl;
         }
         loader_initialized = true;
     }
