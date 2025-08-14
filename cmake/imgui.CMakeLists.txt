@@ -1,0 +1,32 @@
+# This file is copied into the imgui source directory by FetchContent
+# to provide CMake build system integration for the library.
+
+cmake_minimum_required(VERSION 3.16)
+project(imgui-wrapper)
+
+# This library has a dependency on SDL2 for its backend.
+# We must find the package here so the library has access to the headers.
+find_package(SDL2 REQUIRED)
+
+# Define the library target with its source files.
+# Paths are relative to the imgui source root.
+add_library(imgui STATIC
+    imgui.cpp
+    imgui_draw.cpp
+    imgui_tables.cpp
+    imgui_widgets.cpp
+    imgui_demo.cpp # Add the demo file which contains ShowDemoWindow
+    backends/imgui_impl_sdl2.cpp
+    backends/imgui_impl_opengl3.cpp
+)
+
+# Expose the necessary include directories publicly.
+# Any target that links against 'imgui' will automatically inherit these.
+target_include_directories(imgui PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends
+)
+
+# Link the library against its dependency. This makes the SDL2
+# include directories available to the imgui compilation units.
+target_link_libraries(imgui PRIVATE SDL2::SDL2)

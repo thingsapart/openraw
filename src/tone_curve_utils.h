@@ -6,43 +6,7 @@
 #include <cstdint>
 
 #include "HalideBuffer.h"
-
-// All pipeline parameters are now encapsulated in this single struct.
-struct ProcessConfig {
-    std::string input_path;
-    std::string output_path;
-    float black_point = 25.0f;
-    float white_point = 4095.0f;
-    float exposure = 1.0f;
-    int demosaic_algorithm = 1; // 0=simple, 1=vhg, 2=ahd, 3=lmmse
-    float downscale_factor = 1.0f;
-    float color_temp = 3700.0f;
-    float tint = 0.0f;
-    float saturation = 1.0f;
-    int saturation_algorithm = 1; // 0=HSL, 1=LAB
-    float gamma = 2.2f;
-    float contrast = 50.0f;
-    std::string curve_points_str;
-    std::string curve_r_str;
-    std::string curve_g_str;
-    std::string curve_b_str;
-    int curve_mode = 1; // 0=Luma, 1=RGB
-    float sharpen = 1.0f;
-    float sharpen_radius = 1.0f;
-    float sharpen_threshold = 0.02f;
-    float ca_strength = 0.0f; // Default to off
-    float denoise_strength = 50.0f;
-    float denoise_eps = 0.01f;
-    int timing_iterations = 5;
-    int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
-    // Local Laplacian parameters
-    float ll_detail = 0.0f;
-    float ll_clarity = 0.0f;
-    float ll_shadows = 0.0f;
-    float ll_highlights = 0.0f;
-    float ll_blacks = 0.0f;
-    float ll_whites = 0.0f;
-};
+#include "process_options.h" // Include the new shared header
 
 
 struct Point { float x, y; };

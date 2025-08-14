@@ -1,20 +1,26 @@
 cmake_minimum_required(VERSION 3.16)
-project(CameraPipe C CXX)
+project(RawrPipe)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# --- Add custom module path and Homebrew prefix ---
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-if(APPLE AND EXISTS "/opt/homebrew")
-    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
-endif()
-
-# --- Find Halide ---
+# --- Find Core Dependencies ---
 find_package(Halide REQUIRED)
 message(STATUS "Found Halide: ${Halide_DIR}")
+find_package(PNG REQUIRED)
+
+# --- Fetch Header-only Dependencies ---
+include(FetchContent)
+set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+
+FetchContent_Declare(
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG        master
+  GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 
 # Add a default target if not specified by the user/environment.
 if(NOT CMAKE_HALIDE_TARGET)
@@ -22,84 +28,67 @@ if(NOT CMAKE_HALIDE_TARGET)
   message(STATUS "CMAKE_HALIDE_TARGET not set, defaulting to 'host'")
 endif()
 
-# --- Fetch STB Header-only Library ---
-include(FetchContent)
-FetchContent_Declare(
-  stb
-  GIT_REPOSITORY https://github.com/nothings/stb.git
-  GIT_TAG        master
-)
-FetchContent_MakeAvailable(stb)
-
-# --- Build Options ---
-option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
-option(BUILD_LVGL_EDITOR "Build the LVGL-based editor executable" OFF)
-
-# --- Core Dependencies ---
-# PNG is used by both the pipeline and the optional editor
-find_package(PNG REQUIRED)
-
-
 # ==============================================================================
-#  1. PIPELINE GENERATOR (Original, restored from diff)
+#  1. PIPELINE GENERATOR
 # ==============================================================================
 add_executable(pipeline_generator src/pipeline_generator.cpp)
+# Link against both Halide::Halide (for the compiler API) and Halide::Generator (for the main() entry point)
 target_link_libraries(pipeline_generator PRIVATE Halide::Halide Halide::Generator)
-
+target_include_directories(pipeline_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # ==============================================================================
-#  2. STATIC PIPELINE LIBRARY (Original, restored from diff)
+#  2. STATIC PIPELINE LIBRARY GENERATION
 # ==============================================================================
 set(PIPELINE_VARIANTS f32 u16)
+set(GENERATED_PIPELINE_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated_pipeline)
+file(MAKE_DIRECTORY ${GENERATED_PIPELINE_DIR})
+
 foreach(VARIANT ${PIPELINE_VARIANTS})
     set(PIPELINE_NAME "camera_pipe_${VARIANT}")
-    set(GENERATOR_NAME "camera_pipe_${VARIANT}")
     set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
 
     add_custom_command(
         OUTPUT
-            ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
-            ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.h
+            ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.a
+            ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.h
         COMMAND
             $<TARGET_FILE:pipeline_generator>
-            -g ${GENERATOR_NAME}
-            -o ${CMAKE_CURRENT_BINARY_DIR}
-            -n ${FILE_BASE_NAME}
+            -g ${PIPELINE_NAME}
+            -o ${GENERATED_PIPELINE_DIR}
+            -n ${FILE_BASE_NAME} # This flag is critical to name the outputs correctly
             -e "static_library,c_header"
             target=${CMAKE_HALIDE_TARGET}
             profile=true
-            trace=false
+        # This explicit dependency list is crucial for correct rebuilds
         DEPENDS
-            pipeline_generator
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline_generator.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_denoise.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_ca_correct.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_deinterleave.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_demosaic.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_color_correct.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_apply_curve.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_sharpen.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/halide_guided_filter.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline_helpers.h
-        COMMENT
-            "Generating ${FILE_BASE_NAME} static library..."
+            pipeline_generator src/pipeline_generator.cpp src/pipeline_schedule.h
+            src/demosaic_AHD.h src/demosaic_fast.h src/demosaic_LMMSE.h src/demosaic_RI.h
+            src/denoise_guided.h src/denoise_nlmeans.h src/halide_guided_filter.h
+            src/pipeline_helpers.h src/stage_apply_curve.h src/stage_ca_correct.h
+            src/stage_color_correct.h src/stage_deinterleave.h src/stage_demosaic.h
+            src/stage_denoise.h src/stage_exposure.h src/stage_hot_pixel_suppression.h
+            src/stage_local_adjust_bilateral.h src/stage_local_adjust_laplacian.h
+            src/stage_local_tonal_adjustments.h src/stage_normalize_and_expose.h
+            src/stage_resize.h src/stage_saturation.h src/stage_sharpen.h
+            src/tone_curve_utils.h src/process_options.h
+        COMMENT "Generating ${FILE_BASE_NAME} library..."
     )
     add_custom_target(
-        ${FILE_BASE_NAME} ALL
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
+        generate_${PIPELINE_NAME} ALL
+        DEPENDS ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.a
     )
 endforeach()
 
 
 # ==============================================================================
-#  3. RUNNER EXECUTABLE (Original, restored from diff)
+#  3. RUNNER EXECUTABLE (`process`)
 # ==============================================================================
 foreach(VARIANT ${PIPELINE_VARIANTS})
     set(PIPELINE_NAME "camera_pipe_${VARIANT}")
     set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
     set(PROCESS_TARGET "process_${VARIANT}")
 
-    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp)
+    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp src/process_options.cpp)
 
     if(VARIANT STREQUAL "f32")
         target_compile_definitions(${PROCESS_TARGET} PRIVATE PIPELINE_PRECISION_F32)
@@ -108,31 +97,29 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
     endif()
 
     target_include_directories(${PROCESS_TARGET} PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${GENERATED_PIPELINE_DIR}
         ${stb_SOURCE_DIR}
     )
     target_link_libraries(${PROCESS_TARGET} PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
-    )
-    target_link_libraries(${PROCESS_TARGET} PRIVATE
+        ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.a
         Halide::Runtime
         Halide::ImageIO
+        PNG::PNG
         ${CMAKE_DL_LIBS}
-        ${CMAKE_THREAD_LIBS_INIT}
     )
+    add_dependencies(${PROCESS_TARGET} generate_${PIPELINE_NAME})
 endforeach()
 
 
 # ==============================================================================
-#  4. CAPTURE TOOL (Original, restored from diff)
+#  4. CAPTURE TOOL
 # ==============================================================================
+option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
 if(USE_LIBCAMERA)
     find_package(libcamera REQUIRED)
     add_executable(capture src/capture.cpp)
-    target_link_libraries(capture PRIVATE
-        libcamera::libcamera
-        PNG::PNG
-    )
+    target_link_libraries(capture PRIVATE libcamera::libcamera PNG::PNG)
     message(STATUS "Capture tool will be built.")
 else()
     add_executable(capture src/capture.cpp)
@@ -140,66 +127,71 @@ else()
 endif()
 
 
-# ===================================================================
-# Optional LVGL Editor Target
-# ===================================================================
+# ==============================================================================
+#  5. NEW RAW Editor UI Application (`rawr`)
+# ==============================================================================
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        docking
+    GIT_SHALLOW    TRUE
+    PATCH_COMMAND ${CMAKE_COMMAND} -E copy
+                  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/imgui.CMakeLists.txt
+                  <SOURCE_DIR>/CMakeLists.txt
+)
+FetchContent_MakeAvailable(imgui)
 
-if(BUILD_LVGL_EDITOR)
-    message(STATUS "Building optional LVGL editor target.")
+# --- Download font and copy it to the build directory ---
+set(FONT_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/font_download)
+set(FONT_TTF_PATH ${FONT_DOWNLOAD_DIR}/extras/ttf/Inter-Regular.ttf)
+set(FONT_DESTINATION_DIR ${CMAKE_BINARY_DIR})
 
-    # Find editor-specific dependencies only when the option is enabled.
-    find_package(SDL2 REQUIRED)
-    find_package(SDL2_image REQUIRED)
-
-    # Add LVGL v9.x as a library, built from the 'lvgl' subdirectory.
-    file(GLOB_RECURSE LVGL_SOURCES
-        "lvgl/src/*.c"
-        "lvgl/src/drivers/sdl/*.c"
+# Only download and extract the font if it doesn't already exist.
+if(NOT EXISTS ${FONT_TTF_PATH})
+    message(STATUS "Inter font not found. Downloading...")
+    set(FONT_ZIP_PATH ${FONT_DOWNLOAD_DIR}/Inter.zip)
+    file(DOWNLOAD https://github.com/rsms/inter/releases/download/v4.0/Inter-4.0.zip
+         ${FONT_ZIP_PATH}
+         SHOW_PROGRESS
+         STATUS download_status)
+    if(NOT download_status EQUAL 0)
+        message(FATAL_ERROR "Failed to download Inter font zip file.")
+    endif()
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E tar xzf ${FONT_ZIP_PATH}
+        WORKING_DIRECTORY ${FONT_DOWNLOAD_DIR}
     )
-    add_library(lvgl STATIC ${LVGL_SOURCES})
-    target_link_libraries(lvgl PRIVATE SDL2::SDL2 PNG::PNG)
-    target_compile_definitions(lvgl PRIVATE
-        LV_CONF_PATH=<editor/lv_conf.h>
-        LV_BUILD_CONF_PATH=<editor/lv_conf.h>
-    )
-    target_include_directories(lvgl PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/lvgl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
-    )
-
-    # Create a helper library from the refactored 'editor' directory.
-    add_library(lvgl_helpers STATIC
-        src/editor/sdl_viewer.c
-        src/editor/lvgl_assert_handler.c
-    )
-    target_link_libraries(lvgl_helpers PUBLIC
-        lvgl
-        SDL2::SDL2
-        SDL2::Image
-        m
-        PNG::PNG
-    )
-    target_include_directories(lvgl_helpers PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-    target_compile_definitions(lvgl_helpers PUBLIC
-        LV_CONF_PATH=<editor/lv_conf.h>
-        LV_BUILD_CONF_PATH=<editor/lv_conf.h>
-    )
-
-    # Define the 'editor' executable.
-    add_executable(editor src/editor/main.c)
-    target_link_libraries(editor PRIVATE lvgl_helpers)
-    target_compile_definitions(editor PRIVATE
-        _GNU_SOURCE
-        __DEV_MODE__
-    )
-
-    # Use target_compile_options to apply flags correctly.
-    target_compile_options(lvgl PRIVATE -Wall -g)
-    target_compile_options(lvgl_helpers PRIVATE -Wall -g)
-    target_compile_options(editor PRIVATE -Wall -g)
-
 endif()
+
+# This command copies the font to where the executable will be built.
+file(COPY ${FONT_TTF_PATH} DESTINATION ${FONT_DESTINATION_DIR})
+
+
+find_package(SDL2 REQUIRED)
+find_package(OpenGL REQUIRED)
+message(STATUS "Found SDL2: ${SDL2_LIBRARY}")
+message(STATUS "Found OpenGL: ${OPENGL_gl_LIBRARY}")
+
+add_executable(rawr
+    src/editor/main.cpp
+    src/editor/editor_ui.cpp
+    src/editor/editor_theme.cpp
+    src/process_options.cpp
+    src/tone_curve_utils.cpp
+)
+
+target_link_libraries(rawr PRIVATE
+    imgui
+    SDL2::SDL2
+    OpenGL::GL
+    Halide::ImageIO # For load_and_convert_image
+    PNG::PNG
+)
+
+target_include_directories(rawr PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/editor # For new headers
+    ${SDL2_INCLUDE_DIRS}
+    ${stb_SOURCE_DIR}
+)
+set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)
