@@ -1,60 +1,72 @@
-#include "halide_benchmark.h"
-
-#define BENCHMARK
-
-#include "camera_pipe.h"
-#ifndef NO_AUTO_SCHEDULE
-#include "camera_pipe_auto_schedule.h"
-#endif
+#include <cstdint>
+#include <string>
+#include <map>
+#include <stdexcept>
+#include <iostream>
+#include <cstdlib> // For getenv
+#include <chrono>  // For timing
+#include <limits>  // For numeric_limits
 
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
 #include "tone_curve_utils.h"
 
-#include <cassert>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <string>
-#include <map>
-#include <vector>
-#include <stdexcept>
-#include <algorithm>
-#include <cmath>
-#include <atomic>
+// Conditionally include the generated pipeline headers based on the
+// macro defined by CMake.
+#if defined(PIPELINE_PRECISION_F32)
+#include "camera_pipe_f32_lib.h"
+#elif defined(PIPELINE_PRECISION_U16)
+#include "camera_pipe_u16_lib.h"
+#else
+#error "PIPELINE_PRECISION_F32 or PIPELINE_PRECISION_U16 must be defined"
+#endif
+
+// By default, the auto-scheduled pipeline is not compiled or run.
+#define NO_AUTO_SCHEDULE
+#ifndef NO_AUTO_SCHEDULE
+    #if defined(PIPELINE_PRECISION_F32)
+    #include "camera_pipe_f32_auto_schedule_lib.h"
+    #elif defined(PIPELINE_PRECISION_U16)
+    #include "camera_pipe_u16_auto_schedule_lib.h"
+    #endif
+#endif
 
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
 
-// Prints the usage message for the process executable.
 void print_usage() {
     printf("Usage: ./process --input <raw.png> --output <out.png> [options]\n\n"
+           "This executable is compiled for a specific precision. Run 'process_f32' or 'process_u16'.\n\n"
            "Required arguments:\n"
            "  --input <path>         Path to the input 16-bit RAW PNG file.\n"
            "  --output <path>        Path for the output 8-bit image file.\n\n"
-           "Linear Processing Options:\n"
-           "  --black-point <val>    Sensor black level (0-65535). Default: 25.0.\n"
-           "  --white-point <val>    Sensor white level (0-65535). Default: 4095.0.\n"
-           "  --exposure <factor>    Exposure multiplier (e.g., 2.0 is +1 stop). Default: 1.0.\n"
-           "  --demosaic <algo>      Demosaic algorithm: 'simple', 'vhg', 'ahd', 'amaze' (default: vhg).\n"
+           "Pipeline Options:\n"
+           "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
+           "  --downscale <factor>   Downscale image by this factor (e.g., 2.0 for half size). 1.0=off (default: 1.0).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
-           "  --saturation <factor>  Color saturation. 0=grayscale, 1=normal. Default: 1.0.\n"
-           "  --saturation-algo <id> Saturation algorithm. 'hsl' or 'lab' (default: lab).\n\n"
-           "Non-Linear / Perceptual Options:\n"
-           "  --gamma <val>          Gamma for default S-curve. Default: 2.2.\n"
-           "  --contrast <val>       Contrast for default S-curve. Default: 50.0.\n"
-           "  --curve-points <str>   Global curve points, e.g. \"0:0,1:1\". Overrides gamma/contrast.\n"
+           "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
+           "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
+           "Denoise Options (Radius is fixed at 2.0):\n"
+           "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
+           "  --denoise-eps <val>      Denoise filter epsilon (default: 0.01).\n\n"
+           "Local Adjustment Options (Laplacian Pyramid):\n"
+           "  --ll-detail <val>      Local detail enhancement, -100 to 100 (default: 0).\n"
+           "  --ll-clarity <val>     Local clarity (mid-tone contrast), -100 to 100 (default: 0).\n"
+           "  --ll-shadows <val>     Shadow recovery, -100 to 100 (default: 0).\n"
+           "  --ll-highlights <val>  Highlight recovery, -100 to 100 (default: 0).\n"
+           "  --ll-blacks <val>      Adjust black point, -100 to 100 (default: 0).\n"
+           "  --ll-whites <val>      Adjust white point, -100 to 100 (default: 0).\n\n"
+           "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
+           "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
+           "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
+           "  --contrast <val>       Contrast enhancement value (default: 50.0). Used if no curve is given.\n"
+           "  --curve-points <str>   Global curve points, e.g. \"0:0,0.5:0.4,1:1\". Overrides gamma/contrast.\n"
            "  --curve-r <str>        Red channel curve points. Overrides --curve-points for red.\n"
            "  --curve-g <str>        Green channel curve points. Overrides --curve-points for green.\n"
            "  --curve-b <str>        Blue channel curve points. Overrides --curve-points for blue.\n"
-           "  --curve-mode <id>      Curve mode. 'luma' or 'rgb' (default: rgb).\n"
-           "  --sharpen <val>        Sharpening strength (default: 1.0).\n"
-           "  --tonemap <algo>       Tone mapping: 'linear', 'reinhard', 'filmic', 'gamma' (default: gamma).\n\n"
-           "Other Options:\n"
-           "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
-           "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n"
+           "  --curve-mode <name>    Curve mode. 'luma' or 'rgb' (default: rgb).\n\n"
            "  --help                 Display this help message.\n");
 }
 
@@ -66,20 +78,15 @@ int main(int argc, char **argv) {
 
     // --- Argument Parsing ---
     ProcessConfig cfg;
+    int demosaic_id = 3; // 0=ahd, 1=lmmse, 2=ri, 3=fast
+
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--help") {
-            print_usage();
-            return 0;
-        }
+        if (arg == "--help") { print_usage(); return 0; }
         if (arg.rfind("--", 0) == 0) {
-            if (i + 1 < argc) {
-                args[arg.substr(2)] = argv[++i];
-            } else {
-                fprintf(stderr, "Error: Missing value for argument %s\n", arg.c_str());
-                return 1;
-            }
+            if (i + 1 < argc) { args[arg.substr(2)] = argv[++i]; }
+            else { fprintf(stderr, "Error: Missing value for argument %s\n", arg.c_str()); return 1; }
         } else {
             fprintf(stderr, "Error: Unrecognized positional argument: %s\n", arg.c_str());
             print_usage();
@@ -90,18 +97,14 @@ int main(int argc, char **argv) {
     try {
         if (args.count("input")) cfg.input_path = args["input"];
         if (args.count("output")) cfg.output_path = args["output"];
-        if (args.count("black-point")) cfg.black_point = std::stof(args["black-point"]);
-        if (args.count("white-point")) cfg.white_point = std::stof(args["white-point"]);
-        if (args.count("exposure")) cfg.exposure = std::stof(args["exposure"]);
         if (args.count("demosaic")) {
-            std::string algo = args["demosaic"];
-            std::transform(algo.begin(), algo.end(), algo.begin(), ::tolower);
-            if (algo == "simple") cfg.demosaic_algorithm = 0;
-            else if (algo == "vhg") cfg.demosaic_algorithm = 1;
-            else if (algo == "ahd") cfg.demosaic_algorithm = 2;
-            else if (algo == "amaze") cfg.demosaic_algorithm = 3;
-            else { fprintf(stderr, "Error: Unknown demosaic algorithm '%s'. Use 'simple', 'vhg', 'ahd', or 'amaze'.\n", args["demosaic"].c_str()); return 1; }
+            if (args["demosaic"] == "ahd") demosaic_id = 0;
+            else if (args["demosaic"] == "lmmse") demosaic_id = 1;
+            else if (args["demosaic"] == "ri") demosaic_id = 2;
+            else if (args["demosaic"] == "fast") demosaic_id = 3;
+            else { std::cerr << "Warning: unknown demosaic algorithm '" << args["demosaic"] << "'. Defaulting to fast.\n"; }
         }
+        if (args.count("downscale")) cfg.downscale_factor = std::stof(args["downscale"]);
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("saturation")) cfg.saturation = std::stof(args["saturation"]);
@@ -114,18 +117,6 @@ int main(int argc, char **argv) {
         }
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
         if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
-        if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
-        if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
-        if (args.count("curve-g")) cfg.curve_g_str = args["curve-g"];
-        if (args.count("curve-b")) cfg.curve_b_str = args["curve-b"];
-        if (args.count("curve-mode")) {
-            std::string mode = args["curve-mode"];
-            std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
-            if (mode == "luma") cfg.curve_mode = 0;
-            else if (mode == "rgb") cfg.curve_mode = 1;
-            else { fprintf(stderr, "Error: Unknown curve mode '%s'. Use 'luma' or 'rgb'.\n", args["curve-mode"].c_str()); return 1; }
-        }
-        if (args.count("sharpen")) cfg.sharpen = std::stof(args["sharpen"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
         if (args.count("tonemap")) {
             std::string algo = args["tonemap"];
@@ -137,9 +128,34 @@ int main(int argc, char **argv) {
             else { fprintf(stderr, "Error: Unknown tonemap algorithm '%s'. Use 'linear', 'reinhard', 'filmic', or 'gamma'.\n", args["tonemap"].c_str()); return 1; }
         }
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
+        if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
+        if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
+        if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
+        if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
+        if (args.count("curve-g")) cfg.curve_g_str = args["curve-g"];
+        if (args.count("curve-b")) cfg.curve_b_str = args["curve-b"];
+        if (args.count("curve-mode")) {
+            if (args["curve-mode"] == "luma") cfg.curve_mode = 0;
+            else if (args["curve-mode"] == "rgb") cfg.curve_mode = 1;
+            else { std::cerr << "Warning: unknown curve-mode '" << args["curve-mode"] << "'. Defaulting to rgb.\n"; }
+        }
+        if (args.count("tonemap")) {
+            if (args["tonemap"] == "linear") cfg.tonemap_algorithm = 0;
+            else if (args["tonemap"] == "reinhard") cfg.tonemap_algorithm = 1;
+            else if (args["tonemap"] == "filmic") cfg.tonemap_algorithm = 2;
+            else if (args["tonemap"] == "gamma") cfg.tonemap_algorithm = 3;
+            else { std::cerr << "Warning: unknown tonemap '" << args["tonemap"] << "'. Defaulting to gamma.\n"; }
+        }
+        // Local Laplacian arguments
+        if (args.count("ll-detail")) cfg.ll_detail = std::stof(args["ll-detail"]);
+        if (args.count("ll-clarity")) cfg.ll_clarity = std::stof(args["ll-clarity"]);
+        if (args.count("ll-shadows")) cfg.ll_shadows = std::stof(args["ll-shadows"]);
+        if (args.count("ll-highlights")) cfg.ll_highlights = std::stof(args["ll-highlights"]);
+        if (args.count("ll-blacks")) cfg.ll_blacks = std::stof(args["ll-blacks"]);
+        if (args.count("ll-whites")) cfg.ll_whites = std::stof(args["ll-whites"]);
+
     } catch (const std::exception& e) {
-        fprintf(stderr, "Error parsing arguments: %s\n", e.what());
-        return 1;
+        fprintf(stderr, "Error parsing arguments: %s\n", e.what()); return 1;
     }
 
     if (cfg.input_path.empty() || cfg.output_path.empty()) {
@@ -147,40 +163,22 @@ int main(int argc, char **argv) {
         print_usage();
         return 1;
     }
-    if (!cfg.curve_r_str.empty() || !cfg.curve_g_str.empty() || !cfg.curve_b_str.empty()) {
-        cfg.curve_mode = 1;
-    }
-    // --- End Argument Parsing ---
-
-#ifdef HL_MEMINFO
-    halide_enable_malloc_trace();
-#endif
 
     fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
 
-    if (!args.count("white-point")) {
-        std::atomic<uint16_t> max_val{0};
-        input.for_each_value([&](uint16_t& val) {
-            uint16_t current_max = max_val.load(std::memory_order_relaxed);
-            if (val > current_max) {
-                max_val.store(val, std::memory_order_relaxed);
-            }
-        });
-        fprintf(stderr, "INFO: --white-point not specified. Max RAW value in input is %u.\n", static_cast<unsigned int>(max_val));
-        fprintf(stderr, "      Consider setting --white-point %u for this image.\n", static_cast<unsigned int>(max_val));
-    }
+    // Calculate output dimensions based on crop and downscale factor
+    int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
+    int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
+    Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
-    Buffer<uint8_t, 3> output(((input.width() - 32) / 32) * 32, ((input.height() - 24) / 32) * 32, 3);
-
-    ToneCurveUtils curve_util(cfg);
-    Buffer<uint8_t, 2> tone_curves_buf = curve_util.get_lut_for_halide();
+    ToneCurveUtils tone_curve_util(cfg);
+    Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
                                {-0.2175f, -1.8751f, 6.9640f, -26.6970f}};
-
     float _matrix_7000[][4] = {{2.2997f, -0.4478f, 0.1706f, -39.0923f},
                                {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
                                {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
@@ -192,65 +190,64 @@ int main(int argc, char **argv) {
         }
     }
 
-    double best;
+    int blackLevel = 25;
+    int whiteLevel = 1023;
+    float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
 
-#ifdef BENCHMARK
-    best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe(input, cfg.black_point, cfg.white_point, cfg.exposure,
-                    matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
-                    cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
-                    cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                    output);
+    // --- Simple Timing/Profiling Loop ---
+    double best_time = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < cfg.timing_iterations; i++) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        #if defined(PIPELINE_PRECISION_F32)
+            camera_pipe_f32(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.ca_strength,
+                              denoise_strength_norm, cfg.denoise_eps,
+                              blackLevel, whiteLevel, tone_curve_lut,
+                              0.f, 0.f, 0.f, /* sharpen */
+                              cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              output);
+        #elif defined(PIPELINE_PRECISION_U16)
+            camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+                              cfg.color_temp, cfg.tint, cfg.ca_strength,
+                              denoise_strength_norm, cfg.denoise_eps,
+                              blackLevel, whiteLevel, tone_curve_lut,
+                              0.f, 0.f, 0.f, /* sharpen */
+                              cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              output);
+        #endif
         output.device_sync();
-    });
-    fprintf(stderr, "Halide (manual):\t%gus\n", best * 1e6);
-#else
-    camera_pipe(input, cfg.black_point, cfg.white_point, cfg.exposure,
-                matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
-                cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
-                cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                output);
-    output.device_sync();
-#endif
 
-// FIX: Remove this hardcoded define to allow the autoscheduler to run.
-#define NO_AUTO_SCHEDULE
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end - start;
+        if (elapsed.count() < best_time) {
+            best_time = elapsed.count();
+        }
+    }
+
+    // The profiler will print its report to stderr automatically when the program
+    // exits, so we just need to print our own timing results.
+    // Check if profiling was enabled to avoid printing benchmark time when it's not relevant.
+    if (getenv("HL_PROFILE") == nullptr) {
+        #if defined(PIPELINE_PRECISION_F32)
+            fprintf(stderr, "Using float32 pipeline.\n");
+        #elif defined(PIPELINE_PRECISION_U16)
+            fprintf(stderr, "Using uint16_t pipeline.\n");
+        #endif
+        fprintf(stderr, "Halide (manual):\t%gus\n", best_time * 1e6);
+    }
 
 #ifndef NO_AUTO_SCHEDULE
-#ifdef BENCHMARK
-    best = benchmark(cfg.timing_iterations, 1, [&]() {
-        camera_pipe_auto_schedule(input, cfg.black_point, cfg.white_point, cfg.exposure,
-                                  matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
-                                  cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
-                                  cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                                  output);
-        output.device_sync();
-    });
-    fprintf(stderr, "Halide (auto):\t%gus\n", best * 1e6);
-#else
-    camera_pipe_auto_schedule(input, cfg.black_point, cfg.white_point, cfg.exposure,
-                              matrix_3200, matrix_7000, cfg.color_temp, cfg.tint,
-                              cfg.saturation, cfg.saturation_algorithm, cfg.demosaic_algorithm,
-                              cfg.curve_mode, tone_curves_buf, cfg.sharpen, cfg.ca_strength,
-                              output);
-    output.device_sync();
-#endif
+    // Auto-schedule benchmarking would go here, with a similar if/else structure
 #endif
 
     fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
     convert_and_save_image(output, cfg.output_path);
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
-    std::string base_path = cfg.output_path;
-    size_t dot_pos = base_path.rfind('.');
-    if (dot_pos != std::string::npos) {
-        base_path = base_path.substr(0, dot_pos);
-    }
-    std::string curve_path = base_path + "-curves.png";
-    if (curve_util.render_curves_to_png(curve_path.c_str())) {
-        fprintf(stderr, "curve viz: %s\n", curve_path.c_str());
-    } else {
-        fprintf(stderr, "Error: Failed to write curve visualization to %s\n", curve_path.c_str());
+    std::string curve_png_path = cfg.output_path.substr(0, cfg.output_path.find_last_of('.')) + "_curve.png";
+    if (tone_curve_util.render_curves_to_png(curve_png_path.c_str())) {
+        fprintf(stderr, "curve:  %s\n", curve_png_path.c_str());
     }
 
     printf("Success!\n");

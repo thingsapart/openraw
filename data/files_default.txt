@@ -1,6 +1,8 @@
 README.md
-ARCH.md
-TODO.md
+doc/intro.md
+doc/HL_CEFD.md
 src/*
-src/tests/*
-CMakeLists.txt
+Makefile
+doc/HL_Optimize.md
+TODO.md
+NOTES.md

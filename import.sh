@@ -91,7 +91,7 @@ BEGIN {
     # 1. Get everything *after* the first line (the header).
     code = substr(block, first_newline_pos + 1)
     # 2. Remove the starting "```" (with optional language) and the newline that follows.
-    sub(/^\s*```[a-z]*\n/, "", code)
+    sub(/^\s*```[a-z+]*\n/, "", code)
     sub(/[[:space:]]*$/, "", code)
     # 3. Remove the trailing "```" and any whitespace before it.
     sub(/\n```\s*$/, "", code)

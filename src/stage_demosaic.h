@@ -4,44 +4,59 @@
 #include "Halide.h"
 #include <vector>
 #include <string>
-#include <algorithm>
 
-// DemosaicBuilder is a C++ class that constructs the Halide algorithm for the demosaic stage.
-// It now operates entirely on Float(32) data to prevent integer underflow/overflow artifacts.
-// It can be constructed with a choice of algorithm.
-class DemosaicBuilder {
-private:
-    // All internal helpers now operate on float Exprs.
-    using Expr = Halide::Expr;
-    using Func = Halide::Func;
-    using Var = Halide::Var;
-    using Region = Halide::Region;
-    using RDom = Halide::RDom;
+#include "demosaic_AHD.h"
+#include "demosaic_LMMSE.h"
+#include "demosaic_RI.h"
+#include "demosaic_fast.h"
 
-    Expr width_expr, height_expr;
-
-    // Helper to interleave four quarter-resolution Funcs into a single full-resolution one.
-    Func interleave(Func gr, Func r, Func b, Func gb);
-
-    // Each build function now takes the Func it's supposed to define as its first argument.
-    void build_simple(Func result, Func deinterleaved, Var x, Var y, Var c);
-    void build_vhg(Func result, Func deinterleaved, Var x, Var y, Var c);
-    void build_ahd(Func result, Func deinterleaved, Var x, Var y, Var c);
-    void build_amaze(Func result, Func deinterleaved, Var x, Var y, Var c);
-
+// This class acts as a dispatcher for multiple demosaicing algorithms.
+// It is now templated to support different processing precisions.
+// It instantiates all available algorithms and uses Halide's 'select'
+// primitive to choose one at runtime based on a parameter. Halide's JIT
+// compiler will then perform dead-code elimination on the inactive
+// algorithm paths, resulting in zero runtime overhead for the selection.
+template<typename T>
+class DemosaicDispatcherT {
 public:
-    Func output;
-    // Full-resolution algorithm outputs, exposed for individual scheduling.
-    Func simple_output, vhg_output, ahd_output, amaze_output;
-    // Intermediate Funcs that need to be scheduled by the parent.
-    std::vector<Func> quarter_res_intermediates;
-    std::vector<Func> full_res_intermediates;
+    // The final, selected output Func
+    Halide::Func output;
     
-    // The Vars used to define the quarter-sized intermediates, exposed for scheduling.
-    Var qx, qy;
+    // A collection of ALL intermediate Funcs from ALL possible algorithms.
+    // This is needed so the generator can schedule them.
+    std::vector<Halide::Func> all_intermediates;
 
-    // Constructor declaration
-    DemosaicBuilder(Func deinterleaved, Var x, Var y, Var c, Expr algorithm, Expr width, Expr height);
+    DemosaicDispatcherT(Halide::Func deinterleaved, Halide::Expr algo_id, Halide::Var x, Halide::Var y, Halide::Var c) {
+        
+        // --- Instantiate all demosaic algorithms ---
+        
+        // Algorithm 0: AHD
+        DemosaicAHD_T<T> ahd_builder(deinterleaved, x, y, c);
+        
+        // Algorithm 1: LMMSE
+        DemosaicLMMSE_T<T> lmmse_builder(deinterleaved, x, y, c);
+        
+        // Algorithm 2: RI
+        DemosaicRI_T<T> ri_builder(deinterleaved, x, y, c);
+        
+        // Algorithm 3: Fast (the original algorithm)
+        DemosaicFastT<T> fast_builder(deinterleaved, x, y, c);
+
+        // --- Use 'select' to create the final dispatcher Func ---
+        output = Halide::Func("demosaiced");
+        output(x, y, c) = Halide::select(
+            algo_id == 0, ahd_builder.output(x, y, c),        // if 0, use AHD
+            algo_id == 1, lmmse_builder.output(x, y, c),     // if 1, use LMMSE
+            algo_id == 2, ri_builder.output(x, y, c),        // if 2, use RI
+                          fast_builder.output(x, y, c)       // else, use Fast
+        );
+        
+        // --- Collect all intermediates for the scheduler ---
+        all_intermediates.insert(all_intermediates.end(), ahd_builder.intermediates.begin(), ahd_builder.intermediates.end());
+        all_intermediates.insert(all_intermediates.end(), lmmse_builder.intermediates.begin(), lmmse_builder.intermediates.end());
+        all_intermediates.insert(all_intermediates.end(), ri_builder.intermediates.begin(), ri_builder.intermediates.end());
+        all_intermediates.insert(all_intermediates.end(), fast_builder.intermediates.begin(), fast_builder.intermediates.end());
+    }
 };
 
 #endif // STAGE_DEMOSAIC_H

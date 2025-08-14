@@ -2,37 +2,94 @@
 #define STAGE_SHARPEN_H
 
 #include "Halide.h"
-#include "halide_trace_config.h"
 #include "pipeline_helpers.h"
+#include <type_traits>
+#include <vector>
 
-// OPTIMIZATION: This stage now operates on Float(32) data directly
-// in linear space, before tonemapping. This improves quality and simplifies the math.
-inline Halide::Func pipeline_sharpen(Halide::Func input_float,
-                                     Halide::Expr sharpen_strength,
-                                     Halide::Var x, Halide::Var y, Halide::Var c,
-                                     Halide::Func &unsharp, Halide::Func &unsharp_y) {
-    using namespace Halide;
-    using namespace Halide::ConciseCasts;
+template <typename T>
+class SharpenBuilder_T {
+public:
+    Halide::Func output;
+    std::vector<Halide::Func> intermediates;
+
+    SharpenBuilder_T(Halide::Func input,
+                     Halide::Expr sharpen_strength,
+                     Halide::Expr sharpen_radius,
+                     Halide::Expr sharpen_threshold,
+                     Halide::Expr width, Halide::Expr height,
+                     Halide::Var x, Halide::Var y, Halide::Var c) {
+        using namespace Halide;
+        using namespace Halide::ConciseCasts;
+
+        output = Func("sharpened");
 
 #ifdef NO_SHARPEN
-    Func sharpened("sharpened_dummy");
-    // Dummy pass-through stage
-    sharpened(x, y, c) = input_float(x, y, c);
-    return sharpened;
+        output(x, y, c) = input(x, y, c);
 #else
-    // OPTIMIZATION: The intermediate blur passes are now exposed via references
-    // so they can be explicitly scheduled in the main generator file.
-    unsharp_y(x, y, c) = blur121_f(input_float(x, y - 1, c), input_float(x, y, c), input_float(x, y + 1, c));
-    unsharp(x, y, c) = blur121_f(unsharp_y(x - 1, y, c), unsharp_y(x, y, c), unsharp_y(x + 1, y, c));
+        // --- 0. Normalize to a common float [0,1] space for calculations ---
+        Func input_f("sharpen_input_f");
+        if (std::is_same<T, float>::value) {
+            input_f(x, y, c) = input(x, y, c);
+        } else {
+            input_f(x, y, c) = cast<float>(input(x, y, c)) / 65535.0f;
+        }
 
-    Func mask("mask");
-    mask(x, y, c) = input_float(x, y, c) - unsharp(x, y, c);
+        // --- 1. Calculate Luminance ---
+        // The input is linear RGB, so a simple weighted sum is correct.
+        Func luma("luma");
+        Expr r_ch = input_f(x, y, 0);
+        Expr g_ch = input_f(x, y, 1);
+        Expr b_ch = input_f(x, y, 2);
+        luma(x, y) = 0.299f * r_ch + 0.587f * g_ch + 0.114f * b_ch;
 
-    // OPTIMIZATION: Removed fixed-point math. `sharpen_strength` is now used directly as a float.
-    Func sharpened("sharpened");
-    sharpened(x, y, c) = input_float(x, y, c) + mask(x, y, c) * sharpen_strength;
-    return sharpened;
+        // --- 2. Create 1D Gaussian Kernel ---
+        const int kernel_size = 31; // Supports sigma up to ~5.0
+        const int kernel_center = kernel_size / 2;
+        Func gaussian_kernel("gaussian_kernel");
+        Var k("k");
+        Expr sigma = max(0.1f, sharpen_radius);
+        Expr dist_sq = (k - kernel_center) * (k - kernel_center);
+        gaussian_kernel(k) = exp(-dist_sq / (2.0f * sigma * sigma));
+
+        // --- 3. Blur the Luma (Separable Gaussian Blur) ---
+        Func luma_clamped = BoundaryConditions::repeat_edge(luma, {{0, width}, {0, height}});
+        Func luma_x("luma_x"), blurred_luma("blurred_luma");
+        RDom r_blur(0, kernel_size, "sharpen_rdom");
+
+        // Normalize the kernel
+        Expr kernel_sum = sum(gaussian_kernel(r_blur.x), "sharpen_kernel_sum");
+
+        // Horizontal pass
+        luma_x(x, y) = sum(luma_clamped(x + r_blur.x - kernel_center, y) * gaussian_kernel(r_blur.x), "sharpen_blur_x_sum") / kernel_sum;
+
+        // Vertical pass
+        Func luma_x_clamped = BoundaryConditions::repeat_edge(luma_x, {{0, width}, {0, height}});
+        blurred_luma(x, y) = sum(luma_x_clamped(x, y + r_blur.x - kernel_center) * gaussian_kernel(r_blur.x), "sharpen_blur_y_sum") / kernel_sum;
+
+        // --- 4. Unsharp Masking on Luma ---
+        Expr detail_luma = luma(x, y) - blurred_luma(x, y);
+        Expr edge_mask = smoothstep(0.0f, sharpen_threshold, abs(detail_luma));
+        Expr sharpened_luma = luma(x, y) + detail_luma * sharpen_strength * edge_mask;
+
+        // --- 5. Apply Gain to color channels ---
+        Expr gain = sharpened_luma / (luma(x, y) + 1e-6f); // Add epsilon for stability
+        Expr sharpened_val = input_f(x, y, c) * gain;
+
+        // --- 6. Convert back to the pipeline's processing type ---
+        Expr final_val;
+        if (std::is_same<T, float>::value) {
+            final_val = sharpened_val;
+        } else {
+            final_val = sharpened_val * 65535.0f;
+        }
+        output(x, y, c) = proc_type_sat<T>(final_val);
+
+        intermediates.push_back(input_f);
+        intermediates.push_back(gaussian_kernel);
+        intermediates.push_back(luma_x);
+        intermediates.push_back(blurred_luma);
 #endif
-}
+    }
+};
 
 #endif // STAGE_SHARPEN_H

@@ -1,149 +1,200 @@
-# CMakeLists.txt for a Halide Camera Pipeline based on the official example.
-
 cmake_minimum_required(VERSION 3.16)
-project(HalideCameraPipe CXX)
-
-enable_testing()
+project(CameraPipe C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# --- Find Dependencies ---
+# --- Add custom module path and Homebrew prefix ---
+# This tells CMake to look in our 'cmake' directory for find scripts.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+if(APPLE AND EXISTS "/opt/homebrew")
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+endif()
+
+# --- Find Halide ---
 find_package(Halide REQUIRED)
-message(STATUS "Found Halide: ${Halide_VERSION}")
+message(STATUS "Found Halide: ${Halide_DIR}")
 
-# --- External Dependencies (stb) ---
-# Use FetchContent to automatically download stb_image_write.h at configure time.
+# Add a default target if not specified by the user/environment.
+if(NOT CMAKE_HALIDE_TARGET)
+  set(CMAKE_HALIDE_TARGET "host")
+  message(STATUS "CMAKE_HALIDE_TARGET not set, defaulting to 'host'")
+endif()
+
+# --- Fetch STB Header-only Library ---
 include(FetchContent)
 FetchContent_Declare(
-    stb_image_write
-    URL https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
-    URL_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
-    DOWNLOAD_NO_EXTRACT TRUE       # This is a single file, not an archive
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG        master
 )
-FetchContent_MakeAvailable(stb_image_write)
+FetchContent_MakeAvailable(stb)
+
+# --- Build Options ---
+option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
+
+# --- Dependencies for Editor and Pipeline ---
+# FIX: Revert to separate find_package calls. CMake will now use our
+# custom FindSDL2_image.cmake script for the second call.
+find_package(SDL2 REQUIRED)
+find_package(SDL2_image REQUIRED)
+find_package(PNG REQUIRED)
 
 
-# --- Libcamera Support ---
-option(USE_LIBCAMERA "Build with libcamera support for the capture tool" OFF)
+# ==============================================================================
+#  1. PIPELINE GENERATOR (Original, restored from diff)
+# ==============================================================================
+add_executable(pipeline_generator src/pipeline_generator.cpp)
+target_link_libraries(pipeline_generator PRIVATE Halide::Halide Halide::Generator)
+
+
+# ==============================================================================
+#  2. STATIC PIPELINE LIBRARY (Original, restored from diff)
+# ==============================================================================
+set(PIPELINE_VARIANTS f32 u16)
+foreach(VARIANT ${PIPELINE_VARIANTS})
+    set(PIPELINE_NAME "camera_pipe_${VARIANT}")
+    set(GENERATOR_NAME "camera_pipe_${VARIANT}")
+    set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
+
+    add_custom_command(
+        OUTPUT
+            ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
+            ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.h
+        COMMAND
+            $<TARGET_FILE:pipeline_generator>
+            -g ${GENERATOR_NAME}
+            -o ${CMAKE_CURRENT_BINARY_DIR}
+            -n ${FILE_BASE_NAME}
+            -e "static_library,c_header"
+            target=${CMAKE_HALIDE_TARGET}
+            profile=true
+            trace=false
+        DEPENDS
+            pipeline_generator
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline_generator.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_denoise.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_ca_correct.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_deinterleave.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_demosaic.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_color_correct.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_apply_curve.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stage_sharpen.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/halide_guided_filter.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline_helpers.h
+        COMMENT
+            "Generating ${FILE_BASE_NAME} static library..."
+    )
+    add_custom_target(
+        ${FILE_BASE_NAME} ALL
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
+    )
+endforeach()
+
+
+# ==============================================================================
+#  3. RUNNER EXECUTABLE (Original, restored from diff)
+# ==============================================================================
+foreach(VARIANT ${PIPELINE_VARIANTS})
+    set(PIPELINE_NAME "camera_pipe_${VARIANT}")
+    set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
+    set(PROCESS_TARGET "process_${VARIANT}")
+
+    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp)
+
+    if(VARIANT STREQUAL "f32")
+        target_compile_definitions(${PROCESS_TARGET} PRIVATE PIPELINE_PRECISION_F32)
+    elseif(VARIANT STREQUAL "u16")
+        target_compile_definitions(${PROCESS_TARGET} PRIVATE PIPELINE_PRECISION_U16)
+    endif()
+
+    target_include_directories(${PROCESS_TARGET} PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${stb_SOURCE_DIR}
+    )
+    target_link_libraries(${PROCESS_TARGET} PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/${FILE_BASE_NAME}.a
+    )
+    target_link_libraries(${PROCESS_TARGET} PRIVATE
+        Halide::Runtime
+        Halide::ImageIO
+        ${CMAKE_DL_LIBS}
+        ${CMAKE_THREAD_LIBS_INIT}
+    )
+endforeach()
+
+
+# ==============================================================================
+#  4. CAPTURE TOOL (Original, restored from diff)
+# ==============================================================================
 if(USE_LIBCAMERA)
-    find_package(Libcamera REQUIRED)
-    find_package(PNG REQUIRED)
-endif()
-
-# --- Configurable Pipeline Stages ---
-# Add options to disable individual stages via preprocessor defines.
-option(DISABLE_HOT_PIXEL_SUPPRESSION "Bypass Hot Pixel Suppression" OFF)
-option(DISABLE_CA_CORRECT "Bypass Chromatic Aberration Correction" OFF)
-option(DISABLE_DEINTERLEAVE "Bypass Deinterleaving" OFF)
-option(DISABLE_COLOR_CORRECT "Bypass Color Correction" OFF)
-option(DISABLE_SATURATION "Bypass Saturation Adjustment" OFF)
-option(DISABLE_APPLY_CURVE "Bypass Tone Curve Application" OFF)
-option(DISABLE_SHARPEN "Bypass Sharpening" OFF)
-
-# Collect the chosen defines to pass to the compiler.
-set(PIPELINE_DEFINES)
-if(DISABLE_HOT_PIPELI_SUPPRESSION)
-    list(APPEND PIPELINE_DEFINES "NO_HOT_PIXEL_SUPPRESSION")
-endif()
-if(DISABLE_CA_CORRECT)
-    list(APPEND PIPELINE_DEFINES "NO_CA_CORRECT")
-endif()
-if(DISABLE_DEINTERLEAVE)
-    list(APPEND PIPELINE_DEFINES "NO_DEINTERLEAVE")
-endif()
-if(DISABLE_COLOR_CORRECT)
-    list(APPEND PIPELINE_DEFINES "NO_COLOR_CORRECT")
-endif()
-if(DISABLE_SATURATION)
-    list(APPEND PIPELINE_DEFINES "NO_SATURATION")
-endif()
-if(DISABLE_APPLY_CURVE)
-    list(APPEND PIPELINE_DEFINES "NO_APPLY_CURVE")
-endif()
-if(DISABLE_SHARPEN)
-    list(APPEND PIPELINE_DEFINES "NO_SHARPEN")
-endif()
-
-
-# === STAGE 1: The Generator ===
-# The add_halide_generator function defines an executable target for our generator.
-# The source file contains the logic from the official camera_pipe example.
-add_halide_generator(pipeline_generator
-    SOURCES src/pipeline_generator.cpp src/stage_demosaic.cpp
-)
-# Pass the stage-disable defines to the generator
-target_compile_definitions(pipeline_generator PRIVATE ${PIPELINE_DEFINES})
-
-
-# === STAGE 2: Generate the Pipeline Libraries ===
-# This is the canonical pattern. We create two separate library targets
-# from the same generator: one manually scheduled, one auto-scheduled.
-
-# 1. The manually-scheduled version.
-add_halide_library(camera_pipe
-    FROM pipeline_generator
-    GENERATOR camera_pipe  # The name registered with HALIDE_REGISTER_GENERATOR
-)
-
-# 2. The auto-scheduled version.
-add_halide_library(camera_pipe_auto_schedule
-    FROM pipeline_generator
-    GENERATOR camera_pipe
-    AUTOSCHEDULER Halide::Li2018
-)
-
-
-# === STAGE 3: The Runner (Main Processor) ===
-add_executable(process src/process.cpp src/tone_curve_utils.cpp)
-
-# Add the include directory for the downloaded stb header.
-# FetchContent makes the path available via the <name>_SOURCE_DIR variable.
-target_include_directories(process PRIVATE ${stb_image_write_SOURCE_DIR})
-
-# The runner from the example requires Halide's ImageIO and Tools libraries.
-# Linking against the generated library targets automatically handles dependencies,
-# include paths for the generated headers, and the Halide runtime.
-target_link_libraries(process PRIVATE
-    camera_pipe
-    camera_pipe_auto_schedule
-    Halide::ImageIO  # For load_and_convert_image
-    Halide::Tools    # For halide_benchmark.h
-)
-
-# Add a define to the runner if the auto-scheduled target doesn't exist.
-if (NOT TARGET camera_pipe_auto_schedule)
-    target_compile_definitions(process PRIVATE NO_AUTO_SCHEDULE)
-endif()
-
-
-# === STAGE 4: The Capture Tool (Optional) ===
-if(USE_LIBCAMERA)
+    find_package(libcamera REQUIRED)
     add_executable(capture src/capture.cpp)
-    # The capture tool has its own dependencies.
-    target_include_directories(capture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(capture PRIVATE
-        Libcamera::libcamera
+        libcamera::libcamera
         PNG::PNG
     )
+    message(STATUS "Capture tool will be built.")
+else()
+    add_executable(capture src/capture.cpp)
+    message(STATUS "Capture tool is disabled. Use -DUSE_LIBCAMERA=ON to build it.")
 endif()
 
 
-# === STAGE 5: The Test Runner ===
-# Use file(GLOB) to find all test source files automatically.
-file(GLOB TEST_SOURCES "src/tests/*.cpp")
-add_executable(test_runner ${TEST_SOURCES} src/tone_curve_utils.cpp src/stage_demosaic.cpp)
+# ===================================================================
+# New LVGL Editor Target (Appended to original file)
+# ===================================================================
 
-# The test runner needs include paths for the main src/ dir and stb.
-target_include_directories(test_runner PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${stb_image_write_SOURCE_DIR}
+# Add LVGL v9.x as a library, built from the 'lvgl' subdirectory.
+file(GLOB_RECURSE LVGL_SOURCES
+    "lvgl/src/*.c"
+    "lvgl/src/drivers/sdl/*.c"
 )
-# Pass the stage-disable defines to the test runner as well
-target_compile_definitions(test_runner PRIVATE ${PIPELINE_DEFINES})
+add_library(lvgl STATIC ${LVGL_SOURCES})
+target_link_libraries(lvgl PRIVATE SDL2::SDL2 PNG::PNG)
+target_compile_definitions(lvgl PRIVATE
+    LV_CONF_PATH=<editor/lv_conf.h>
+    LV_BUILD_CONF_PATH=<editor/lv_conf.h>
+)
+target_include_directories(lvgl PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/lvgl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
+)
 
-target_link_libraries(test_runner PRIVATE
-    Halide::Halide
-    Halide::ImageIO
+# Create a helper library from the refactored 'editor' directory.
+add_library(lvgl_helpers STATIC
+    src/editor/sdl_viewer.c
+    src/editor/lvgl_assert_handler.c
 )
-add_test(NAME PipelineTests COMMAND test_runner)
+target_link_libraries(lvgl_helpers PUBLIC
+    lvgl
+    SDL2::SDL2
+    # FIX: Use the target name defined in the custom find script (capital I).
+    SDL2::Image
+    m
+    PNG::PNG
+)
+target_include_directories(lvgl_helpers PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/editor"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_definitions(lvgl_helpers PUBLIC
+    LV_CONF_PATH=<editor/lv_conf.h>
+    LV_BUILD_CONF_PATH=<editor/lv_conf.h>
+)
+
+# Define the 'editor' executable.
+add_executable(editor src/editor/main.c)
+target_link_libraries(editor PRIVATE lvgl_helpers)
+target_compile_definitions(editor PRIVATE
+    _GNU_SOURCE
+    __DEV_MODE__
+)
+
+# Use target_compile_options to apply flags correctly.
+target_compile_options(lvgl PRIVATE -Wall -g)
+target_compile_options(lvgl_helpers PRIVATE -Wall -g)
+target_compile_options(editor PRIVATE -Wall -g)

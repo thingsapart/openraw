@@ -81,9 +81,18 @@ fi
 # FINAL_MESSAGE="\nPlease print out whole files. Don\'t give me just the section that has changed, do not omit parts with comments.\n"
 
 FINAL_MESSAGE='
+IMPORTANT: Performance is very important to this project and is one of the primary goals. Make sure every change is performant. Check PERF.md for relative perf figures and ask for updated values.
+
+doc/HL_CEFD.md outlines a method to summarize Halide schedules, please use that to output a summary every time the pipeline/schedule is modified.
+
+doc/HL_Optimize.md has general tips about pipeline optimization to keep in mind, but think deeply about the pipeline ang go beyond the prescripted thinking outlined there.
+
+
 Please print out whole files, only those that you have changed. Do not give me just the section that has changed, do not omit parts with comments. Only print out the files that have been changed.
 
 NOTE:
+
+Do not add comments like "FIX: ..." that describe what was fixed in _this step_/session, they will be obsolete soon enough and just clutter the file. Only add comments describing long-term pre-conditions, explaining the code as-written and so on.
 
 Format every file output the following way: start with a "!>>> {filename}" followed by a markdown code block and end with "!<<< end".
 

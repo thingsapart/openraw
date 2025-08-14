@@ -2,71 +2,60 @@
 #define STAGE_APPLY_CURVE_H
 
 #include "Halide.h"
+#include "halide_trace_config.h"
+#include "pipeline_helpers.h"
+#include <type_traits>
 
-// This stage takes a uint16 input and applies the pre-computed uint8 LUT
-// to produce the final 8-bit output.
-inline Halide::Func pipeline_apply_curve(Halide::Func input_u16,
-                                         Halide::Func tone_curves_lut,
-                                         Halide::Expr lut_extent,
-                                         Halide::Expr curve_mode,
-                                         Halide::Var x, Halide::Var y, Halide::Var c) {
+template <typename T>
+inline Halide::Func pipeline_apply_curve(Halide::Func input,
+                                         Halide::Expr blackLevel,
+                                         Halide::Expr whiteLevel,
+                                         Halide::Func lut,
+                                         Halide::Expr lut_size,
+                                         Halide::Var x, Halide::Var y, Halide::Var c,
+                                         const Halide::Target &target,
+                                         bool is_autoscheduled) {
     using namespace Halide;
     using namespace Halide::ConciseCasts;
 
 #ifdef NO_APPLY_CURVE
     Func curved("curved_dummy");
-    // Dummy pass-through stage, now converts to u8
-    curved(x, y, c) = u8_sat(input_u16(x, y, c) >> 8);
+    curved(x, y, c) = proc_type_sat<T>(input(x, y, c));
     return curved;
 #else
     Func curved("curved");
+    
+    Expr val = input(x, y, c);
+    Expr norm_val;
 
-    // --- Mode 1: RGB (per-channel) ---
-    // This path is already correct. It looks up the uint8 LUT and produces a uint8.
-    Func curved_rgb("curved_rgb");
-    {
-        Expr val = cast<int32_t>(input_u16(x, y, c));
-        curved_rgb(x, y, c) = tone_curves_lut(val, c);
+    if (std::is_same<T, float>::value) {
+        // For the float path, the value is already normalized to [0, 1].
+        norm_val = val;
+    } else {
+        // For the uint16 path, the data is in the full [0, 65535] range.
+        // Normalize it to [0, 1] to index into the curve.
+        norm_val = cast<float>(val) / 65535.0f;
     }
 
-    // --- Mode 0: Luma (Color Preserving) ---
-    // This path is now fixed to produce a uint8 result.
-    Func curved_luma("curved_luma");
-    {
-        // 1. Normalize the 16-bit input to a [0, 1] float range.
-        Expr r_f = cast<float>(input_u16(x, y, 0)) / 65535.f;
-        Expr g_f = cast<float>(input_u16(x, y, 1)) / 65535.f;
-        Expr b_f = cast<float>(input_u16(x, y, 2)) / 65535.f;
+    // Use the normalized value to index into the LUT.
+    Expr lut_f_idx = clamp(norm_val, 0.0f, 1.0f) * (lut_size - 1.0f);
+    Expr lut_idx = cast<int>(lut_f_idx);
+    
+    Expr lut_val = lut(lut_idx, c);
 
-        // 2. Calculate the original luma of the float pixel.
-        Expr luma_f = 0.2126f * r_f + 0.7152f * g_f + 0.0722f * b_f;
-        
-        // 3. Use the original luma to look up the new 8-bit luma from the LUT.
-        // The LUT index must be scaled from the [0, 1] float range to the [0, 65535] integer range.
-        Expr lut_idx = clamp(cast<int32_t>(luma_f * (lut_extent - 1)), 0, lut_extent - 1);
-        Expr new_luma_u8 = tone_curves_lut(lut_idx, 1); // Use the Green curve for luma.
-        
-        // 4. Normalize the new 8-bit luma to a [0, 1] float.
-        Expr new_luma_f = cast<float>(new_luma_u8) / 255.f;
-
-        // 5. Calculate the scaling ratio and apply it to the original float RGB values to preserve hue.
-        Expr luma_f_safe = select(luma_f > 1e-6f, luma_f, 1e-6f);
-        Expr ratio = new_luma_f / luma_f_safe;
-        
-        Expr r_new_f = r_f * ratio;
-        Expr g_new_f = g_f * ratio;
-        Expr b_new_f = b_f * ratio;
-        
-        // 6. Convert the final float RGB values to uint8, which is the final output type.
-        curved_luma(x, y, c) = mux(c, {
-            u8_sat(r_new_f * 255.f), 
-            u8_sat(g_new_f * 255.f), 
-            u8_sat(b_new_f * 255.f)
-        });
+    if (std::is_same<T, float>::value) {
+        // For the float path, the LUT value (uint16) must be scaled back to [0, 1].
+        curved(x, y, c) = cast<float>(lut_val) / 65535.0f;
+    } else {
+        // For the uint16 path, the LUT value is already in the correct format.
+        curved(x, y, c) = lut_val;
     }
 
-    // Now both branches have a matching uint8 type.
-    curved(x, y, c) = select(curve_mode == 0, curved_luma(x, y, c), curved_rgb(x, y, c));
+    if (!is_autoscheduled && target.has_gpu_feature()) {
+        // The LUT is passed as an Input, so we just need to ensure it's copied to the GPU.
+        // Halide handles this automatically. No scheduling for the LUT itself is needed here.
+    }
+    
     return curved;
 #endif
 }

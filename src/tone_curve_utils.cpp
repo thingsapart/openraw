@@ -34,7 +34,7 @@ ToneCurveUtils::ToneCurveUtils(const ProcessConfig& cfg)
     generate_lut_channel(config, has_b_curve ? b_pts : (has_global_curve ? global_pts : std::vector<Point>()), &lut_buffer(0, 2), lut_buffer.width());
 }
 
-Halide::Runtime::Buffer<uint8_t, 2> ToneCurveUtils::get_lut_for_halide() {
+Halide::Runtime::Buffer<uint16_t, 2> ToneCurveUtils::get_lut_for_halide() {
     return lut_buffer;
 }
 
@@ -64,10 +64,10 @@ bool ToneCurveUtils::render_curves_to_png(const char* filename, int width, int h
 
     // 3. Draw the curve(s)
     auto draw_curve = [&](int channel_idx, uint8_t r, uint8_t g, uint8_t b) {
-        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 255.0f * (height-1));
+        int prev_y = height - 1 - (int)((float)lut_buffer(0, channel_idx) / 65535.0f * (height-1));
         for(int x = 1; x < width; ++x) {
             int lut_idx = (int)(((float)x / (width-1)) * (lut_buffer.width()-1));
-            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 255.0f * (height-1));
+            int y = height - 1 - (int)((float)lut_buffer(lut_idx, channel_idx) / 65535.0f * (height-1));
             // Draw a line from (x-1, prev_y) to (x, y)
             int start_y = std::min(prev_y, y);
             int end_y = std::max(prev_y, y);
@@ -128,7 +128,7 @@ bool ToneCurveUtils::parse_curve_points(const std::string& s, std::vector<Point>
     return true;
 }
 
-void ToneCurveUtils::generate_lut_channel(const ProcessConfig& cfg, const std::vector<Point>& user_points, uint8_t* lut_col, int lut_size) {
+void ToneCurveUtils::generate_lut_channel(const ProcessConfig& cfg, const std::vector<Point>& user_points, uint16_t* lut_col, int lut_size) {
     for (int i = 0; i < lut_size; ++i) {
         // The LUT index 'i' corresponds to a linear input value from the pipeline.
         float linear_val = static_cast<float>(i) / (lut_size - 1.0f);
@@ -193,7 +193,7 @@ void ToneCurveUtils::generate_lut_channel(const ProcessConfig& cfg, const std::v
             }
         }
         
-        // Clamp and convert to the final 8-bit value for the LUT.
-        lut_col[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, final_val * 255.0f + 0.5f)));
+        // Clamp and convert to the final 16-bit value for the LUT.
+        lut_col[i] = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, final_val * 65535.0f + 0.5f)));
     }
 }

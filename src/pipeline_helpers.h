@@ -2,22 +2,53 @@
 #define PIPELINE_HELPERS_H
 
 #include "Halide.h"
+#include <type_traits>
 
-// Average two positive values rounding up
-inline Halide::Expr avg(Halide::Expr a, Halide::Expr b) {
-    Halide::Type wider = a.type().with_bits(a.type().bits() * 2);
-    return Halide::cast(a.type(), (Halide::cast(wider, a) + b + 1) / 2);
+// A helper to saturate to the processing type's range.
+// For uint16_t, this is 0-65535.
+// For float, this is 0.0-1.0.
+template <typename T>
+inline Halide::Expr proc_type_sat(Halide::Expr val) {
+    using namespace Halide::ConciseCasts;
+    if (std::is_same<T, uint16_t>::value) {
+        return u16_sat(val);
+    } else {
+        return Halide::clamp(val, 0.0f, 1.0f);
+    }
 }
 
-// 1-2-1 blur for integer types
+// Average two positive values, aware of integer vs float types.
+inline Halide::Expr avg(Halide::Expr a, Halide::Expr b) {
+    if (a.type().is_int() || a.type().is_uint()) {
+        Halide::Type wider = a.type().with_bits(a.type().bits() * 2);
+        return Halide::cast(a.type(), (Halide::cast(wider, a) + b + 1) / 2);
+    } else {
+        return (a + b) / 2.0f;
+    }
+}
+
+// Average four positive values, aware of integer vs float types.
+inline Halide::Expr avg(Halide::Expr a, Halide::Expr b, Halide::Expr c, Halide::Expr d) {
+    if (a.type().is_int() || a.type().is_uint()) {
+        Halide::Type wider = a.type().with_bits(a.type().bits() * 2);
+        return Halide::cast(a.type(), (Halide::cast(wider, a) + b + c + d + 2) / 4);
+    } else {
+        return (a + b + c + d) / 4.0f;
+    }
+}
+
+// 1-2-1 blur, which automatically becomes type-aware via avg().
 inline Halide::Expr blur121(Halide::Expr a, Halide::Expr b, Halide::Expr c) {
     return avg(avg(a, c), b);
 }
 
-// 1-2-1 blur for float types
-inline Halide::Expr blur121_f(Halide::Expr a, Halide::Expr b, Halide::Expr c) {
-    return (a + b + b + c) * 0.25f;
+// GLSL-style smoothstep function.
+inline Halide::Expr smoothstep(Halide::Expr edge0, Halide::Expr edge1, Halide::Expr x) {
+    using namespace Halide;
+    // Scale, bias and saturate x to 0..1 range
+    Expr t = clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    // Evaluate polynomial
+    return t * t * (3.0f - 2.0f * t);
 }
-
 
 #endif // PIPELINE_HELPERS_H

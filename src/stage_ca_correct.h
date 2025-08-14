@@ -2,39 +2,32 @@
 #define STAGE_CA_CORRECT_H
 
 #include "Halide.h"
+#include "pipeline_helpers.h"
 #include <vector>
+#include <type_traits>
 
 /*
     This stage implements a chromatic aberration correction algorithm.
     The implementation is a simplified version of the algorithm found in darktable,
     which itself is based on RawTherapee code.
-
-    Original authors:
-    Copyright (c) 2008-2010  Emil Martinec <ejmartin@uchicago.edu>
-    Copyright (c) for improvements 2018 Ingo Weyrich <heckflosse67@gmx.de>
-    This Halide implementation by the user of this model.
-
-    The original algorithm uses a global polynomial fit to model CA, which is
-    difficult to implement efficiently in Halide. This version approximates that
-    step by calculating shifts on a coarse grid and then blurring them to get
-    a smooth, global shift field.
 */
 
 #ifdef NO_CA_CORRECT
 class CACorrectBuilder {
 public:
     Halide::Func output;
-    std::vector<Halide::Func> intermediates;
+    // Empty members for API compatibility with the scheduled pipeline.
+    Halide::Func g_interp, block_shifts, blur_x, blur_y;
+    Halide::Var bx, by;
 
-    CACorrectBuilder(Halide::Func input_raw,
+    CACorrectBuilder(Halide::Func input_float,
                      Halide::Var x, Halide::Var y,
                      Halide::Expr strength,
-                     Halide::Expr blackLevel, Halide::Expr whiteLevel,
                      Halide::Expr width, Halide::Expr height,
                      const Halide::Target &target,
                      bool is_autoscheduled) {
         output = Halide::Func("ca_corrected_dummy");
-        output(x, y) = input_raw(x, y);
+        output(x, y) = input_float(x, y);
     }
 };
 #else
@@ -85,23 +78,36 @@ inline Halide::Expr bilinear(Halide::Func f, Halide::Expr x, Halide::Expr y, Hal
 class CACorrectBuilder {
 public:
     Halide::Func output;
-    std::vector<Halide::Func> intermediates;
+    // Expose key internal funcs for scheduling
+    Halide::Func g_interp;
+    Halide::Func block_shifts;
+    Halide::Func blur_x;
+    Halide::Func blur_y;
+    // Expose the vars used for the coarse grid for scheduling
+    Halide::Var bx, by;
 
-    CACorrectBuilder(Halide::Func input_raw,
+
+    CACorrectBuilder(Halide::Func input_float,
                      Halide::Var x, Halide::Var y,
                      Halide::Expr strength,
-                     Halide::Expr blackLevel, Halide::Expr whiteLevel,
                      Halide::Expr width, Halide::Expr height,
                      const Halide::Target &target,
-                     bool is_autoscheduled) {
+                     bool is_autoscheduled) :
+        output("ca_corrected"),
+        g_interp("ca_g_interp"),
+        block_shifts("ca_block_shifts"),
+        blur_x("ca_blur_x"),
+        blur_y("ca_blur_y"),
+        bx("ca_bx"), by("ca_by")
+    {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
+        
+        // The input 'norm_raw' is already a normalized [0,1] float.
+        Func norm_raw = input_float;
 
-        output = Halide::Func("ca_corrected");
-
-        // 1. Normalize input to float [0, 1]
-        Func norm_raw("norm_raw");
-        norm_raw(x, y) = (cast<float>(input_raw(x, y)) - blackLevel) / (whiteLevel - blackLevel);
+        // The tile size for the coarse-grid shift estimation.
+        const int ts = 16;
 
         // 2. Determine color of each pixel from GRBG Bayer pattern
         Expr cfa_y = y % 2;
@@ -111,7 +117,6 @@ public:
         Expr is_b = (cfa_y == 1 && cfa_x == 0);
 
         // 3. Interpolate Green channel to R and B sites.
-        Func g_interp("g_interp");
         {
             Func clamped_norm = BoundaryConditions::repeat_edge(norm_raw, {{Expr(0), width}, {Expr(0), height}});
             Expr g_n = clamped_norm(x, y - 1);
@@ -121,20 +126,17 @@ public:
 
             Expr grad_v = absd(g_n, g_s);
             Expr grad_h = absd(g_w, g_e);
-            Expr weight_v = 1.0f / (1e-5f + grad_v);
-            Expr weight_h = 1.0f / (1e-5f + grad_h);
 
-            Expr interp_val = (g_n + g_s) * weight_v + (g_w + g_e) * weight_h;
-            interp_val = interp_val / (2.f * weight_v + 2.f * weight_h);
+            // Directionally-adaptive interpolation based on absolute difference.
+            Expr interp_val = select(grad_h < grad_v, avg(g_w, g_e), avg(g_n, g_s));
+
             g_interp(x, y) = select(is_g, norm_raw(x, y), interp_val);
         }
 
         // 4. Estimate shifts on a coarse grid.
-        Func block_shifts("block_shifts");
-        Var bx("bx"), by("by"), c("c_ca"), v("v_ca");
+        Var c_ca("c_ca"), v_ca("v_ca");
         {
-            int ts = 32;
-            RDom r(0, ts, 0, ts);
+            RDom r(0, ts, 0, ts, "ca_rdom");
             Expr tile_x = bx * ts + r.x;
             Expr tile_y = by * ts + r.y;
 
@@ -154,65 +156,53 @@ public:
 
             // --- Horizontal shifts (v=1) ---
             Expr gdiff_h = clamped_g_interp(tile_x + 1, tile_y) - clamped_g_interp(tile_x - 1, tile_y);
-            Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f));
-            Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f));
-            Expr shift_h_r = select(den_h_r > den_thresh, num_h_r / den_h_r, 0.0f);
+            Expr num_h_r = sum(select(is_tile_r, deltgrb * gdiff_h, 0.f), "ca_num_h_r_sum");
+            Expr den_h_r = sum(select(is_tile_r, gdiff_h * gdiff_h, 0.f), "ca_den_h_r_sum");
+            Expr shift_h_r = num_h_r / (den_h_r + 1e-5f);
 
-            Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f));
-            Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f));
-            Expr shift_h_b = select(den_h_b > den_thresh, num_h_b / den_h_b, 0.0f);
+            Expr num_h_b = sum(select(is_tile_b, deltgrb * gdiff_h, 0.f), "ca_num_h_b_sum");
+            Expr den_h_b = sum(select(is_tile_b, gdiff_h * gdiff_h, 0.f), "ca_den_h_b_sum");
+            Expr shift_h_b = num_h_b / (den_h_b + 1e-5f);
 
             // --- Vertical shifts (v=0) ---
             Expr gdiff_v = clamped_g_interp(tile_x, tile_y + 1) - clamped_g_interp(tile_x, tile_y - 1);
-            Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f));
-            Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f));
-            Expr shift_v_r = select(den_v_r > den_thresh, num_v_r / den_v_r, 0.0f);
+            Expr num_v_r = sum(select(is_tile_r, deltgrb * gdiff_v, 0.f), "ca_num_v_r_sum");
+            Expr den_v_r = sum(select(is_tile_r, gdiff_v * gdiff_v, 0.f), "ca_den_v_r_sum");
+            Expr shift_v_r = num_v_r / (den_v_r + 1e-5f);
 
-            Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f));
-            Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f));
-            Expr shift_v_b = select(den_v_b > den_thresh, num_v_b / den_v_b, 0.0f);
+            Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f), "ca_num_v_b_sum");
+            Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f), "ca_den_v_b_sum");
+            Expr shift_v_b = num_v_b / (den_v_b + 1e-5f);
             
             const float bslim = 3.99f;
             // c=0 is R, c=1 is B
             // v=0 is vert, v=1 is horiz
-            Expr shift_v = select(c == 0, shift_v_r, shift_v_b);
-            Expr shift_h = select(c == 0, shift_h_r, shift_h_b);
-            Expr shift = select(v == 0, shift_v, shift_h);
+            Expr shift_v = select(c_ca == 0, shift_v_r, shift_v_b);
+            Expr shift_h = select(c_ca == 0, shift_h_r, shift_h_b);
+            Expr shift = select(v_ca == 0, shift_v, shift_h);
 
-            block_shifts(bx, by, c, v) = clamp(shift, -bslim, bslim);
-
-            // Add estimates to help the autoscheduler determine the buffer size.
-            // This MUST be done after the function is defined.
-            Expr bx_extent = (width + ts - 1) / ts;
-            Expr by_extent = (height + ts - 1) / ts;
-            block_shifts.set_estimates({ {0, bx_extent}, {0, by_extent}, {0, 2}, {0, 2} });
+            block_shifts(bx, by, c_ca, v_ca) = clamp(shift, -bslim, bslim);
+            block_shifts.set_estimates({ {0, (width + ts - 1) / ts}, {0, (height + ts - 1) / ts}, {0, 2}, {0, 2} });
         }
 
         // 5. Blur the block_shifts to get a smooth global shift field.
         Func blurred_shifts("blurred_shifts");
         {
-            int ts = 32;
             Region block_bounds = {{0, (width+ts-1)/ts}, {0, (height+ts-1)/ts}, {0,2}, {0,2}};
             Func clamped_shifts = BoundaryConditions::repeat_edge(block_shifts, block_bounds);
             
-            Func blur_x("blur_x_shifts"), blur_y("blur_y_shifts");
-            RDom r_blur(-4, 9);
-            blur_x(bx, by, c, v) = sum(clamped_shifts(bx + r_blur, by, c, v));
-            blur_y(bx, by, c, v) = sum(blur_x(bx, by + r_blur, c, v));
-            blurred_shifts(bx, by, c, v) = blur_y(bx, by, c, v) / 81.0f;
-            intermediates.push_back(blur_x);
-            intermediates.push_back(blur_y);
+            RDom r_blur(-4, 9, "ca_blur_rdom");
+            blur_x(bx, by, c_ca, v_ca) = sum(clamped_shifts(bx + r_blur, by, c_ca, v_ca), "ca_shifts_blur_x_sum");
+            blur_y(bx, by, c_ca, v_ca) = sum(blur_x(bx, by + r_blur, c_ca, v_ca), "ca_shifts_blur_y_sum");
+            blurred_shifts(bx, by, c_ca, v_ca) = blur_y(bx, by, c_ca, v_ca) / 81.0f;
         }
 
         // 6. Apply the correction to R and B channels
         Func corrected_f("corrected_f");
         {
-            Expr f_bx = cast<float>(x) / 32.f;
-            Expr f_by = cast<float>(y) / 32.f;
+            Expr f_bx = cast<float>(x) / (float)ts;
+            Expr f_by = cast<float>(y) / (float)ts;
 
-            // The auto-scheduler needs to know the bounds of the resampling offsets.
-            // Although the shifts are clamped earlier, we clamp them again here
-            // to make the bounds explicit for the static analysis.
             const float shift_bound = 4.0f;
             Expr shift_vr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 0), -shift_bound, shift_bound) * strength;
             Expr shift_hr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 1), -shift_bound, shift_bound) * strength;
@@ -226,21 +216,13 @@ public:
             corrected_f(x, y) = select(is_r, r_new, is_b, b_new, norm_raw(x, y));
         }
 
-        // 7. Denormalize and convert back to uint16
-        Func denormalized("denormalized");
-        denormalized(x, y) = corrected_f(x, y) * (whiteLevel - blackLevel) + blackLevel;
-
         // This stage is a no-op if strength is zero.
         output(x, y) = select(strength < 0.001f,
-                              input_raw(x, y),
-                              cast<uint16_t>(clamp(denormalized(x, y), 0, 65535)));
+                              input_float(x, y),
+                              clamp(corrected_f(x,y), 0.0f, 1.0f));
 
-        intermediates.push_back(norm_raw);
-        intermediates.push_back(g_interp);
-        intermediates.push_back(block_shifts);
-        intermediates.push_back(blurred_shifts);
-        intermediates.push_back(corrected_f);
-        intermediates.push_back(denormalized);
+        // The pointwise helpers 'blurred_shifts' and 'corrected_f' will be inlined
+        // by default because they are not scheduled.
     }
 };
 
