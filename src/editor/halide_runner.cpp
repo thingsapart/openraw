@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <iostream>
+#include <numeric> // for std::accumulate
+#include <cstring> // For memcpy
+#include <cmath>   // For powf
 
 // This project only builds the f32 pipeline for the UI for simplicity.
 #include "camera_pipe_f32_lib.h"
@@ -27,6 +30,72 @@ static void ConvertPlanarToInterleaved(const Halide::Runtime::Buffer<uint8_t>& p
         }
     }
 }
+
+// New function to compute histograms from the 8-bit preview image.
+static void ComputeHistograms(AppState& state) {
+    const auto& preview_image = state.thumb_output_planar;
+    if (preview_image.data() == nullptr) {
+        return;
+    }
+
+    const int width = preview_image.width();
+    const int height = preview_image.height();
+    const int bins = 256;
+
+    std::vector<int> counts_r(bins, 0), counts_g(bins, 0), counts_b(bins, 0), counts_luma(bins, 0);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            // The preview_image from the pipeline is already gamma-corrected
+            // via the tone curve. We can bin the values directly.
+            uint8_t r = preview_image(x, y, 0);
+            uint8_t g = preview_image(x, y, 1);
+            uint8_t b = preview_image(x, y, 2);
+            
+            // Calculate luma from the gamma-corrected RGB values.
+            uint8_t luma = static_cast<uint8_t>(0.299f * r + 0.587f * g + 0.114f * b);
+
+            counts_r[r]++;
+            counts_g[g]++;
+            counts_b[b]++;
+            counts_luma[luma]++;
+        }
+    }
+
+    // Find the max count to normalize the histograms for plotting.
+    // To prevent clipped blacks (bin 0) and whites (bin 255) from
+    // "smashing" the rest of the histogram, we find the max value
+    // only in the range [1, 254].
+    int max_count = 0;
+    auto find_max = [&](const std::vector<int>& counts) {
+        if (counts.size() == bins) {
+             max_count = std::max(max_count, *std::max_element(counts.begin() + 1, counts.end() - 1));
+        }
+    };
+    find_max(counts_r);
+    find_max(counts_g);
+    find_max(counts_b);
+    find_max(counts_luma);
+
+    if (max_count == 0) max_count = 1; // Avoid division by zero
+
+    // Resize and fill the float vectors in AppState with normalized values
+    auto normalize_and_store = [&](std::vector<float>& dest, const std::vector<int>& counts) {
+        dest.resize(bins);
+        for(int i = 0; i < bins; ++i) {
+            float normalized_val = static_cast<float>(counts[i]) / max_count;
+            // Clamp the value to 1.0f. This handles the outlier bins (0 and 255)
+            // so they don't "shoot out" of the top of the histogram view.
+            dest[i] = std::min(normalized_val, 1.0f);
+        }
+    };
+
+    normalize_and_store(state.histogram_r, counts_r);
+    normalize_and_store(state.histogram_g, counts_g);
+    normalize_and_store(state.histogram_b, counts_b);
+    normalize_and_store(state.histogram_luma, counts_luma);
+}
+
 
 static void run_pipeline_instance(AppState& state, float downscale_factor, Halide::Runtime::Buffer<uint8_t>& output_buffer, const std::string& view_name) {
     if (state.input_image.data() == nullptr) {
@@ -53,6 +122,15 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     
     ToneCurveUtils tone_curve_util(state.params);
     Halide::Runtime::Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
+
+    // If this is the thumbnail/preview run, also save the LUT for the UI.
+    if (view_name == "Thumbnail") {
+        if (state.tone_curve_lut.data() == nullptr) {
+            state.tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(tone_curve_lut.width(), tone_curve_lut.height());
+        }
+        memcpy(state.tone_curve_lut.data(), tone_curve_lut.data(), tone_curve_lut.size_in_bytes());
+    }
+
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
@@ -89,31 +167,36 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
 }
 
 void RunHalidePipelines(AppState& state) {
-    if (state.input_image.data() == nullptr || state.main_view_size.x <= 0 || state.thumb_view_size.x <= 0) {
+    if (state.input_image.data() == nullptr || state.main_view_size.x <= 0) {
         return;
     }
     
-    const float source_w = state.input_image.width() - 32;
+    const float raw_w = state.input_image.width() - 32;
+    const float raw_h = state.input_image.height() - 24;
 
     // --- Main View Pipeline ---
-    float fit_scale = std::min(state.main_view_size.x / source_w, state.main_view_size.y / (state.input_image.height() - 24));
-    float on_screen_width = source_w * fit_scale * state.zoom;
-    float downscale_factor_main = source_w / on_screen_width;
+    // The main view pipeline is sized dynamically based on zoom and pan.
+    float fit_scale = std::min(state.main_view_size.x / raw_w, state.main_view_size.y / raw_h);
+    float on_screen_width = raw_w * fit_scale * state.zoom;
+    float downscale_factor_main = raw_w / on_screen_width;
 
-    // Calculate the maximum safe downscale factor to avoid crashing the pipeline
     const float min_pipeline_width = 256.0f;
-    float max_downscale_factor = source_w / min_pipeline_width;
-    // Use the smaller of the two: either what the user requested, or the max safe factor
+    float max_downscale_factor = raw_w / min_pipeline_width;
     downscale_factor_main = std::min(downscale_factor_main, max_downscale_factor);
-    // Always render at least 1:1, let the UI handle up-scaling
     downscale_factor_main = std::max(1.0f, downscale_factor_main);
 
     run_pipeline_instance(state, downscale_factor_main, state.main_output_planar, "Main View");
     ConvertPlanarToInterleaved(state.main_output_planar, state.main_output_interleaved);
 
-    // --- Thumbnail Pipeline ---
-    float downscale_factor_thumb = source_w / state.thumb_view_size.x;
+    // --- Thumbnail & Histogram Pipeline ---
+    // This pipeline runs on a fixed-size image to provide stable histograms.
+    const float PREVIEW_LONGEST_DIM = 1024.0f;
+    float downscale_factor_thumb = (raw_w > raw_h) ? (raw_w / PREVIEW_LONGEST_DIM) : (raw_h / PREVIEW_LONGEST_DIM);
     downscale_factor_thumb = std::max(1.0f, downscale_factor_thumb);
+
     run_pipeline_instance(state, downscale_factor_thumb, state.thumb_output_planar, "Thumbnail");
+    
+    // Now that the thumb pipeline has run, compute histograms and convert for display
+    ComputeHistograms(state);
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);
 }

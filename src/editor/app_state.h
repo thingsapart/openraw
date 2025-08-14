@@ -25,6 +25,7 @@ struct AppState {
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
+    Halide::Runtime::Buffer<uint16_t, 2> tone_curve_lut; // For histogram overlay
 
     // CPU-side copy of interleaved data for OpenGL
     std::vector<uint8_t> main_output_interleaved;
@@ -41,6 +42,17 @@ struct AppState {
     // --- UI State (updated each frame) ---
     ImVec2 main_view_size{1, 1};        
     ImVec2 thumb_view_size{1, 1};
+
+    // --- Histogram Data & State ---
+    std::vector<float> histogram_luma; // Normalized [0,1] for plotting
+    std::vector<float> histogram_r;
+    std::vector<float> histogram_g;
+    std::vector<float> histogram_b;
+    bool show_luma_histo = true;
+    bool show_r_histo = true;
+    bool show_g_histo = true;
+    bool show_b_histo = true;
+    bool show_curve_overlay = true;
 
     // --- Debounce State ---
     std::chrono::steady_clock::time_point next_render_time = std::chrono::steady_clock::time_point::max();
