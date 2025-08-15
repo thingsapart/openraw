@@ -17,7 +17,7 @@
 // This is the central data structure passed to UI rendering functions.
 struct AppState {
     // Static configuration for debouncing
-    static constexpr std::chrono::milliseconds DEBOUNCE_DURATION{300};
+    static constexpr std::chrono::milliseconds DEBOUNCE_DURATION{200};
 
     ProcessConfig params;
 
@@ -38,9 +38,9 @@ struct AppState {
     // --- Viewport State ---
     float zoom = 1.0f;                      // The logical zoom level relative to "fit-to-view"
     ImVec2 pan_offset{0, 0};                // Panning offset in screen pixels
-    
+
     // --- UI State (updated each frame) ---
-    ImVec2 main_view_size{1, 1};        
+    ImVec2 main_view_size{1, 1};
     ImVec2 thumb_view_size{1, 1};
 
     // --- Histogram Data & State ---
@@ -56,7 +56,7 @@ struct AppState {
 
     // --- Debounce State ---
     std::chrono::steady_clock::time_point next_render_time = std::chrono::steady_clock::time_point::max();
-    bool ui_ready = false; 
+    bool ui_ready = false;
 };
 
 #endif // APP_STATE_H
