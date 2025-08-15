@@ -13,6 +13,14 @@
 #include <cstdint>
 #include <vector>
 
+// Enum to identify which curve is currently being edited in the UI.
+enum class ActiveCurveChannel {
+    Luma,
+    Red,
+    Green,
+    Blue
+};
+
 // UI State management struct
 // This is the central data structure passed to UI rendering functions.
 struct AppState {
@@ -25,7 +33,7 @@ struct AppState {
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
-
+    
     // We now maintain two separate LUTs:
     // 1. The final, combined LUT for the pipeline and histogram.
     Halide::Runtime::Buffer<uint16_t, 2> pipeline_tone_curve_lut;
@@ -59,6 +67,7 @@ struct AppState {
     bool show_g_histo = true;
     bool show_b_histo = true;
     bool show_curve_overlay = true;
+    ActiveCurveChannel active_curve_channel = ActiveCurveChannel::Luma;
 
     // --- Debounce State ---
     std::chrono::steady_clock::time_point next_render_time = std::chrono::steady_clock::time_point::max();

@@ -41,7 +41,8 @@ struct ProcessConfig {
     float contrast = 50.0f;
     
     // Curve points are now stored as vectors of points after parsing.
-    std::vector<Point> curve_points_global;
+    // "luma" is the fallback/master, the others are overrides.
+    std::vector<Point> curve_points_luma;
     std::vector<Point> curve_points_r;
     std::vector<Point> curve_points_g;
     std::vector<Point> curve_points_b;

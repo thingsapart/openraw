@@ -38,11 +38,16 @@ int main(int argc, char** argv) {
     }
 
     // Initialize curve points from config, or create a default linear curve if none were provided.
-    // The parser already populates `curve_points_global` if the argument was passed.
-    if (app_state.params.curve_points_global.empty()) {
-        app_state.params.curve_points_global.push_back({0.0f, 0.0f});
-        app_state.params.curve_points_global.push_back({1.0f, 1.0f});
-    }
+    auto ensure_default_curve = [](std::vector<Point>& points){
+        if (points.empty()) {
+            points.push_back({0.0f, 0.0f});
+            points.push_back({1.0f, 1.0f});
+        }
+    };
+    ensure_default_curve(app_state.params.curve_points_luma);
+    ensure_default_curve(app_state.params.curve_points_r);
+    ensure_default_curve(app_state.params.curve_points_g);
+    ensure_default_curve(app_state.params.curve_points_b);
 
     // Eagerly allocate the tone curve LUT buffers to prevent crashes.
     // They have a fixed size, so we can do this once at startup.

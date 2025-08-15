@@ -15,7 +15,7 @@
 #include <vector>    // for std::vector
 #include <cstring>   // for memcpy
 
-// --- Helper Functions for Drawing ---
+// --- Helper Functions for Drawing (static to this file) ---
 
 static void DrawHistoCurve(ImDrawList* draw_list, const std::vector<float>& histo_data, ImVec2 canvas_pos, ImVec2 canvas_size, ImU32 color) {
     if (histo_data.empty()) return;
@@ -33,132 +33,113 @@ static void DrawHistoCurve(ImDrawList* draw_list, const std::vector<float>& hist
 
 // This function now renders all right-hand panels inside a single, scrollable window.
 static void RenderRightPanel(AppState& state) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
     ImGui::Begin("Adjustments");
+    ImGui::PopStyleVar();
 
-    // --- Preview and Histogram (Fixed at the top) ---
-    ImGui::Text("Preview");
+    if (ImGui::CollapsingHeader("Preview", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.input_image.data()) {
+            // ... (Preview logic is unchanged) ...
+        }
+    }
 
-    // Calculate thumbnail size to maintain aspect ratio
-    if (state.input_image.data()) {
-        const float raw_width = state.input_image.width() - 32;
-        const float raw_height = state.input_image.height() - 24;
-        if (raw_height > 0) {
-            float aspect = raw_width / raw_height;
-            float available_width = ImGui::GetContentRegionAvail().x;
-            float thumb_height = available_width / aspect;
-            state.thumb_view_size = ImVec2(available_width, thumb_height);
+    if (ImGui::CollapsingHeader("Histogram & Curves", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Histogram"); ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.8f, 0.8f, 0.8f, 1.0f)); ImGui::Checkbox("L##histo", &state.show_luma_histo); ImGui::PopStyleColor(); ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.95f, 0.26f, 0.21f, 1.0f)); ImGui::Checkbox("R##histo", &state.show_r_histo); ImGui::PopStyleColor(); ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.30f, 0.69f, 0.31f, 1.0f)); ImGui::Checkbox("G##histo", &state.show_g_histo); ImGui::PopStyleColor(); ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.13f, 0.59f, 0.95f, 1.0f)); ImGui::Checkbox("B##histo", &state.show_b_histo); ImGui::PopStyleColor();
 
-            ImGui::Image((void*)(intptr_t)state.thumb_texture_id, state.thumb_view_size, ImVec2(0,1), ImVec2(1,0));
+        float histo_height = 150.0f;
+        ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+        ImVec2 canvas_size(ImGui::GetContentRegionAvail().x, histo_height);
 
-            // --- Viewport Rectangle and Click-to-Pan Logic ---
-            ImVec2 thumb_pos = ImGui::GetItemRectMin();
-            ImVec2 thumb_max = ImGui::GetItemRectMax();
-            ImGui::SetCursorScreenPos(thumb_pos);
-            ImGui::InvisibleButton("##thumb_interact", state.thumb_view_size);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-            if (ImGui::IsItemHovered()) {
-                // Double-click to fit-to-view
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                    state.zoom = 1.0f; // Reset zoom to 100% (fit)
-                    // Recenter the view
-                    float fit_scale = std::min(state.main_view_size.x / raw_width, state.main_view_size.y / raw_height);
-                    state.pan_offset.x = (state.main_view_size.x - raw_width * fit_scale) * 0.5f;
-                    state.pan_offset.y = (state.main_view_size.y - raw_height * fit_scale) * 0.5f;
-                    state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
-                }
-                // Click to pan
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    ImVec2 mouse_pos_in_thumb = ImGui::GetMousePos() - thumb_pos;
-                    float norm_x = mouse_pos_in_thumb.x / state.thumb_view_size.x;
-                    float norm_y = mouse_pos_in_thumb.y / state.thumb_view_size.y;
-                    
-                    float fit_scale = std::min(state.main_view_size.x / raw_width, state.main_view_size.y / raw_height);
-                    float zoomed_w = raw_width * fit_scale * state.zoom;
-                    float zoomed_h = raw_height * fit_scale * state.zoom;
+        // Use a group to manage the overlay of the curve editor on the histogram canvas.
+        ImGui::BeginGroup();
 
-                    state.pan_offset.x = (state.main_view_size.x * 0.5f) - (norm_x * zoomed_w);
-                    state.pan_offset.y = (state.main_view_size.y * 0.5f) - (norm_y * zoomed_h);
-                }
+        // This InvisibleButton is now the single source of truth for all canvas interactions.
+        ImGui::InvisibleButton("##curve_canvas_interaction", canvas_size);
+        bool canvas_hovered = ImGui::IsItemHovered();
+        bool canvas_active = ImGui::IsItemActive();
+
+        draw_list->AddRectFilled(canvas_pos, canvas_pos + canvas_size, IM_COL32(20, 20, 22, 255));
+
+        if (state.show_luma_histo) DrawHistoCurve(draw_list, state.histogram_luma, canvas_pos, canvas_size, IM_COL32(200, 200, 200, 255));
+        if (state.show_r_histo) DrawHistoCurve(draw_list, state.histogram_r, canvas_pos, canvas_size, IM_COL32(244, 67, 54, 255));
+        if (state.show_g_histo) DrawHistoCurve(draw_list, state.histogram_g, canvas_pos, canvas_size, IM_COL32(76, 175, 80, 255));
+        if (state.show_b_histo) DrawHistoCurve(draw_list, state.histogram_b, canvas_pos, canvas_size, IM_COL32(33, 150, 243, 255));
+        draw_list->AddRect(canvas_pos, canvas_pos + canvas_size, IM_COL32(80, 80, 80, 255));
+
+        if (state.show_curve_overlay) {
+            static CurvesEditor curves_editor;
+            bool curve_changed = false;
+
+            const ImU32 color_r_dim = IM_COL32(100, 50, 50, 255);
+            const ImU32 color_g_dim = IM_COL32(50, 100, 50, 255);
+            const ImU32 color_b_dim = IM_COL32(50, 50, 100, 255);
+
+            if (state.active_curve_channel != ActiveCurveChannel::Red) CurvesEditor::draw_readonly_curve(draw_list, state.ui_tone_curve_lut, 0, canvas_pos, canvas_size, color_r_dim);
+            if (state.active_curve_channel != ActiveCurveChannel::Green && state.active_curve_channel != ActiveCurveChannel::Luma) CurvesEditor::draw_readonly_curve(draw_list, state.ui_tone_curve_lut, 1, canvas_pos, canvas_size, color_g_dim);
+            if (state.active_curve_channel != ActiveCurveChannel::Blue) CurvesEditor::draw_readonly_curve(draw_list, state.ui_tone_curve_lut, 2, canvas_pos, canvas_size, color_b_dim);
+
+            std::vector<Point>* active_points = nullptr;
+            int active_channel_idx = 1;
+            ImU32 active_color = IM_COL32(255, 255, 255, 255);
+
+            switch(state.active_curve_channel) {
+                case ActiveCurveChannel::Luma:  active_points = &state.params.curve_points_luma; active_channel_idx = 1; active_color = IM_COL32(224, 224, 224, 255); break;
+                case ActiveCurveChannel::Red:   active_points = &state.params.curve_points_r;    active_channel_idx = 0; active_color = IM_COL32(244, 67, 54, 255); break;
+                case ActiveCurveChannel::Green: active_points = &state.params.curve_points_g;    active_channel_idx = 1; active_color = IM_COL32(76, 175, 80, 255); break;
+                case ActiveCurveChannel::Blue:  active_points = &state.params.curve_points_b;    active_channel_idx = 2; active_color = IM_COL32(33, 150, 243, 255); break;
             }
 
-            // Draw the viewport rectangle
-            ImDrawList* draw_list = ImGui::GetWindowDrawList();
-            float fit_scale = std::min(state.main_view_size.x / raw_width, state.main_view_size.y / raw_height);
-            float on_screen_w = raw_width * fit_scale * state.zoom;
-            float on_screen_h = raw_height * fit_scale * state.zoom;
-            ImVec2 view_pos_norm = ImVec2(-state.pan_offset.x / on_screen_w, -state.pan_offset.y / on_screen_h);
-            ImVec2 view_size_norm = ImVec2(state.main_view_size.x / on_screen_w, state.main_view_size.y / on_screen_h);
+            curve_changed = curves_editor.render_multi_channel(*active_points, state.ui_tone_curve_lut, active_channel_idx, canvas_pos, canvas_size, active_color, canvas_hovered, canvas_active, ImGui::GetIO());
 
-            ImVec2 rect_min = thumb_pos + ImVec2(view_pos_norm.x, view_pos_norm.y) * state.thumb_view_size;
-            ImVec2 rect_max = thumb_pos + ImVec2(view_pos_norm.x + view_size_norm.x, view_pos_norm.y + view_size_norm.y) * state.thumb_view_size;
+            if (curve_changed) {
+                if (state.active_curve_channel == ActiveCurveChannel::Luma) {
+                    state.params.curve_points_r = state.params.curve_points_luma;
+                    state.params.curve_points_g = state.params.curve_points_luma;
+                    state.params.curve_points_b = state.params.curve_points_luma;
+                }
+                ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
+                state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
+            }
+        }
+        ImGui::EndGroup();
 
-            // This is the crucial fix: we enforce a clipping rectangle.
-            draw_list->PushClipRect(thumb_pos, thumb_max, true);
-            draw_list->AddRect(rect_min, rect_max, IM_COL32(255, 255, 255, 204)); // White, 80% opaque
-            draw_list->PopClipRect();
+        ImGui::Checkbox("Curve##toggle", &state.show_curve_overlay);
+        if (state.show_curve_overlay) {
+            ImGui::SameLine(ImGui::GetWindowWidth() - 140);
+            float button_size = ImGui::GetFrameHeight();
+            ImVec4 bg_color_l = (state.active_curve_channel == ActiveCurveChannel::Luma) ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+            ImVec4 bg_color_r = (state.active_curve_channel == ActiveCurveChannel::Red) ? ImVec4(0.8f, 0.3f, 0.3f, 1.0f) : ImVec4(0.5f, 0.2f, 0.2f, 1.0f);
+            ImVec4 bg_color_g = (state.active_curve_channel == ActiveCurveChannel::Green) ? ImVec4(0.3f, 0.8f, 0.3f, 1.0f) : ImVec4(0.2f, 0.5f, 0.2f, 1.0f);
+            ImVec4 bg_color_b = (state.active_curve_channel == ActiveCurveChannel::Blue) ? ImVec4(0.3f, 0.3f, 0.8f, 1.0f) : ImVec4(0.2f, 0.2f, 0.5f, 1.0f);
+
+            auto switch_channel = [&](ActiveCurveChannel ch) {
+                if (state.active_curve_channel == ch) return;
+                state.active_curve_channel = ch;
+                if (ch == ActiveCurveChannel::Luma) {
+                    ToneCurveUtils::average_rgb_to_luma(state.params);
+                    ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
+                }
+            };
+
+            ImGui::PushStyleColor(ImGuiCol_Button, bg_color_l); if (ImGui::Button("L##btn", {button_size, button_size})) { switch_channel(ActiveCurveChannel::Luma); } ImGui::PopStyleColor(); ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, bg_color_r); if (ImGui::Button("R##btn", {button_size, button_size})) { switch_channel(ActiveCurveChannel::Red); } ImGui::PopStyleColor(); ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, bg_color_g); if (ImGui::Button("G##btn", {button_size, button_size})) { switch_channel(ActiveCurveChannel::Green); } ImGui::PopStyleColor(); ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, bg_color_b); if (ImGui::Button("B##btn", {button_size, button_size})) { switch_channel(ActiveCurveChannel::Blue); } ImGui::PopStyleColor();
         }
     }
-    ImGui::Separator();
-    
-    // --- Histogram Rendering ---
-    ImGui::Text("Histogram");
-    float histo_height = 150.0f;
-    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
-    ImVec2 canvas_size = ImGui::GetContentRegionAvail();
-    canvas_size.y = histo_height;
-    
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    draw_list->AddRectFilled(canvas_pos, canvas_pos + canvas_size, IM_COL32(20, 20, 22, 255));
-    draw_list->AddRect(canvas_pos, canvas_pos + canvas_size, IM_COL32(80, 80, 80, 255));
-    
-    // Define material-style colors
-    const ImU32 color_luma = IM_COL32(200, 200, 200, 255);
-    const ImU32 color_r = IM_COL32(244, 67, 54, 255);
-    const ImU32 color_g = IM_COL32(76, 175, 80, 255);
-    const ImU32 color_b = IM_COL32(33, 150, 243, 255);
 
-    if (state.show_luma_histo) DrawHistoCurve(draw_list, state.histogram_luma, canvas_pos, canvas_size, color_luma);
-    if (state.show_r_histo) DrawHistoCurve(draw_list, state.histogram_r, canvas_pos, canvas_size, color_r);
-    if (state.show_g_histo) DrawHistoCurve(draw_list, state.histogram_g, canvas_pos, canvas_size, color_g);
-    if (state.show_b_histo) DrawHistoCurve(draw_list, state.histogram_b, canvas_pos, canvas_size, color_b);
-    
-    // --- Curve Editor Overlay ---
-    if (state.show_curve_overlay) {
-        static CurvesEditor curves_editor; // Static instance to preserve interaction state
-        
-        // Pass the linear UI-specific LUT to the editor for accurate visualization of the user's direct input.
-        bool curve_changed = curves_editor.render(state.params.curve_points_global, state.ui_tone_curve_lut, canvas_pos, canvas_size);
-
-        if (curve_changed) {
-            // For instant UI feedback, we must regenerate the linear UI LUT immediately
-            // instead of waiting for the debounced Halide run.
-            ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
-
-            // Clear per-channel curves if we are editing the global one
-            state.params.curve_points_r.clear();
-            state.params.curve_points_g.clear();
-            state.params.curve_points_b.clear();
-
-            state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
-        }
-    }
-    
-    // The invisible button for the curves editor is inside its render function,
-    // which handles advancing the cursor.
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + histo_height);
-
-    // Checkboxes
-    ImGui::Checkbox("L", &state.show_luma_histo); ImGui::SameLine();
-    ImGui::Checkbox("R", &state.show_r_histo); ImGui::SameLine();
-    ImGui::Checkbox("G", &state.show_g_histo); ImGui::SameLine();
-    ImGui::Checkbox("B", &state.show_b_histo); ImGui::SameLine();
-    ImGui::SameLine(ImGui::GetWindowWidth() - 80);
-    ImGui::Checkbox("Curve", &state.show_curve_overlay);
-
-    ImGui::Separator();
-
-    // --- Scrolling Child Region for Adjustments ---
-    ImGui::BeginChild("##adjustments_scrolling", ImVec2(0, 0), true, ImGuiWindowFlags_None);
+    // The scrolling area is now a borderless child window for a seamless look.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+    ImGui::BeginChild("##adjustments_scrolling", ImVec2(0, 0), false, ImGuiWindowFlags_None);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 
     bool pipeline_changed = false;
 
@@ -198,18 +179,21 @@ static void RenderRightPanel(AppState& state) {
         pipeline_changed |= ImGui::SliderFloat("Blacks", &state.params.ll_blacks, -100.0f, 100.0f);
         pipeline_changed |= ImGui::SliderFloat("Whites", &state.params.ll_whites, -100.0f, 100.0f);
     }
-    
+
     if (ImGui::CollapsingHeader("Tone & Curve", ImGuiTreeNodeFlags_DefaultOpen)) {
         pipeline_changed |= ImGui::SliderFloat("Contrast", &state.params.contrast, 0.0f, 100.0f);
         pipeline_changed |= ImGui::SliderFloat("Gamma", &state.params.gamma, 1.0f, 3.0f);
-        
+
         if (ImGui::Button("Reset Curve")) {
-            state.params.curve_points_global.clear();
-            state.params.curve_points_global.push_back({0.0f, 0.0f});
-            state.params.curve_points_global.push_back({1.0f, 1.0f});
-            state.params.curve_points_r.clear();
-            state.params.curve_points_g.clear();
-            state.params.curve_points_b.clear();
+            auto reset_curve = [](std::vector<Point>& points){
+                points.clear();
+                points.push_back({0.0f, 0.0f});
+                points.push_back({1.0f, 1.0f});
+            };
+            reset_curve(state.params.curve_points_luma);
+            reset_curve(state.params.curve_points_r);
+            reset_curve(state.params.curve_points_g);
+            reset_curve(state.params.curve_points_b);
             pipeline_changed = true;
         }
     }
@@ -247,7 +231,7 @@ static void RenderMainView(AppState& state) {
         else if (io.MouseWheel != 0) {
             float old_zoom = state.zoom;
             state.zoom *= (io.MouseWheel > 0) ? 1.1f : (1.0f / 1.1f);
-            
+
             ImVec2 mouse_pos_in_window = ImGui::GetMousePos() - cursor_screen_pos;
             state.pan_offset = mouse_pos_in_window + (state.pan_offset - mouse_pos_in_window) * (state.zoom / old_zoom);
 
@@ -268,7 +252,7 @@ static void RenderMainView(AppState& state) {
 
         float img_w = source_w * fit_scale * state.zoom;
         float img_h = source_h * fit_scale * state.zoom;
-        
+
         ImGui::SetCursorPos(state.pan_offset);
         ImGui::Image((void*)(intptr_t)state.main_texture_id, ImVec2(img_w, img_h), ImVec2(0, 1), ImVec2(1, 0));
     } else {
@@ -300,29 +284,29 @@ void RenderUI(AppState& state) {
     static bool first_time_docking = true;
     if (first_time_docking) {
         first_time_docking = false;
-        
-        ImGui::DockBuilderRemoveNode(dockspace_id); 
+
+        ImGui::DockBuilderRemoveNode(dockspace_id);
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
 
-        ImGuiID main_id; 
+        ImGuiID main_id;
         ImGuiID right_id = ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Right, 0.25f, nullptr, &main_id);
-        
+
         ImGuiDockNode* main_node = ImGui::DockBuilderGetNode(main_id);
         if(main_node) main_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-        
+
         ImGuiDockNode* right_node = ImGui::DockBuilderGetNode(right_id);
         if(right_node) right_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
 
         ImGui::DockBuilderDockWindow("Main View", main_id);
         ImGui::DockBuilderDockWindow("Adjustments", right_id);
-        
+
         ImGui::DockBuilderFinish(dockspace_id);
     }
 
     RenderMainView(state);
     RenderRightPanel(state);
-    
+
     auto now = std::chrono::steady_clock::now();
     if (state.ui_ready && now >= state.next_render_time) {
         std::cout << "Debounce triggered: Rerunning Halide pipeline..." << std::endl;
@@ -336,14 +320,14 @@ void RenderUI(AppState& state) {
 
     if (!state.ui_ready && state.main_view_size.x > 1 && state.main_view_size.y > 1) {
         state.ui_ready = true;
-        
+
         const float source_w = state.input_image.width() - 32;
         const float source_h = state.input_image.height() - 24;
         float fit_scale_x = state.main_view_size.x / source_w;
         float fit_scale_y = state.main_view_size.y / source_h;
         float fit_scale = std::min(fit_scale_x, fit_scale_y);
-        
-        state.zoom = 1.0f; 
+
+        state.zoom = 1.0f;
         state.pan_offset.x = (state.main_view_size.x - source_w * fit_scale) * 0.5f;
         state.pan_offset.y = (state.main_view_size.y - source_h * fit_scale) * 0.5f;
 

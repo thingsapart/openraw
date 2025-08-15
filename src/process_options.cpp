@@ -32,7 +32,7 @@ void print_usage() {
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
            "  --contrast <val>       Contrast enhancement value (default: 50.0). Used if no curve is given.\n"
-           "  --curve-points <str>   Global curve points, e.g. \"0:0,0.5:0.4,1:1\". Overrides gamma/contrast.\n"
+           "  --curve-points <str>   Global/Luma curve points, e.g. \"0:0,0.5:0.4,1:1\". Overrides gamma/contrast.\n"
            "  --curve-r <str>        Red channel curve points. Overrides --curve-points for red.\n"
            "  --curve-g <str>        Green channel curve points. Overrides --curve-points for green.\n"
            "  --curve-b <str>        Blue channel curve points. Overrides --curve-points for blue.\n"
@@ -92,7 +92,7 @@ ProcessConfig parse_args(int argc, char **argv) {
         // --- Curve Parsing ---
         // Parse strings immediately into the vector<Point> representation.
         if (args.count("curve-points")) {
-            ToneCurveUtils::parse_curve_points(args["curve-points"], cfg.curve_points_global);
+            ToneCurveUtils::parse_curve_points(args["curve-points"], cfg.curve_points_luma);
         }
         if (args.count("curve-r")) {
             ToneCurveUtils::parse_curve_points(args["curve-r"], cfg.curve_points_r);
