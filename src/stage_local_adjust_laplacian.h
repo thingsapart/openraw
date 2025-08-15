@@ -98,7 +98,7 @@ private:
         Func bounded_downx = BoundaryConditions::repeat_edge(downx, {{Expr(0), w_out}, {Expr(0), h_in}});
 
         downy(x, y, _) = (bounded_downx(x, 2*y - 1, _) + 3.f*bounded_downx(x, 2*y, _) + 3.f*bounded_downx(x, 2*y + 1, _) + bounded_downx(x, 2*y + 2, _)) / 8.f;
-
+        
         f_out = downy;
         intermediates.push_back(downx);
     }
@@ -122,14 +122,15 @@ private:
         Expr yf = (cast<float>(y) / 2.0f) - 0.25f;
         Expr yi = cast<int>(floor(yf));
         upy(x, y, _) = lerp(bounded_upx(x, yi, _), bounded_upx(x, yi + 1, _), yf - yi);
-
+        
         f_out = upy;
         intermediates.push_back(upx);
     }
 
 public:
     Halide::Func output;
-    std::vector<Halide::Func> gPyramid, inLPyramid, outGPyramid, outLPyramid;
+    std::vector<Halide::Func> gPyramid, inLPyramid, outLPyramid;
+    std::vector<std::vector<Halide::Func>> reconstructedGPyramid; // For dynamic reconstruction
     std::vector<Halide::Func> low_fi_intermediates, high_fi_intermediates, high_freq_pyramid_helpers, low_freq_pyramid_helpers, reconstruction_intermediates;
     Halide::Func remap_lut;
     Halide::Func lab_f_lut, lab_f_inv_lut;
@@ -145,9 +146,10 @@ public:
                            Halide::Expr blackLevel, Halide::Expr whiteLevel,
                            Halide::Expr width, Halide::Expr height,
                            Halide::Expr raw_width, Halide::Expr raw_height,
-                           int J = 13, int cutover_level = 4)
+                           int J = 8, int cutover_level = 4)
         : output("local_adjustments_f"),
-          gPyramid(J), inLPyramid(J), outGPyramid(J), outLPyramid(J),
+          gPyramid(J), inLPyramid(J), outLPyramid(J),
+          reconstructedGPyramid(J, std::vector<Halide::Func>(J)),
           pyramid_levels(J)
     {
         using namespace Halide;
@@ -187,7 +189,6 @@ public:
             Func rgb_lowfi_sensor("rgb_lowfi_sensor");
             rgb_lowfi_sensor(hx,hy,c) = mux(c,{cast<float>(deinterleaved_raw(hx,hy,1)), avg(cast<float>(deinterleaved_raw(hx,hy,0)), cast<float>(deinterleaved_raw(hx,hy,3))), cast<float>(deinterleaved_raw(hx,hy,2))});
 
-            // Fuse the deinterleave and simple demosaic steps by inlining them.
             deinterleaved_raw.compute_inline();
             rgb_lowfi_sensor.compute_inline();
 
@@ -261,49 +262,68 @@ public:
             }
         }
 
-        // --- Correctly modify the Laplacian pyramid levels ---
+        // --- Dynamically modify the Laplacian pyramid levels ---
         remap_lut = Func("remap_lut");
         Var i_remap("i_remap");
         Expr fi = cast<float>(i_remap) / 255.0f;
         Expr tonal_gain = (shadows/100.f)*(1.f-smoothstep(0.f,0.5f,fi)) + (highlights/100.f)*smoothstep(0.5f,1.f,fi);
         remap_lut(i_remap) = fast_pow(fi, fast_pow(2.f, -tonal_gain));
 
+        Expr detail_gain = 1.0f + detail_sharpen / 100.0f;
         Expr clarity_gain = 1.0f + clarity / 100.0f;
 
-        int base_level = pyramid_levels - 1;
-        if (base_level >= 0) {
-            outLPyramid[base_level] = Func("outLPyramid_" + std::to_string(base_level));
-            Expr g_base = gPyramid[base_level](x,y);
-            Expr idx = cast<int>(clamp(g_base * 255.0f, 0.f, 255.f));
-            outLPyramid[base_level](x,y) = remap_lut(idx);
-        }
+        const int detail_level_cutoff = 2;
+        const int clarity_level_cutoff = 5;
 
-        for(int j=0; j < base_level; j++) {
+        for(int j=0; j < pyramid_levels; j++) {
             outLPyramid[j] = Func("outLPyramid_"+std::to_string(j));
-            outLPyramid[j](x,y) = inLPyramid[j](x,y) * clarity_gain;
+            Expr gain = select(j < detail_level_cutoff, detail_gain,
+                        select(j < clarity_level_cutoff, clarity_gain, 1.0f));
+            outLPyramid[j](x,y) = inLPyramid[j](x,y) * gain;
         }
 
-        // --- Reconstruct the output Gaussian pyramid ---
-        if (pyramid_levels > 0) {
-            outGPyramid[pyramid_levels-1] = outLPyramid[pyramid_levels-1];
-            for(int j=pyramid_levels-2; j>=0; j--) {
-                outGPyramid[j] = Func("outGPyramid_"+std::to_string(j));
+        // --- DYNAMIC RECONSTRUCTION ---
+        // Dynamically select the base level for shadow/highlight adjustment.
+        const float target_sh_size = 256.0f;
+        Expr log2_of_2 = fast_log(2.0f);
+        Expr log2_dim = fast_log(cast<float>(max(width, height))) / log2_of_2;
+        Expr log2_target = fast_log(target_sh_size) / log2_of_2;
+        Expr j_sh = clamp(cast<int>(round(log2_dim - log2_target)), 0, pyramid_levels - 1);
+        
+        std::vector<Func> final_reconstructions(J);
+        for (int b = 0; b < J; ++b) {
+            // The base of this reconstruction path is the remapped Gaussian pyramid at level `b`.
+            reconstructedGPyramid[b][b] = Func("reconstructedG_" + std::to_string(b) + "_base");
+            Expr g_current = gPyramid[b](x,y);
+            Expr idx_current = cast<int>(clamp(g_current * 255.0f, 0.f, 255.f));
+            reconstructedGPyramid[b][b](x,y) = remap_lut(idx_current);
+
+            // Reconstruct finer levels by adding detail/clarity-adjusted Laplacian levels.
+            for (int j = b - 1; j >= 0; j--) {
+                reconstructedGPyramid[b][j] = Func("reconstructedG_" + std::to_string(b) + "_" + std::to_string(j));
                 Func upsampled_out;
                 auto& helpers = (perform_splice && j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
-                upsample(outGPyramid[j+1], pyramid_widths[j+1], pyramid_heights[j+1], pyramid_widths[j], pyramid_heights[j], "outGpyr_us_"+std::to_string(j), upsampled_out, helpers);
-                outGPyramid[j](x,y) = upsampled_out(x,y) + outLPyramid[j](x,y);
+                upsample(reconstructedGPyramid[b][j+1], pyramid_widths[j+1], pyramid_heights[j+1], pyramid_widths[j], pyramid_heights[j], "reconG_us_"+std::to_string(b)+"_"+std::to_string(j), upsampled_out, helpers);
+                reconstructedGPyramid[b][j](x,y) = upsampled_out(x,y) + outLPyramid[j](x,y);
             }
+            final_reconstructions[b] = reconstructedGPyramid[b][0];
         }
+
+        // Select the final L_out from the `J` possible reconstruction paths.
+        Func L_out("L_out");
+        Expr final_L_expr;
+        if (J > 0) {
+            final_L_expr = final_reconstructions[J-1](x,y) * 100.0f;
+            for (int b = J-2; b >= 0; b--) {
+                final_L_expr = select(j_sh == b, final_reconstructions[b](x,y) * 100.0f, final_L_expr);
+            }
+        } else {
+            final_L_expr = L_norm_hifi(x,y) * 100.0f;
+        }
+        L_out(x, y) = final_L_expr;
 
         // --- Convert back to RGB ---
-        Func L_out("L_out"), lab_out("lab_out"), xyz_out("xyz_out"), rgb_out_f("rgb_out_f"), final_adjustments("final_adjustments");
-
-        if (pyramid_levels > 0) {
-            L_out(x, y) = outGPyramid[0](x, y) * 100.0f;
-        } else {
-            L_out(x, y) = L_norm_hifi(x,y) * 100.0f;
-        }
-
+        Func lab_out("lab_out"), xyz_out("xyz_out"), rgb_out_f("rgb_out_f"), final_adjustments("final_adjustments");
         lab_out(x, y, c) = mux(c, {L_out(x, y), a_chan(x, y), b_chan(x, y)});
         xyz_out = lab_to_xyz(lab_out, lab_f_inv_lut, x, y, c, "final_xyz");
         rgb_out_f = xyz_to_linear_srgb(xyz_out, x, y, c, "final_rgb_f");

@@ -144,13 +144,23 @@ void schedule_pipeline(
             if (perform_splice && j >= cutover_level) {
                  local_laplacian_builder.inLPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
                  local_laplacian_builder.outLPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
-                 local_laplacian_builder.outGPyramid[j].compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             } else {
                  local_laplacian_builder.inLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.inLPyramid[j].args()[0], vec);
                  local_laplacian_builder.outLPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outLPyramid[j].args()[0], vec);
-                 local_laplacian_builder.outGPyramid[j].compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(local_laplacian_builder.outGPyramid[j].args()[0], vec);
             }
         }
+        // Schedule the new dynamic reconstruction paths
+        for (int b = 0; b < J; ++b) {
+            for (int j = 0; j <= b; ++j) {
+                auto& f = local_laplacian_builder.reconstructedGPyramid[b][j];
+                if (perform_splice && j >= cutover_level) {
+                    f.compute_at(final_stage, yo).store_at(final_stage, yo).vectorize(f.args()[0], vec);
+                } else {
+                    f.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(f.args()[0], vec);
+                }
+            }
+        }
+
         for (auto& f : local_laplacian_builder.high_freq_pyramid_helpers) {
             f.compute_at(final_stage, xo).store_at(final_stage, yo);
         }
