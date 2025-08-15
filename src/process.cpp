@@ -6,6 +6,7 @@
 #include <cstdlib> // For getenv
 #include <chrono>  // For timing
 #include <limits>  // For numeric_limits
+#include <cmath>   // for powf
 
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
@@ -95,6 +96,7 @@ int main(int argc, char **argv) {
     int blackLevel = 25;
     int whiteLevel = 1023;
     float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
+    float exposure_multiplier = powf(2.0f, cfg.exposure);
 
     // --- Simple Timing/Profiling Loop ---
     double best_time = std::numeric_limits<double>::infinity();
@@ -103,7 +105,7 @@ int main(int argc, char **argv) {
 
         #if defined(PIPELINE_PRECISION_F32)
             camera_pipe_f32(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */
@@ -111,7 +113,7 @@ int main(int argc, char **argv) {
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, cfg.ca_strength,
+                              cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */

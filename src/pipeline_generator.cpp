@@ -46,6 +46,7 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> color_temp{"color_temp"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> tint{"tint"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> exposure_multiplier{"exposure_multiplier"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_correction_strength{"ca_correction_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_strength{"denoise_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_eps{"denoise_eps"};
@@ -87,16 +88,16 @@ public:
         Func raw_bounded("raw_bounded");
         raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, full_res_width}, {0, full_res_height}});
 
-        // Normalize the safe, bounded raw data to [0,1] float for the hi-fi path.
-        Func normalized_input("normalized_input");
+        // Normalize, convert to float, and apply exposure compensation in one step.
+        Func linear_exposed("linear_exposed");
         Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
-        normalized_input(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range;
+        linear_exposed(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range * exposure_multiplier;
 
-        DenoiseBuilder denoise_builder(normalized_input, x, y,
+        DenoiseBuilder denoise_builder(linear_exposed, x, y,
                                        denoise_strength, denoise_eps,
                                        this->get_target(), this->using_autoscheduler());
         Func denoised("denoised");
-        denoised(x, y) = select(denoise_strength < 0.001f, normalized_input(x, y), denoise_builder.output(x, y));
+        denoised(x, y) = select(denoise_strength < 0.001f, linear_exposed(x, y), denoise_builder.output(x, y));
 
         CACorrectBuilder ca_builder(denoised, x, y,
                                     ca_correction_strength,

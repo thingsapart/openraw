@@ -15,6 +15,7 @@ struct ProcessConfig {
     float downscale_factor = 1.0f;
     float color_temp = 3700.0f;
     float tint = 0.0f;
+    float exposure = 0.0f; // in stops. Default to 0.0 (no change)
     float ca_strength = 0.0f;
     int timing_iterations = 5;
 
@@ -51,4 +52,3 @@ void print_usage();
 
 
 #endif // PROCESS_OPTIONS_H
-

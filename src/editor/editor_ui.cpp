@@ -170,6 +170,7 @@ static void RenderRightPanel(AppState& state) {
             pipeline_changed = true;
         }
 
+        pipeline_changed |= ImGui::SliderFloat("Exposure", &state.params.exposure, -4.0f, 4.0f, "%.2f");
         pipeline_changed |= ImGui::SliderFloat("Color Temp", &state.params.color_temp, 1500.0f, 15000.0f, "%.0f K");
         pipeline_changed |= ImGui::SliderFloat("Tint", &state.params.tint, -1.0f, 1.0f);
         pipeline_changed |= ImGui::SliderFloat("CA Correction", &state.params.ca_strength, 0.0f, 2.0f);

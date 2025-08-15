@@ -12,6 +12,7 @@ void print_usage() {
            "Pipeline Options:\n"
            "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
            "  --downscale <factor>   Downscale image by this factor (e.g., 2.0 for half size). 1.0=off (default: 1.0).\n"
+           "  --exposure <stops>     Exposure compensation in stops, e.g. -1.0, 0.5, 2.0 (default: 0.0).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
@@ -77,6 +78,7 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("output")) cfg.output_path = args["output"];
         if (args.count("demosaic")) cfg.demosaic_algorithm = args["demosaic"];
         if (args.count("downscale")) cfg.downscale_factor = std::stof(args["downscale"]);
+        if (args.count("exposure")) cfg.exposure = std::stof(args["exposure"]);
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
@@ -120,4 +122,3 @@ ProcessConfig parse_args(int argc, char **argv) {
 
     return cfg;
 }
-

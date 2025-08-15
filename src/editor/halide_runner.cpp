@@ -147,13 +147,14 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     int blackLevel = 25;
     int whiteLevel = 1023;
     float denoise_strength_norm = std::max(0.0f, std::min(1.0f, state.params.denoise_strength / 100.0f));
+    float exposure_multiplier = powf(2.0f, state.params.exposure);
     int demosaic_id = 3;
     if (state.params.demosaic_algorithm == "ahd") demosaic_id = 0;
     else if (state.params.demosaic_algorithm == "lmmse") demosaic_id = 1;
     else if (state.params.demosaic_algorithm == "ri") demosaic_id = 2;
 
     int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                                 state.params.color_temp, state.params.tint, state.params.ca_strength,
+                                 state.params.color_temp, state.params.tint, exposure_multiplier, state.params.ca_strength,
                                  denoise_strength_norm, state.params.denoise_eps,
                                  blackLevel, whiteLevel, tone_curve_lut,
                                  0.f, 0.f, 0.f,
