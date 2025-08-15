@@ -4,9 +4,11 @@
 #include "Halide.h"
 #include "pipeline_helpers.h"
 #include "stage_deinterleave.h"
+#include "stage_resize.h"
 #include <vector>
 #include <string>
 #include <type_traits>
+#include <memory>
 
 // To debug this stage, define this macro during compilation.
 // This will bypass the pyramid logic and only perform the color space conversions.
@@ -134,6 +136,7 @@ public:
     std::vector<Halide::Func> low_fi_intermediates, high_fi_intermediates, high_freq_pyramid_helpers, low_freq_pyramid_helpers, reconstruction_intermediates;
     Halide::Func remap_lut;
     Halide::Func lab_f_lut, lab_f_inv_lut;
+    std::unique_ptr<ResizeBicubicBuilder> lowfi_resize_builder;
     const int pyramid_levels;
 
     LocalLaplacianBuilder(Halide::Func input_rgb_normalized,
@@ -146,10 +149,12 @@ public:
                            Halide::Expr blackLevel, Halide::Expr whiteLevel,
                            Halide::Expr width, Halide::Expr height,
                            Halide::Expr raw_width, Halide::Expr raw_height,
+                           Halide::Expr downscale_factor,
                            int J = 8, int cutover_level = 4)
         : output("local_adjustments_f"),
           gPyramid(J), inLPyramid(J), outLPyramid(J),
           reconstructedGPyramid(J, std::vector<Halide::Func>(J)),
+          lowfi_resize_builder(nullptr),
           pyramid_levels(J)
     {
         using namespace Halide;
@@ -201,15 +206,39 @@ public:
 
             Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
             Func corrected_lowfi_norm("corrected_lowfi_norm");
-            corrected_lowfi_norm(hx,hy,c) = mux(c, {
+            Expr corrected_result = mux(c, {
                 (r_f_sensor - blackLevel) * inv_range,
                 (g_f_sensor - blackLevel) * inv_range,
                 (b_f_sensor - blackLevel) * inv_range
             });
+            corrected_lowfi_norm(hx,hy,c) = clamp(corrected_result, 0.0f, 1.0f);
+            low_fi_intermediates.push_back(corrected_lowfi_norm);
 
-            Func lowfi_rgb_downsampled = corrected_lowfi_norm;
-            Expr current_w = raw_width / 2;
-            Expr current_h = raw_height / 2;
+            Func lowfi_rgb_maybe_downscaled("lowfi_rgb_maybe_downscaled");
+            Expr is_no_op = abs(downscale_factor - 1.0f) < 1e-6f;
+            Expr current_w, current_h;
+            Expr lowfi_w = raw_width / 2;
+            Expr lowfi_h = raw_height / 2;
+
+            Expr lowfi_down_w = cast<int>(lowfi_w / downscale_factor);
+            Expr lowfi_down_h = cast<int>(lowfi_h / downscale_factor);
+            lowfi_resize_builder = std::make_unique<ResizeBicubicBuilder>(
+                corrected_lowfi_norm, "lowfi_resize",
+                lowfi_w, lowfi_h, lowfi_down_w, lowfi_down_h,
+                hx, hy, c
+            );
+            low_fi_intermediates.push_back(lowfi_resize_builder->output);
+            
+            lowfi_rgb_maybe_downscaled(hx, hy, c) = select(is_no_op,
+                corrected_lowfi_norm(hx, hy, c),
+                lowfi_resize_builder->output(hx, hy, c));
+            
+            current_w = select(is_no_op, lowfi_w, lowfi_down_w);
+            current_h = select(is_no_op, lowfi_h, lowfi_down_h);
+
+            lowfi_rgb_maybe_downscaled.compute_inline();
+            Func lowfi_rgb_downsampled = lowfi_rgb_maybe_downscaled;
+            
             for (int j = 1; j < cutover_level; j++) {
                 Func prev = lowfi_rgb_downsampled;
                 downsample(prev, current_w, current_h, "lowfi_rgb_ds_"+std::to_string(j), lowfi_rgb_downsampled, low_freq_pyramid_helpers);
@@ -221,7 +250,9 @@ public:
             Func lab_lowfi = xyz_to_lab(linear_srgb_to_xyz(lowfi_rgb_downsampled, dx, dy, c, "xyz_lowfi"), lab_f_lut, dx, dy, c, "lab_lowfi");
             lowfi_spliced_L(dx, dy) = lab_lowfi(dx, dy, 0) / 100.0f;
 
-            low_fi_intermediates = {deinterleaved_raw, rgb_lowfi_sensor, corrected_lowfi_norm, lowfi_rgb_downsampled, lab_lowfi, lowfi_spliced_L};
+            low_fi_intermediates.push_back(lowfi_rgb_downsampled);
+            low_fi_intermediates.push_back(lab_lowfi);
+            low_fi_intermediates.push_back(lowfi_spliced_L);
         }
 
         // --- Build Input Pyramids (Gaussian and Laplacian) with Splicing ---

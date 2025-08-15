@@ -117,9 +117,15 @@ void schedule_pipeline(
         if (perform_splice) {
             // Schedule the low-fi path intermediates that are materialized.
             // The first few stages are inlined and don't need a schedule.
-            for (size_t i = 2; i < local_laplacian_builder.low_fi_intermediates.size(); ++i) {
-                auto& f = local_laplacian_builder.low_fi_intermediates[i];
+            for (auto& f : local_laplacian_builder.low_fi_intermediates) {
                 f.compute_at(final_stage, yo).store_at(final_stage, yo);
+            }
+            if (local_laplacian_builder.lowfi_resize_builder) {
+                auto& builder = local_laplacian_builder.lowfi_resize_builder;
+                Var hy = builder->output.args()[1];
+                builder->interp_y
+                    .compute_at(builder->output, hy)
+                    .vectorize(builder->x_coord, vec_f);
             }
 
             // Schedule the high-frequency pyramid levels (computed per-tile)
