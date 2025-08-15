@@ -75,7 +75,7 @@ void generate_lut_channel(const ProcessConfig& cfg, const std::vector<Point>& us
         tangents[0] = slope;
         tangents[1] = slope;
     } else {
-        // Endpoints use a one-sided difference.
+        // Endpoints use a one-sided difference for a natural, straight tangent.
         tangents[0] = (points[1].y - points[0].y) / (points[1].x - points[0].x);
         for (size_t i = 1; i < points.size() - 1; ++i) {
             tangents[i] = (points[i+1].y - points[i-1].y) / (points[i+1].x - points[i-1].x);
