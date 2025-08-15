@@ -10,6 +10,43 @@
 #include <iostream>
 #include <algorithm> // for std::max, std::min
 #include <cmath>     // for fabsf, powf
+#include <vector>    // for std::vector
+
+// --- Helper Functions for Drawing ---
+
+static void DrawHistoCurve(ImDrawList* draw_list, const std::vector<float>& histo_data, ImVec2 canvas_pos, ImVec2 canvas_size, ImU32 color) {
+    if (histo_data.empty()) return;
+
+    std::vector<ImVec2> points;
+    points.reserve(histo_data.size());
+
+    for (size_t i = 0; i < histo_data.size(); ++i) {
+        float x = canvas_pos.x + (static_cast<float>(i) / (histo_data.size() - 1)) * canvas_size.x;
+        float y = canvas_pos.y + canvas_size.y - (histo_data[i] * canvas_size.y);
+        points.emplace_back(x, y);
+    }
+    draw_list->AddPolyline(points.data(), points.size(), color, ImDrawFlags_None, 1.5f);
+}
+
+static void DrawToneCurve(ImDrawList* draw_list, const Halide::Runtime::Buffer<uint16_t, 2>& lut, ImVec2 canvas_pos, ImVec2 canvas_size, ImU32 color) {
+    if (lut.data() == nullptr || lut.channels() < 3) return;
+
+    std::vector<ImVec2> points;
+    const int lut_size = lut.width();
+    points.reserve(lut_size);
+
+    for (int i = 0; i < lut_size; ++i) {
+        // We'll use the green channel (index 1) as the representative curve for luma.
+        float in_val_norm = static_cast<float>(i) / (lut_size - 1);
+        float out_val_norm = static_cast<float>(lut(i, 1)) / 65535.0f;
+
+        float x = canvas_pos.x + in_val_norm * canvas_size.x;
+        float y = canvas_pos.y + canvas_size.y - (out_val_norm * canvas_size.y);
+        points.emplace_back(x, y);
+    }
+    draw_list->AddPolyline(points.data(), points.size(), color, ImDrawFlags_None, 1.5f);
+}
+
 
 // This function now renders all right-hand panels inside a single, scrollable window.
 static void RenderRightPanel(AppState& state) {
@@ -80,14 +117,44 @@ static void RenderRightPanel(AppState& state) {
     }
     ImGui::Separator();
     
+    // --- Histogram Rendering ---
     ImGui::Text("Histogram");
-    ImGui::Text("Histogram placeholder.");
+    float histo_height = 120.0f;
+    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+    ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+    canvas_size.y = histo_height;
+    
+    ImGui::InvisibleButton("##histogram_canvas", canvas_size);
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(canvas_pos, canvas_pos + canvas_size, IM_COL32(20, 20, 22, 255));
+    draw_list->AddRect(canvas_pos, canvas_pos + canvas_size, IM_COL32(80, 80, 80, 255));
+    
+    // Define material-style colors
+    const ImU32 color_luma = IM_COL32(200, 200, 200, 255);
+    const ImU32 color_r = IM_COL32(244, 67, 54, 255);
+    const ImU32 color_g = IM_COL32(76, 175, 80, 255);
+    const ImU32 color_b = IM_COL32(33, 150, 243, 255);
+    const ImU32 color_curve = IM_COL32(255, 255, 255, 255);
+
+    if (state.show_luma_histo) DrawHistoCurve(draw_list, state.histogram_luma, canvas_pos, canvas_size, color_luma);
+    if (state.show_r_histo) DrawHistoCurve(draw_list, state.histogram_r, canvas_pos, canvas_size, color_r);
+    if (state.show_g_histo) DrawHistoCurve(draw_list, state.histogram_g, canvas_pos, canvas_size, color_g);
+    if (state.show_b_histo) DrawHistoCurve(draw_list, state.histogram_b, canvas_pos, canvas_size, color_b);
+    if (state.show_curve_overlay) DrawToneCurve(draw_list, state.tone_curve_lut, canvas_pos, canvas_size, color_curve);
+    
+    ImGui::Checkbox("L", &state.show_luma_histo); ImGui::SameLine();
+    ImGui::Checkbox("R", &state.show_r_histo); ImGui::SameLine();
+    ImGui::Checkbox("G", &state.show_g_histo); ImGui::SameLine();
+    ImGui::Checkbox("B", &state.show_b_histo); ImGui::SameLine();
+    ImGui::SameLine(ImGui::GetWindowWidth() - 80);
+    ImGui::Checkbox("Curve", &state.show_curve_overlay);
+
     ImGui::Separator();
 
     // --- Scrolling Child Region for Adjustments ---
     ImGui::BeginChild("##adjustments_scrolling", ImVec2(0, 0), true, ImGuiWindowFlags_None);
 
-    bool changed = false;
+    bool pipeline_changed = false;
 
     if (ImGui::CollapsingHeader("Core Pipeline", ImGuiTreeNodeFlags_DefaultOpen)) {
         const char* demosaic_items[] = { "fast", "ahd", "lmmse", "ri" };
@@ -100,38 +167,38 @@ static void RenderRightPanel(AppState& state) {
         }
         if (ImGui::Combo("Demosaic", &current_item_idx, demosaic_items, IM_ARRAYSIZE(demosaic_items))) {
             state.params.demosaic_algorithm = demosaic_items[current_item_idx];
-            changed = true;
+            pipeline_changed = true;
         }
 
-        changed |= ImGui::SliderFloat("Color Temp", &state.params.color_temp, 1500.0f, 15000.0f, "%.0f K");
-        changed |= ImGui::SliderFloat("Tint", &state.params.tint, -1.0f, 1.0f);
-        changed |= ImGui::SliderFloat("CA Correction", &state.params.ca_strength, 0.0f, 2.0f);
+        pipeline_changed |= ImGui::SliderFloat("Color Temp", &state.params.color_temp, 1500.0f, 15000.0f, "%.0f K");
+        pipeline_changed |= ImGui::SliderFloat("Tint", &state.params.tint, -1.0f, 1.0f);
+        pipeline_changed |= ImGui::SliderFloat("CA Correction", &state.params.ca_strength, 0.0f, 2.0f);
     }
 
     if (ImGui::CollapsingHeader("Denoise", ImGuiTreeNodeFlags_DefaultOpen)) {
-        changed |= ImGui::SliderFloat("Strength", &state.params.denoise_strength, 0.0f, 100.0f);
-        changed |= ImGui::DragFloat("Epsilon", &state.params.denoise_eps, 0.0001f, 0.0001f, 0.1f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        pipeline_changed |= ImGui::SliderFloat("Strength", &state.params.denoise_strength, 0.0f, 100.0f);
+        pipeline_changed |= ImGui::DragFloat("Epsilon", &state.params.denoise_eps, 0.0001f, 0.0001f, 0.1f, "%.4f", ImGuiSliderFlags_Logarithmic);
     }
 
     if (ImGui::CollapsingHeader("Local Adjustments", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Based on Laplacian Pyramid");
-        changed |= ImGui::SliderFloat("Detail", &state.params.ll_detail, -100.0f, 100.0f);
-        changed |= ImGui::SliderFloat("Clarity", &state.params.ll_clarity, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Detail", &state.params.ll_detail, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Clarity", &state.params.ll_clarity, -100.0f, 100.0f);
         ImGui::Separator();
-        changed |= ImGui::SliderFloat("Shadows", &state.params.ll_shadows, -100.0f, 100.0f);
-        changed |= ImGui::SliderFloat("Highlights", &state.params.ll_highlights, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Shadows", &state.params.ll_shadows, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Highlights", &state.params.ll_highlights, -100.0f, 100.0f);
         ImGui::Separator();
-        changed |= ImGui::SliderFloat("Blacks", &state.params.ll_blacks, -100.0f, 100.0f);
-        changed |= ImGui::SliderFloat("Whites", &state.params.ll_whites, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Blacks", &state.params.ll_blacks, -100.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Whites", &state.params.ll_whites, -100.0f, 100.0f);
     }
     
     if (ImGui::CollapsingHeader("Tone & Curve", ImGuiTreeNodeFlags_DefaultOpen)) {
-        changed |= ImGui::SliderFloat("Contrast", &state.params.contrast, 0.0f, 100.0f);
-        changed |= ImGui::SliderFloat("Gamma", &state.params.gamma, 1.0f, 3.0f);
+        pipeline_changed |= ImGui::SliderFloat("Contrast", &state.params.contrast, 0.0f, 100.0f);
+        pipeline_changed |= ImGui::SliderFloat("Gamma", &state.params.gamma, 1.0f, 3.0f);
         ImGui::Text("Custom curve points will go here.");
     }
 
-    if (changed) {
+    if (pipeline_changed) {
         state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
     }
 
