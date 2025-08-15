@@ -76,8 +76,7 @@ int main(int argc, char **argv) {
     int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
     Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
-    ToneCurveUtils tone_curve_util(cfg);
-    Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
+    Buffer<uint16_t, 2> tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
@@ -150,7 +149,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "        %d %d\n", output.width(), output.height());
 
     std::string curve_png_path = cfg.output_path.substr(0, cfg.output_path.find_last_of('.')) + "_curve.png";
-    if (tone_curve_util.render_curves_to_png(curve_png_path.c_str())) {
+    if (ToneCurveUtils::render_curves_to_png(cfg, curve_png_path.c_str())) {
         fprintf(stderr, "curve:  %s\n", curve_png_path.c_str());
     }
 

@@ -2,6 +2,8 @@
 #include "app_state.h"
 #include "halide_runner.h"
 #include "texture_utils.h"
+#include "curves_editor.h"
+#include "tone_curve_utils.h"
 
 #include "imgui.h"
 #include "imgui_internal.h" // For DockBuilder
@@ -11,6 +13,7 @@
 #include <algorithm> // for std::max, std::min
 #include <cmath>     // for fabsf, powf
 #include <vector>    // for std::vector
+#include <cstring>   // for memcpy
 
 // --- Helper Functions for Drawing ---
 
@@ -27,26 +30,6 @@ static void DrawHistoCurve(ImDrawList* draw_list, const std::vector<float>& hist
     }
     draw_list->AddPolyline(points.data(), points.size(), color, ImDrawFlags_None, 1.5f);
 }
-
-static void DrawToneCurve(ImDrawList* draw_list, const Halide::Runtime::Buffer<uint16_t, 2>& lut, ImVec2 canvas_pos, ImVec2 canvas_size, ImU32 color) {
-    if (lut.data() == nullptr || lut.channels() < 3) return;
-
-    std::vector<ImVec2> points;
-    const int lut_size = lut.width();
-    points.reserve(lut_size);
-
-    for (int i = 0; i < lut_size; ++i) {
-        // We'll use the green channel (index 1) as the representative curve for luma.
-        float in_val_norm = static_cast<float>(i) / (lut_size - 1);
-        float out_val_norm = static_cast<float>(lut(i, 1)) / 65535.0f;
-
-        float x = canvas_pos.x + in_val_norm * canvas_size.x;
-        float y = canvas_pos.y + canvas_size.y - (out_val_norm * canvas_size.y);
-        points.emplace_back(x, y);
-    }
-    draw_list->AddPolyline(points.data(), points.size(), color, ImDrawFlags_None, 1.5f);
-}
-
 
 // This function now renders all right-hand panels inside a single, scrollable window.
 static void RenderRightPanel(AppState& state) {
@@ -119,12 +102,11 @@ static void RenderRightPanel(AppState& state) {
     
     // --- Histogram Rendering ---
     ImGui::Text("Histogram");
-    float histo_height = 120.0f;
+    float histo_height = 150.0f;
     ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
     ImVec2 canvas_size = ImGui::GetContentRegionAvail();
     canvas_size.y = histo_height;
     
-    ImGui::InvisibleButton("##histogram_canvas", canvas_size);
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(canvas_pos, canvas_pos + canvas_size, IM_COL32(20, 20, 22, 255));
     draw_list->AddRect(canvas_pos, canvas_pos + canvas_size, IM_COL32(80, 80, 80, 255));
@@ -134,14 +116,38 @@ static void RenderRightPanel(AppState& state) {
     const ImU32 color_r = IM_COL32(244, 67, 54, 255);
     const ImU32 color_g = IM_COL32(76, 175, 80, 255);
     const ImU32 color_b = IM_COL32(33, 150, 243, 255);
-    const ImU32 color_curve = IM_COL32(255, 255, 255, 255);
 
     if (state.show_luma_histo) DrawHistoCurve(draw_list, state.histogram_luma, canvas_pos, canvas_size, color_luma);
     if (state.show_r_histo) DrawHistoCurve(draw_list, state.histogram_r, canvas_pos, canvas_size, color_r);
     if (state.show_g_histo) DrawHistoCurve(draw_list, state.histogram_g, canvas_pos, canvas_size, color_g);
     if (state.show_b_histo) DrawHistoCurve(draw_list, state.histogram_b, canvas_pos, canvas_size, color_b);
-    if (state.show_curve_overlay) DrawToneCurve(draw_list, state.tone_curve_lut, canvas_pos, canvas_size, color_curve);
     
+    // --- Curve Editor Overlay ---
+    if (state.show_curve_overlay) {
+        static CurvesEditor curves_editor; // Static instance to preserve interaction state
+        
+        // Pass the linear UI-specific LUT to the editor for accurate visualization of the user's direct input.
+        bool curve_changed = curves_editor.render(state.params.curve_points_global, state.ui_tone_curve_lut, canvas_pos, canvas_size);
+
+        if (curve_changed) {
+            // For instant UI feedback, we must regenerate the linear UI LUT immediately
+            // instead of waiting for the debounced Halide run.
+            ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
+
+            // Clear per-channel curves if we are editing the global one
+            state.params.curve_points_r.clear();
+            state.params.curve_points_g.clear();
+            state.params.curve_points_b.clear();
+
+            state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
+        }
+    }
+    
+    // The invisible button for the curves editor is inside its render function,
+    // which handles advancing the cursor.
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + histo_height);
+
+    // Checkboxes
     ImGui::Checkbox("L", &state.show_luma_histo); ImGui::SameLine();
     ImGui::Checkbox("R", &state.show_r_histo); ImGui::SameLine();
     ImGui::Checkbox("G", &state.show_g_histo); ImGui::SameLine();
@@ -196,7 +202,16 @@ static void RenderRightPanel(AppState& state) {
     if (ImGui::CollapsingHeader("Tone & Curve", ImGuiTreeNodeFlags_DefaultOpen)) {
         pipeline_changed |= ImGui::SliderFloat("Contrast", &state.params.contrast, 0.0f, 100.0f);
         pipeline_changed |= ImGui::SliderFloat("Gamma", &state.params.gamma, 1.0f, 3.0f);
-        ImGui::Text("Custom curve points will go here.");
+        
+        if (ImGui::Button("Reset Curve")) {
+            state.params.curve_points_global.clear();
+            state.params.curve_points_global.push_back({0.0f, 0.0f});
+            state.params.curve_points_global.push_back({1.0f, 1.0f});
+            state.params.curve_points_r.clear();
+            state.params.curve_points_g.clear();
+            state.params.curve_points_b.clear();
+            pipeline_changed = true;
+        }
     }
 
     if (pipeline_changed) {

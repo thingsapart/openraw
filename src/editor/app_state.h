@@ -25,7 +25,13 @@ struct AppState {
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
-    Halide::Runtime::Buffer<uint16_t, 2> tone_curve_lut; // For histogram overlay
+
+    // We now maintain two separate LUTs:
+    // 1. The final, combined LUT for the pipeline and histogram.
+    Halide::Runtime::Buffer<uint16_t, 2> pipeline_tone_curve_lut;
+    // 2. A linear-based LUT purely for the UI curve editor visualization.
+    Halide::Runtime::Buffer<uint16_t, 2> ui_tone_curve_lut;
+
 
     // CPU-side copy of interleaved data for OpenGL
     std::vector<uint8_t> main_output_interleaved;

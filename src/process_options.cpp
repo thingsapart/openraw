@@ -1,4 +1,5 @@
 #include "process_options.h"
+#include "tone_curve_utils.h"
 #include <iostream>
 #include <algorithm>
 
@@ -87,10 +88,21 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
         if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
-        if (args.count("curve-points")) cfg.curve_points_str = args["curve-points"];
-        if (args.count("curve-r")) cfg.curve_r_str = args["curve-r"];
-        if (args.count("curve-g")) cfg.curve_g_str = args["curve-g"];
-        if (args.count("curve-b")) cfg.curve_b_str = args["curve-b"];
+        
+        // --- Curve Parsing ---
+        // Parse strings immediately into the vector<Point> representation.
+        if (args.count("curve-points")) {
+            ToneCurveUtils::parse_curve_points(args["curve-points"], cfg.curve_points_global);
+        }
+        if (args.count("curve-r")) {
+            ToneCurveUtils::parse_curve_points(args["curve-r"], cfg.curve_points_r);
+        }
+        if (args.count("curve-g")) {
+            ToneCurveUtils::parse_curve_points(args["curve-g"], cfg.curve_points_g);
+        }
+        if (args.count("curve-b")) {
+            ToneCurveUtils::parse_curve_points(args["curve-b"], cfg.curve_points_b);
+        }
 
         if (args.count("curve-mode")) {
             if (args["curve-mode"] == "luma") cfg.curve_mode = 0;

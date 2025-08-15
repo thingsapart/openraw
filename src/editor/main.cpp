@@ -19,6 +19,7 @@
 #include "halide_runner.h"
 #include "texture_utils.h"
 #include "halide_image_io.h"
+#include "tone_curve_utils.h"
 
 
 int main(int argc, char** argv) {
@@ -35,6 +36,18 @@ int main(int argc, char** argv) {
         std::cout << "Usage: ./rawr <path_to_image.png> [options...]" << std::endl;
         return 1;
     }
+
+    // Initialize curve points from config, or create a default linear curve if none were provided.
+    // The parser already populates `curve_points_global` if the argument was passed.
+    if (app_state.params.curve_points_global.empty()) {
+        app_state.params.curve_points_global.push_back({0.0f, 0.0f});
+        app_state.params.curve_points_global.push_back({1.0f, 1.0f});
+    }
+
+    // Eagerly allocate the tone curve LUT buffers to prevent crashes.
+    // They have a fixed size, so we can do this once at startup.
+    app_state.pipeline_tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(65536, 3);
+    app_state.ui_tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(65536, 3);
 
     // --- Load Input Image ---
     try {

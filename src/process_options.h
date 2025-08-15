@@ -6,6 +6,10 @@
 #include <map>
 #include <stdexcept>
 
+// A simple struct to represent a 2D point, used for curve controls.
+// This is now the canonical representation used in ProcessConfig.
+struct Point { float x, y; };
+
 // All pipeline parameters are now encapsulated in this single struct.
 // It is shared between the command-line runner and the new UI editor.
 struct ProcessConfig {
@@ -35,10 +39,13 @@ struct ProcessConfig {
     int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
     float gamma = 2.2f;
     float contrast = 50.0f;
-    std::string curve_points_str;
-    std::string curve_r_str;
-    std::string curve_g_str;
-    std::string curve_b_str;
+    
+    // Curve points are now stored as vectors of points after parsing.
+    std::vector<Point> curve_points_global;
+    std::vector<Point> curve_points_r;
+    std::vector<Point> curve_points_g;
+    std::vector<Point> curve_points_b;
+
     int curve_mode = 1; // 0=Luma, 1=RGB
 };
 

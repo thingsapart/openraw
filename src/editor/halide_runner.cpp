@@ -120,15 +120,14 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
         output_buffer = Halide::Runtime::Buffer<uint8_t>(out_width, out_height, 3);
     }
     
-    ToneCurveUtils tone_curve_util(state.params);
-    Halide::Runtime::Buffer<uint16_t, 2> tone_curve_lut = tone_curve_util.get_lut_for_halide();
+    Halide::Runtime::Buffer<uint16_t, 2> pipeline_lut = ToneCurveUtils::generate_pipeline_lut(state.params);
 
-    // If this is the thumbnail/preview run, also save the LUT for the UI.
+    // If this is the thumbnail/preview run, we also need to generate and save
+    // both the pipeline LUT (for histograms) and the UI LUT (for the curve editor).
     if (view_name == "Thumbnail") {
-        if (state.tone_curve_lut.data() == nullptr) {
-            state.tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(tone_curve_lut.width(), tone_curve_lut.height());
-        }
-        memcpy(state.tone_curve_lut.data(), tone_curve_lut.data(), tone_curve_lut.size_in_bytes());
+        // The buffers in AppState are guaranteed to be allocated now.
+        memcpy(state.pipeline_tone_curve_lut.data(), pipeline_lut.data(), pipeline_lut.size_in_bytes());
+        ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
     }
 
 
@@ -156,7 +155,7 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                                  state.params.color_temp, state.params.tint, exposure_multiplier, state.params.ca_strength,
                                  denoise_strength_norm, state.params.denoise_eps,
-                                 blackLevel, whiteLevel, tone_curve_lut,
+                                 blackLevel, whiteLevel, pipeline_lut,
                                  0.f, 0.f, 0.f,
                                  state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows, 
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,

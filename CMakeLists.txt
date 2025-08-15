@@ -148,7 +148,7 @@ target_link_libraries(imgui PRIVATE SDL2::SDL2)
 # --- Download font and copy it to the build directory ---
 set(FONT_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/font_download)
 set(FONT_TTF_PATH ${FONT_DOWNLOAD_DIR}/extras/ttf/Inter-Regular.ttf)
-set(FONT_DESTINATION_DIR ${CMAKE_BINARY_DIR}) 
+set(FONT_DESTINATION_DIR ${CMAKE_BINARY_DIR})
 
 if(NOT EXISTS ${FONT_TTF_PATH})
     message(STATUS "Inter font not found. Downloading...")
@@ -173,14 +173,16 @@ add_executable(rawr
     src/editor/editor_theme.cpp
     src/editor/halide_runner.cpp
     src/editor/texture_utils.cpp
+    src/editor/texture_utils.cpp
+    src/editor/curves_editor.cpp
     src/process_options.cpp
     src/tone_curve_utils.cpp
 )
 
 target_link_libraries(rawr PRIVATE
-    imgui 
+    imgui
     OpenGL::GL
-    Halide::ImageIO 
+    Halide::ImageIO
     PNG::PNG
     ${GENERATED_PIPELINE_DIR}/camera_pipe_f32_lib.a
     Halide::Runtime
@@ -189,9 +191,9 @@ add_dependencies(rawr generate_camera_pipe_f32)
 
 target_include_directories(rawr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/editor 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/editor
     ${stb_SOURCE_DIR}
-    ${GENERATED_PIPELINE_DIR} 
+    ${GENERATED_PIPELINE_DIR}
     ${SDL2_INCLUDE_DIRS} # This line was missing and is the fix.
 )
 set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)
