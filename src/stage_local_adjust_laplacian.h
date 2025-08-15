@@ -79,29 +79,54 @@ inline Halide::Func xyz_to_linear_srgb(Halide::Func xyz, Halide::Var x, Halide::
 
 class LocalLaplacianBuilder {
 private:
-    // Self-contained, safe pyramid helpers. They assume the caller is handling boundary conditions.
-    static void downsample(Halide::Func f_in, const std::string& name_prefix, Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
+    // Self-contained, safe pyramid helpers. They explicitly use boundary
+    // conditions to handle small images and allow for pyramid levels that are
+    // smaller than the filter kernels.
+    static void downsample(Halide::Func f_in, Halide::Expr w_in, Halide::Expr h_in,
+                           const std::string& name_prefix,
+                           Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
         using namespace Halide;
+        Func bounded_in = BoundaryConditions::repeat_edge(f_in, {{Expr(0), w_in}, {Expr(0), h_in}});
+
         Func downx(name_prefix + "_downx"), downy(name_prefix + "_downy");
         Var x, y;
-        downx(x, y, _) = (f_in(2*x - 1, y, _) + 3.f*f_in(2*x, y, _) + 3.f*f_in(2*x + 1, y, _) + f_in(2*x + 2, y, _)) / 8.f;
-        downy(x, y, _) = (downx(x, 2*y - 1, _) + 3.f*downx(x, 2*y, _) + 3.f*downx(x, 2*y + 1, _) + downx(x, 2*y + 2, _)) / 8.f;
+
+        downx(x, y, _) = (bounded_in(2*x - 1, y, _) + 3.f*bounded_in(2*x, y, _) + 3.f*bounded_in(2*x + 1, y, _) + bounded_in(2*x + 2, y, _)) / 8.f;
+
+        // The intermediate `downx` is defined over the new, smaller width but original height.
+        Expr w_out = (w_in + 1) / 2;
+        Func bounded_downx = BoundaryConditions::repeat_edge(downx, {{Expr(0), w_out}, {Expr(0), h_in}});
+
+        downy(x, y, _) = (bounded_downx(x, 2*y - 1, _) + 3.f*bounded_downx(x, 2*y, _) + 3.f*bounded_downx(x, 2*y + 1, _) + bounded_downx(x, 2*y + 2, _)) / 8.f;
+
         f_out = downy;
         intermediates.push_back(downx);
     }
-    static void upsample(Halide::Func f_in, const std::string& name_prefix, Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
+
+    static void upsample(Halide::Func f_in, Halide::Expr w_in, Halide::Expr h_in, Halide::Expr w_out, Halide::Expr h_out,
+                         const std::string& name_prefix,
+                         Halide::Func &f_out, std::vector<Halide::Func> &intermediates) {
         using namespace Halide;
+        Func bounded_in = BoundaryConditions::repeat_edge(f_in, {{Expr(0), w_in}, {Expr(0), h_in}});
+
         Func upx(name_prefix + "_upx"), upy(name_prefix + "_upy");
         Var x, y;
+
         Expr xf = (cast<float>(x) / 2.0f) - 0.25f;
         Expr xi = cast<int>(floor(xf));
-        upx(x, y, _) = lerp(f_in(xi, y, _), f_in(xi + 1, y, _), xf - xi);
+        upx(x, y, _) = lerp(bounded_in(xi, y, _), bounded_in(xi + 1, y, _), xf - xi);
+
+        // The intermediate `upx` is defined over the new, larger width but original height.
+        Func bounded_upx = BoundaryConditions::repeat_edge(upx, {{Expr(0), w_out}, {Expr(0), h_in}});
+
         Expr yf = (cast<float>(y) / 2.0f) - 0.25f;
         Expr yi = cast<int>(floor(yf));
-        upy(x, y, _) = lerp(upx(x, yi, _), upx(x, yi + 1, _), yf - yi);
+        upy(x, y, _) = lerp(bounded_upx(x, yi, _), bounded_upx(x, yi + 1, _), yf - yi);
+
         f_out = upy;
         intermediates.push_back(upx);
     }
+
 public:
     Halide::Func output;
     std::vector<Halide::Func> gPyramid, inLPyramid, outGPyramid, outLPyramid;
@@ -119,7 +144,8 @@ public:
                            Halide::Expr blacks, Halide::Expr whites,
                            Halide::Expr blackLevel, Halide::Expr whiteLevel,
                            Halide::Expr width, Halide::Expr height,
-                           int J = 8, int cutover_level = 4)
+                           Halide::Expr raw_width, Halide::Expr raw_height,
+                           int J = 13, int cutover_level = 4)
         : output("local_adjustments_f"),
           gPyramid(J), inLPyramid(J), outGPyramid(J), outLPyramid(J),
           pyramid_levels(J)
@@ -181,9 +207,13 @@ public:
             });
 
             Func lowfi_rgb_downsampled = corrected_lowfi_norm;
+            Expr current_w = raw_width / 2;
+            Expr current_h = raw_height / 2;
             for (int j = 1; j < cutover_level; j++) {
                 Func prev = lowfi_rgb_downsampled;
-                downsample(prev, "lowfi_rgb_ds_"+std::to_string(j), lowfi_rgb_downsampled, low_freq_pyramid_helpers);
+                downsample(prev, current_w, current_h, "lowfi_rgb_ds_"+std::to_string(j), lowfi_rgb_downsampled, low_freq_pyramid_helpers);
+                current_w = (current_w + 1) / 2;
+                current_h = (current_h + 1) / 2;
             }
 
             Var dx("dx_lf"), dy("dy_lf");
@@ -194,20 +224,29 @@ public:
         }
 
         // --- Build Input Pyramids (Gaussian and Laplacian) with Splicing ---
+        std::vector<Expr> pyramid_widths(J);
+        std::vector<Expr> pyramid_heights(J);
+        pyramid_widths[0] = width;
+        pyramid_heights[0] = height;
+        for (int j = 1; j < J; j++) {
+            pyramid_widths[j] = (pyramid_widths[j-1] + 1) / 2;
+            pyramid_heights[j] = (pyramid_heights[j-1] + 1) / 2;
+        }
+
         gPyramid[0] = L_norm_hifi;
         bool perform_splice = (cutover_level > 0 && cutover_level < pyramid_levels);
 
         if (perform_splice) {
             for (int j = 1; j < cutover_level; j++) {
-                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
+                downsample(gPyramid[j-1], pyramid_widths[j-1], pyramid_heights[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
             }
             gPyramid[cutover_level] = lowfi_spliced_L;
             for (int j = cutover_level + 1; j < pyramid_levels; j++) {
-                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], low_freq_pyramid_helpers);
+                downsample(gPyramid[j-1], pyramid_widths[j-1], pyramid_heights[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], low_freq_pyramid_helpers);
             }
         } else {
             for (int j = 1; j < pyramid_levels; j++) {
-                downsample(gPyramid[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
+                downsample(gPyramid[j-1], pyramid_widths[j-1], pyramid_heights[j-1], "gpyr_ds_"+std::to_string(j), gPyramid[j], high_freq_pyramid_helpers);
             }
         }
 
@@ -217,7 +256,7 @@ public:
                 inLPyramid[j] = Func("inLPyramid_"+std::to_string(j));
                 Func upsampled_g;
                 auto& helpers = (perform_splice && j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
-                upsample(gPyramid[j+1], "inLpyr_us_"+std::to_string(j), upsampled_g, helpers);
+                upsample(gPyramid[j+1], pyramid_widths[j+1], pyramid_heights[j+1], pyramid_widths[j], pyramid_heights[j], "inLpyr_us_"+std::to_string(j), upsampled_g, helpers);
                 inLPyramid[j](x,y) = gPyramid[j](x,y) - upsampled_g(x,y);
             }
         }
@@ -251,7 +290,7 @@ public:
                 outGPyramid[j] = Func("outGPyramid_"+std::to_string(j));
                 Func upsampled_out;
                 auto& helpers = (perform_splice && j >= cutover_level-1) ? low_freq_pyramid_helpers : high_freq_pyramid_helpers;
-                upsample(outGPyramid[j+1], "outGpyr_us_"+std::to_string(j), upsampled_out, helpers);
+                upsample(outGPyramid[j+1], pyramid_widths[j+1], pyramid_heights[j+1], pyramid_widths[j], pyramid_heights[j], "outGpyr_us_"+std::to_string(j), upsampled_out, helpers);
                 outGPyramid[j](x,y) = upsampled_out(x,y) + outLPyramid[j](x,y);
             }
         }

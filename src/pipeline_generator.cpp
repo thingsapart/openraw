@@ -143,7 +143,7 @@ public:
             x, y, c,
             ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
             blackLevel, whiteLevel,
-            out_width, out_height,
+            out_width, out_height, full_res_width, full_res_height,
             J, cutover_level);
         Func local_adjustments_f = local_laplacian_builder.output;
 
