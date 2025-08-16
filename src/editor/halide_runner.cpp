@@ -51,7 +51,7 @@ static void ComputeHistograms(AppState& state) {
             uint8_t r = preview_image(x, y, 0);
             uint8_t g = preview_image(x, y, 1);
             uint8_t b = preview_image(x, y, 2);
-            
+
             // Calculate luma from the gamma-corrected RGB values.
             uint8_t luma = static_cast<uint8_t>(0.299f * r + 0.587f * g + 0.114f * b);
 
@@ -106,10 +106,10 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     const int raw_h = state.input_image.height() - 24;
     int out_width = static_cast<int>(raw_w / downscale_factor);
     int out_height = static_cast<int>(raw_h / downscale_factor);
-    
+
     printf("\n--- Preparing Halide run for: %s ---\n", view_name.c_str());
     printf("  Downscale Factor: %.4f, Calculated Output: %d x %d\n", downscale_factor, out_width, out_height);
-    
+
     // This check is now a fallback; the factor clamping should prevent this.
     if (out_width < 32 || out_height < 32) {
         printf("  SKIPPING: Output size is too small.\n");
@@ -119,7 +119,7 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     if (output_buffer.data() == nullptr || output_buffer.width() != out_width || output_buffer.height() != out_height) {
         output_buffer = Halide::Runtime::Buffer<uint8_t>(out_width, out_height, 3);
     }
-    
+
     Halide::Runtime::Buffer<uint16_t, 2> pipeline_lut = ToneCurveUtils::generate_pipeline_lut(state.params);
 
     // If this is the thumbnail/preview run, we also need to generate and save
@@ -157,8 +157,9 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
                                  denoise_strength_norm, state.params.denoise_eps,
                                  blackLevel, whiteLevel, pipeline_lut,
                                  0.f, 0.f, 0.f,
-                                 state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows, 
+                                 state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows,
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
+                                 /* TODO color_grading_lut */ NULL,
                                  output_buffer);
 
     if (result != 0) {
@@ -170,7 +171,7 @@ void RunHalidePipelines(AppState& state) {
     if (state.input_image.data() == nullptr || state.main_view_size.x <= 0) {
         return;
     }
-    
+
     const float raw_w = state.input_image.width() - 32;
     const float raw_h = state.input_image.height() - 24;
 
@@ -195,7 +196,7 @@ void RunHalidePipelines(AppState& state) {
     downscale_factor_thumb = std::max(1.0f, downscale_factor_thumb);
 
     run_pipeline_instance(state, downscale_factor_thumb, state.thumb_output_planar, "Thumbnail");
-    
+
     // Now that the thumb pipeline has run, compute histograms and convert for display
     ComputeHistograms(state);
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);

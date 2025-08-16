@@ -31,9 +31,9 @@ endif()
 # ==============================================================================
 #  1. PIPELINE GENERATOR
 # ==============================================================================
-add_executable(pipeline_generator src/pipeline_generator.cpp)
+add_executable(pipeline_generator src/pipeline_generator.cpp src/color_tools.cpp src/tone_curve_utils.cpp)
 target_link_libraries(pipeline_generator PRIVATE Halide::Halide Halide::Generator)
-target_include_directories(pipeline_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(pipeline_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${stb_SOURCE_DIR})
 
 # ==============================================================================
 #  2. STATIC PIPELINE LIBRARY GENERATION
@@ -86,7 +86,7 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
     set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
     set(PROCESS_TARGET "process_${VARIANT}")
 
-    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp src/process_options.cpp)
+    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp src/process_options.cpp src/color_tools.cpp src/tone_curve_utils.cpp)
 
     if(VARIANT STREQUAL "f32")
         target_compile_definitions(${PROCESS_TARGET} PRIVATE PIPELINE_PRECISION_F32)
@@ -176,6 +176,8 @@ add_executable(rawr
     src/editor/texture_utils.cpp
     src/editor/curves_editor.cpp
     src/process_options.cpp
+    src/tone_curve_utils.cpp
+    src/color_tools.cpp
     src/tone_curve_utils.cpp
 )
 

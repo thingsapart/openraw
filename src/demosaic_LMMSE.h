@@ -18,7 +18,7 @@ public:
     DemosaicLMMSE_T(Halide::Func deinterleaved, Halide::Var x_full, Halide::Var y_full, Halide::Var c_full) : qx("lmmse_qx"), qy("lmmse_qy") {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-        
+
         Halide::Type proc_type = deinterleaved.type();
 
         Func deinterleaved_f("deinterleaved_f_lmmse");
@@ -53,7 +53,7 @@ public:
         intermediates.push_back(g_at_b);
 
         Func green("green_lmmse");
-        green(x_full, y_full) = mux(y_full % 2, 
+        green(x_full, y_full) = mux(y_full % 2,
                                   {mux(x_full % 2, {deinterleaved_f(x_full/2, y_full/2, 0), g_at_r(x_full/2, y_full/2)}),
                                    mux(x_full % 2, {g_at_b(x_full/2, y_full/2), deinterleaved_f(x_full/2, y_full/2, 3)})});
 
@@ -84,7 +84,7 @@ public:
             Expr r_ne = deinterleaved_f(qx, qy, 1);   Expr g_r_ne = g_at_r(qx,qy);
             Expr r_sw = deinterleaved_f(qx-1, qy+1, 1); Expr g_r_sw = g_at_r(qx-1,qy+1);
             Expr r_se = deinterleaved_f(qx, qy+1, 1); Expr g_r_se = g_at_r(qx,qy+1);
-            
+
             Expr b_nw = deinterleaved_f(qx,qy, 2);     Expr g_b_nw = g_at_b(qx,qy);
             Expr b_ne = deinterleaved_f(qx+1,qy, 2);   Expr g_b_ne = g_at_b(qx+1,qy);
             Expr b_sw = deinterleaved_f(qx,qy+1, 2);   Expr g_b_sw = g_at_b(qx,qy+1);
@@ -97,15 +97,15 @@ public:
         b_at_r.compute_inline();
         intermediates.push_back(r_at_b);
         intermediates.push_back(b_at_r);
-        
+
         Func red("red_lmmse"), blue("blue_lmmse");
-        red(x_full, y_full) = mux(y_full % 2, 
+        red(x_full, y_full) = mux(y_full % 2,
                                   {mux(x_full % 2, {r_at_g(x_full/2,y_full/2), deinterleaved_f(x_full/2,y_full/2, 1)}),
                                    mux(x_full % 2, {r_at_b(x_full/2,y_full/2), r_at_g(x_full/2,y_full/2)})});
-        blue(x_full, y_full) = mux(y_full % 2, 
+        blue(x_full, y_full) = mux(y_full % 2,
                                    {mux(x_full % 2, {b_at_g(x_full/2,y_full/2), b_at_r(x_full/2,y_full/2)}),
                                     mux(x_full % 2, {deinterleaved_f(x_full/2,y_full/2, 2), b_at_g(x_full/2,y_full/2)})});
-        
+
         deinterleaved_f.compute_inline();
 
         output = Func("demosaic_lmmse");
@@ -117,3 +117,4 @@ public:
 };
 
 #endif // DEMOSAIC_LMMSE_H
+

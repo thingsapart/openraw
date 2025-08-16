@@ -102,7 +102,7 @@ public:
     {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-        
+
         // The input 'norm_raw' is already a normalized [0,1] float.
         Func norm_raw = input_float;
 
@@ -149,10 +149,10 @@ public:
             Expr C = clamped_norm_raw(tile_x, tile_y);
             Expr G = clamped_g_interp(tile_x, tile_y);
             Expr deltgrb = G - C;
-            
+
             // This threshold prevents division by zero in flat areas (shadows, highlights)
             // which is the likely cause of the visual artifacts.
-            const float den_thresh = 0.001f; 
+            const float den_thresh = 0.001f;
 
             // --- Horizontal shifts (v=1) ---
             Expr gdiff_h = clamped_g_interp(tile_x + 1, tile_y) - clamped_g_interp(tile_x - 1, tile_y);
@@ -173,7 +173,7 @@ public:
             Expr num_v_b = sum(select(is_tile_b, deltgrb * gdiff_v, 0.f), "ca_num_v_b_sum");
             Expr den_v_b = sum(select(is_tile_b, gdiff_v * gdiff_v, 0.f), "ca_den_v_b_sum");
             Expr shift_v_b = num_v_b / (den_v_b + 1e-5f);
-            
+
             const float bslim = 3.99f;
             // c=0 is R, c=1 is B
             // v=0 is vert, v=1 is horiz
@@ -190,7 +190,7 @@ public:
         {
             Region block_bounds = {{0, (width+ts-1)/ts}, {0, (height+ts-1)/ts}, {0,2}, {0,2}};
             Func clamped_shifts = BoundaryConditions::repeat_edge(block_shifts, block_bounds);
-            
+
             RDom r_blur(-4, 9, "ca_blur_rdom");
             blur_x(bx, by, c_ca, v_ca) = sum(clamped_shifts(bx + r_blur, by, c_ca, v_ca), "ca_shifts_blur_x_sum");
             blur_y(bx, by, c_ca, v_ca) = sum(blur_x(bx, by + r_blur, c_ca, v_ca), "ca_shifts_blur_y_sum");
@@ -208,11 +208,11 @@ public:
             Expr shift_hr = clamp(bilinear(blurred_shifts, f_bx, f_by, 0, 1), -shift_bound, shift_bound) * strength;
             Expr shift_vb = clamp(bilinear(blurred_shifts, f_bx, f_by, 1, 0), -shift_bound, shift_bound) * strength;
             Expr shift_hb = clamp(bilinear(blurred_shifts, f_bx, f_by, 1, 1), -shift_bound, shift_bound) * strength;
-            
+
             Func g_interp_clamped = BoundaryConditions::repeat_edge(g_interp, {{0, width}, {0, height}});
             Expr r_new = norm_raw(x, y) + g_interp(x, y) - bilinear(g_interp_clamped, x + shift_hr, y + shift_vr);
             Expr b_new = norm_raw(x, y) + g_interp(x, y) - bilinear(g_interp_clamped, x + shift_hb, y + shift_vb);
-            
+
             corrected_f(x, y) = select(is_r, r_new, is_b, b_new, norm_raw(x, y));
         }
 
@@ -229,3 +229,4 @@ public:
 #endif // NO_CA_CORRECT
 
 #endif // STAGE_CA_CORRECT_H
+

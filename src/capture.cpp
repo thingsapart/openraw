@@ -116,11 +116,11 @@ int main(int argc, char **argv) {
     } catch (const std::exception& e) {
         std::cerr << "Error parsing arguments: " << e.what() << std::endl; return 1;
     }
-    
+
     auto cm = std::make_unique<CameraManager>();
     cm->start();
     if (cm->cameras().empty()) { std::cerr << "No cameras found" << std::endl; return 1; }
-    
+
     std::shared_ptr<Camera> camera = cm->cameras()[0];
     camera->acquire();
 
@@ -128,8 +128,8 @@ int main(int argc, char **argv) {
     unsigned int max_bit_depth = 0;
     for (const auto &format : camera->sensor()->properties().get(properties::PixelFormats)) {
         if (!format.isBayer()) continue;
-        if (format.isPacked()) continue; 
-        
+        if (format.isPacked()) continue;
+
         if (cfg.bit_depth > 0) {
             if (format.bitdepth() == cfg.bit_depth) {
                 best_format = format;
@@ -189,15 +189,15 @@ int main(int argc, char **argv) {
 
     camera->start();
     camera->queueRequest(request);
-    
+
     bool captured = false;
     while(!captured) {
         CompletedRequest *completed_request = camera->dequeueRequest();
         if (completed_request) {
             FrameBuffer *buffer = completed_request->buffers().at(streamConfig.stream());
             const MappedBuffer &mapped_buffer = completed_request->map(streamConfig.stream());
-            
-            save_raw_as_png(cfg.output_path, streamConfig.size.width, streamConfig.size.height, 
+
+            save_raw_as_png(cfg.output_path, streamConfig.size.width, streamConfig.size.height,
                             streamConfig.stride, static_cast<const uint8_t*>(mapped_buffer.planes()[0].data));
 
             completed_request->reuse();
@@ -218,3 +218,4 @@ int main(int argc, char** argv) {
     return 1;
 }
 #endif
+

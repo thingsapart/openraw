@@ -113,7 +113,7 @@ public:
         upsampled_b(x, y, c) = b(x / s, y / s, c);
         intermediates.push_back(upsampled_a);
         intermediates.push_back(upsampled_b);
-        
+
         output = Func("guided_filter_result");
         // Define the final output using the passed-in Vars.
         output(x, y, c) = upsampled_a(x, y, c) * guide(x, y) + upsampled_b(x, y, c);
@@ -123,3 +123,4 @@ public:
 }  // namespace Halide
 
 #endif
+
