@@ -17,6 +17,19 @@ enum class HueSubType {
     HvsH, HvsS, HvsL
 };
 
+// Converts the backend's normalized hue [0,1] (where 0.5=Red) to the visual HSV hue [0,1] (where 0=Red).
+float backend_hue_to_display_hue(float h_norm_backend) {
+    // Backend: 0=Green, 0.25=Blue, 0.5=Red, 0.75=Yellow, 1.0=Green
+    // Display: 0=Red, 0.166=Yellow, 0.333=Green, 0.666=Blue, 1.0=Red
+    if (h_norm_backend < 0.25f)      // Green -> Blue
+        return ImLerp(120.0f/360.0f, 240.0f/360.0f, h_norm_backend / 0.25f);
+    else if (h_norm_backend < 0.5f)  // Blue -> Red
+        return ImLerp(240.0f/360.0f, 360.0f/360.0f, (h_norm_backend - 0.25f) / 0.25f);
+    else if (h_norm_backend < 0.75f) // Red -> Yellow
+        return ImLerp(0.0f/360.0f, 60.0f/360.0f, (h_norm_backend - 0.5f) / 0.25f);
+    else                             // Yellow -> Green
+        return ImLerp(60.0f/360.0f, 120.0f/360.0f, (h_norm_backend - 0.75f) / 0.25f);
+}
 
 void DrawCurveBackground(ImDrawList* draw_list, ImVec2 pos, ImVec2 size,
                          CurveBackgroundType type, HueSubType sub_type,
@@ -52,15 +65,7 @@ void DrawCurveBackground(ImDrawList* draw_list, ImVec2 pos, ImVec2 size,
 
         for (int x = 0; x < (int)size.x; ++x) {
             float h_norm_backend = (float)x / (size.x - 1.0f);
-            
-            // This logic converts the backend's normalized hue (0.5 = Red)
-            // to the display's HSV hue (0.0 = Red) for correct visualization.
-            float display_hue;
-            if (h_norm_backend < 0.5f) { // Blue -> Red
-                display_hue = ImLerp(0.666f, 1.0f, h_norm_backend / 0.5f);
-            } else { // Red -> Yellow -> Green
-                display_hue = ImLerp(0.0f, 0.333f, (h_norm_backend - 0.5f) / 0.5f);
-            }
+            float display_hue = backend_hue_to_display_hue(h_norm_backend);
 
             for (int y = 0; y < (int)size.y; ++y) {
                 float y_norm = (float)y / (size.y - 1.0f);

@@ -50,7 +50,7 @@ bool CurvesEditor::render(const char* id_str, std::vector<Point>& points, const 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     const ImGuiIO& io = ImGui::GetIO();
     const ImU32 color = IM_COL32(224, 224, 224, 255);
-    const float hover_radius_sq = 5.0f * 5.0f;
+    const float hover_radius_sq = 15.0f * 15.0f; // Increased grab halo
 
     ImGui::InvisibleButton("canvas", size);
     bool canvas_hovered = ImGui::IsItemHovered();
