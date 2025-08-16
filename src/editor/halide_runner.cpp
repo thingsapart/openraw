@@ -1,5 +1,6 @@
 #include "halide_runner.h"
 #include "tone_curve_utils.h"
+#include "color_tools.h"
 
 #include <algorithm>
 #include <iostream>
@@ -110,7 +111,6 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     printf("\n--- Preparing Halide run for: %s ---\n", view_name.c_str());
     printf("  Downscale Factor: %.4f, Calculated Output: %d x %d\n", downscale_factor, out_width, out_height);
 
-    // This check is now a fallback; the factor clamping should prevent this.
     if (out_width < 32 || out_height < 32) {
         printf("  SKIPPING: Output size is too small.\n");
         return;
@@ -121,11 +121,9 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     }
 
     Halide::Runtime::Buffer<uint16_t, 2> pipeline_lut = ToneCurveUtils::generate_pipeline_lut(state.params);
+    Halide::Runtime::Buffer<float, 4> color_grading_lut = HostColor::generate_color_lut(state.params);
 
-    // If this is the thumbnail/preview run, we also need to generate and save
-    // both the pipeline LUT (for histograms) and the UI LUT (for the curve editor).
     if (view_name == "Thumbnail") {
-        // The buffers in AppState are guaranteed to be allocated now.
         memcpy(state.pipeline_tone_curve_lut.data(), pipeline_lut.data(), pipeline_lut.size_in_bytes());
         ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
     }
@@ -159,7 +157,7 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
                                  0.f, 0.f, 0.f,
                                  state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows,
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
-                                 /* TODO color_grading_lut */ NULL,
+                                 color_grading_lut,
                                  output_buffer);
 
     if (result != 0) {
@@ -176,7 +174,6 @@ void RunHalidePipelines(AppState& state) {
     const float raw_h = state.input_image.height() - 24;
 
     // --- Main View Pipeline ---
-    // The main view pipeline is sized dynamically based on zoom and pan.
     float fit_scale = std::min(state.main_view_size.x / raw_w, state.main_view_size.y / raw_h);
     float on_screen_width = raw_w * fit_scale * state.zoom;
     float downscale_factor_main = raw_w / on_screen_width;
@@ -190,14 +187,12 @@ void RunHalidePipelines(AppState& state) {
     ConvertPlanarToInterleaved(state.main_output_planar, state.main_output_interleaved);
 
     // --- Thumbnail & Histogram Pipeline ---
-    // This pipeline runs on a fixed-size image to provide stable histograms.
     const float PREVIEW_LONGEST_DIM = 1024.0f;
     float downscale_factor_thumb = (raw_w > raw_h) ? (raw_w / PREVIEW_LONGEST_DIM) : (raw_h / PREVIEW_LONGEST_DIM);
     downscale_factor_thumb = std::max(1.0f, downscale_factor_thumb);
 
     run_pipeline_instance(state, downscale_factor_thumb, state.thumb_output_planar, "Thumbnail");
 
-    // Now that the thumb pipeline has run, compute histograms and convert for display
     ComputeHistograms(state);
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);
 }

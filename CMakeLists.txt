@@ -179,6 +179,15 @@ add_executable(rawr
     src/tone_curve_utils.cpp
     src/color_tools.cpp
     src/tone_curve_utils.cpp
+    src/editor/pane_manager.cpp
+    src/editor/panes/pane_color_curves.cpp
+    src/editor/panes/pane_color_wheels.cpp
+    src/editor/panes/pane_core_pipeline.cpp
+    src/editor/panes/pane_denoise.cpp
+    src/editor/panes/pane_histogram_curves.cpp
+    src/editor/panes/pane_local_adjustments.cpp
+    src/editor/panes/pane_preview.cpp
+    src/editor/panes/pane_tone_curves.cpp
 )
 
 target_link_libraries(rawr PRIVATE
