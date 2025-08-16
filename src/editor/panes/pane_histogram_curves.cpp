@@ -21,6 +21,14 @@ static void DrawHistoCurve(ImDrawList* draw_list, const std::vector<float>& hist
     draw_list->AddPolyline(points.data(), points.size(), color, ImDrawFlags_None, 1.5f);
 }
 
+// Re-implement the generic point-to-screen mapping for drawing the reference line
+// This must match the mapping used inside the curve editor widget.
+ImVec2 point_to_screen_for_ref_line(const Point& p, const ImVec2& canvas_pos, const ImVec2& canvas_size, float y_min, float y_max) {
+    float y_range = y_max - y_min;
+    float y_norm = (y_range > 1e-6f) ? (p.y - y_min) / y_range : 0.5f;
+    return ImVec2(canvas_pos.x + p.x * canvas_size.x, canvas_pos.y + (1.0f - y_norm) * canvas_size.y);
+}
+
 } // namespace
 
 namespace Panes {
@@ -47,9 +55,12 @@ void render_histogram_curves(AppState& state) {
     if (state.show_g_histo) DrawHistoCurve(draw_list, state.histogram_g, canvas_pos, canvas_size, IM_COL32(76, 175, 80, 255));
     if (state.show_b_histo) DrawHistoCurve(draw_list, state.histogram_b, canvas_pos, canvas_size, IM_COL32(33, 150, 243, 255));
     
+    const float y_min_vis = -0.1f;
+    const float y_max_vis = 1.1f;
+    
     // -- Diagonal Reference Line --
-    ImVec2 p1 = canvas_pos + ImVec2(0, canvas_size.y);
-    ImVec2 p2 = canvas_pos + ImVec2(canvas_size.x, 0);
+    ImVec2 p1 = point_to_screen_for_ref_line({0.0f, 0.0f}, canvas_pos, canvas_size, y_min_vis, y_max_vis);
+    ImVec2 p2 = point_to_screen_for_ref_line({1.0f, 1.0f}, canvas_pos, canvas_size, y_min_vis, y_max_vis);
     draw_list->AddLine(p1, p2, IM_COL32(255, 255, 255, 100), 1.0f);
     draw_list->AddRect(canvas_pos, canvas_pos + canvas_size, IM_COL32(80, 80, 80, 255));
 
@@ -59,9 +70,6 @@ void render_histogram_curves(AppState& state) {
         const ImU32 color_r_dim = IM_COL32(100, 50, 50, 255);
         const ImU32 color_g_dim = IM_COL32(50, 100, 50, 255);
         const ImU32 color_b_dim = IM_COL32(50, 50, 100, 255);
-        
-        const float y_min_vis = -0.1f;
-        const float y_max_vis = 1.1f;
 
         // Draw inactive curves by evaluating their splines.
         if (state.active_curve_channel != ActiveCurveChannel::Red) CurvesEditor::draw_readonly_spline(draw_list, state.params.curve_points_r, 1.0f, false, true, canvas_pos, canvas_size, color_r_dim, y_min_vis, y_max_vis);

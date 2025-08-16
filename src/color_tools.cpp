@@ -21,6 +21,40 @@ namespace HostColor {
             // Evaluate polynomial
             return t * t * (3.0f - 2.0f * t);
         }
+
+        // Host-side versions of the L*a*b* conversion functions.
+        // These must exactly match the logic in the Halide helpers.
+        float lab_f_inv(float t) {
+            const float delta = 6.0f / 29.0f;
+            if (t > delta) {
+                return t*t*t;
+            } else {
+                return 3.0f*delta*delta*(t - 16.0f/116.0f);
+            }
+        }
+    }
+
+    RGB lch_to_linear_srgb(float L, float C, float h_rads) {
+        // Lch -> Lab
+        float a = C * cosf(h_rads);
+        float b = C * sinf(h_rads);
+
+        // Lab -> XYZ
+        const float Xn = 0.95047f, Yn = 1.0f, Zn = 1.08883f;
+        float fY = (L + 16.0f) / 116.0f;
+        float fX = a / 500.0f + fY;
+        float fZ = fY - b / 200.0f;
+
+        float X = lab_f_inv(fX) * Xn;
+        float Y = lab_f_inv(fY) * Yn;
+        float Z = lab_f_inv(fZ) * Zn;
+
+        // XYZ -> linear sRGB
+        float r =  3.2404542f*X - 1.5371385f*Y - 0.4985314f*Z;
+        float g = -0.9692660f*X + 1.8760108f*Y + 0.0415560f*Z;
+        float b_srgb =  0.0556434f*X - 0.2040259f*Y + 1.0572252f*Z;
+        
+        return {r, g, b_srgb};
     }
 
     Halide::Runtime::Buffer<float, 4> generate_color_lut(const ProcessConfig& cfg, int size) {

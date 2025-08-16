@@ -26,7 +26,8 @@
  * which point is being dragged) is managed statically to persist across frames.
  *
  * ### Interaction Model
- * - **Add Point:** Single Left-Click on an empty area of the canvas.
+ * - **Add & Drag Point:** Press the Left Mouse Button on an empty area of the canvas
+ *   to create a new point and immediately begin dragging it.
  * - **Remove Point:** Single Right-Click on an existing control point.
  * - **Move Point:** Left-Click and Drag an existing control point. The hitbox for
  *   each point is a 5-pixel radius halo.
@@ -57,6 +58,8 @@
  *   the [0, 1] range, its visual handle is clamped to the canvas boundary. A faint
  *   "ghost line" is drawn to the point's true logical position, providing clear
  *   feedback for clipping or crushing blacks/whites.
+ * - **Y-Axis Clamping:** Only the endpoints of the tone curve can be dragged
+ *   vertically out of the visual bounds. Interior points are clamped.
  */
 class CurvesEditor {
 public:

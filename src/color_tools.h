@@ -105,15 +105,20 @@ namespace HalideColor {
 }
 
 
-// --- Host-side Color Grading LUT Generation ---
+// --- Host-side Color Tools (for UI and LUT Generation) ---
 // These are standard C++ functions for use by the host application (e.g. process, rawr).
 // They only require HalideBuffer.h and the runtime.
 namespace HostColor {
+    // A simple struct for passing RGB colors on the host.
+    struct RGB { float r, g, b; };
+
     // Generates a 3D LUT from the color parameters in the ProcessConfig.
     // The LUT maps input L*C*h* values to output L*C*h* values.
     // Dimensions are [L_in, C_in, h_in, 3], where the last dim is the output L'C'h' tuple.
     Halide::Runtime::Buffer<float, 4> generate_color_lut(const ProcessConfig& cfg, int size = 33);
+
+    // Converts a single Lch color to linear sRGB. Used by the UI.
+    RGB lch_to_linear_srgb(float L, float C, float h_rads);
 }
 
 #endif // COLOR_TOOLS_H
-

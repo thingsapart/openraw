@@ -3,37 +3,106 @@
 #include "../curves_editor.h"
 #include "../../tone_curve_utils.h"
 #include "imgui.h"
+#include "imgui_internal.h" // For ImLerp
 
 namespace { // Anonymous namespace for local helpers
 
 enum class CurveBackgroundType {
-    Luma,
+    LumaVsSat,
     Hue,
-    Saturation
+    SatVsSat
 };
 
-void DrawCurveBackground(ImDrawList* draw_list, ImVec2 pos, ImVec2 size, CurveBackgroundType type) {
-    ImU32 col_trans = IM_COL32(0,0,0,0);
-    if (type == CurveBackgroundType::Luma) {
-        ImU32 col_a = IM_COL32(20, 20, 22, 255);
-        ImU32 col_b = IM_COL32(230, 230, 235, 255);
-        draw_list->AddRectFilledMultiColor(pos, pos + size, col_a, col_b, col_b, col_a);
-    } else if (type == CurveBackgroundType::Hue) {
-        for (int i = 0; i < (int)size.x; ++i) {
-            float hue = (float)i / size.x;
-            ImVec4 rgb;
-            ImGui::ColorConvertHSVtoRGB(hue, 0.7f, 0.7f, rgb.x, rgb.y, rgb.z);
-            draw_list->AddLine(ImVec2(pos.x + i, pos.y), ImVec2(pos.x + i, pos.y + size.y), IM_COL32(rgb.x*255, rgb.y*255, rgb.z*255, 255));
+enum class HueSubType {
+    HvsH, HvsS, HvsL
+};
+
+
+void DrawCurveBackground(ImDrawList* draw_list, ImVec2 pos, ImVec2 size,
+                         CurveBackgroundType type, HueSubType sub_type,
+                         float default_y, float y_min, float y_max)
+{
+    if (type == CurveBackgroundType::LumaVsSat) {
+        for (int x = 0; x < (int)size.x; ++x) {
+            float luma = (float)x / (size.x - 1);
+            float h = 0.66f, s_bottom = 0.0f, s_top = 1.0f;
+            ImVec4 c1_rgb, c2_rgb;
+            ImGui::ColorConvertHSVtoRGB(h, s_bottom, luma, c1_rgb.x, c1_rgb.y, c1_rgb.z);
+            ImGui::ColorConvertHSVtoRGB(h, s_top, luma, c2_rgb.x, c2_rgb.y, c2_rgb.z);
+            draw_list->AddRectFilledMultiColor(ImVec2(pos.x + x, pos.y), ImVec2(pos.x + x + 1, pos.y + size.y),
+                                               IM_COL32(c2_rgb.x*255, c2_rgb.y*255, c2_rgb.z*255, 255),
+                                               IM_COL32(c2_rgb.x*255, c2_rgb.y*255, c2_rgb.z*255, 255),
+                                               IM_COL32(c1_rgb.x*255, c1_rgb.y*255, c1_rgb.z*255, 255),
+                                               IM_COL32(c1_rgb.x*255, c1_rgb.y*255, c1_rgb.z*255, 255));
         }
-    } else if (type == CurveBackgroundType::Saturation) {
-        ImU32 col_a = IM_COL32(128, 128, 128, 255); // Mid-gray for desaturated
-        ImU32 col_b = IM_COL32(230, 50, 50, 255);   // Saturated Red
-        draw_list->AddRectFilledMultiColor(pos, pos + size, col_a, col_b, col_b, col_a);
+    } else if (type == CurveBackgroundType::SatVsSat) {
+        ImVec4 c1, c2;
+        ImGui::ColorConvertHSVtoRGB(0.0f, 0.0f, 0.8f, c1.x, c1.y, c1.z); // Gray
+        ImGui::ColorConvertHSVtoRGB(0.0f, 1.0f, 0.8f, c2.x, c2.y, c2.z); // Red
+        draw_list->AddRectFilledMultiColor(pos, pos + size, 
+            IM_COL32(c1.x*255, c1.y*255, c1.z*255, 255),
+            IM_COL32(c2.x*255, c2.y*255, c2.z*255, 255),
+            IM_COL32(c2.x*255, c2.y*255, c2.z*255, 255),
+            IM_COL32(c1.x*255, c1.y*255, c1.z*255, 255));
+
+    } else if (type == CurveBackgroundType::Hue) {
+        const float strip_half_width = 10.0f;
+        const float opaque_half_width = 2.5f;
+        const float center_y_px = pos.y + size.y * (y_max - default_y) / (y_max - y_min);
+
+        for (int x = 0; x < (int)size.x; ++x) {
+            float h_norm_backend = (float)x / (size.x - 1.0f);
+            
+            // This logic converts the backend's normalized hue (0.5 = Red)
+            // to the display's HSV hue (0.0 = Red) for correct visualization.
+            float display_hue;
+            if (h_norm_backend < 0.5f) { // Blue -> Red
+                display_hue = ImLerp(0.666f, 1.0f, h_norm_backend / 0.5f);
+            } else { // Red -> Yellow -> Green
+                display_hue = ImLerp(0.0f, 0.333f, (h_norm_backend - 0.5f) / 0.5f);
+            }
+
+            for (int y = 0; y < (int)size.y; ++y) {
+                float y_norm = (float)y / (size.y - 1.0f);
+                float output_amount = ImLerp(y_max, y_min, y_norm);
+
+                float final_hue = display_hue, final_sat = 0.8f, final_val = 0.8f;
+                if (sub_type == HueSubType::HvsH) {
+                    final_hue = fmodf(display_hue + output_amount, 1.0f);
+                    if (final_hue < 0.0f) final_hue += 1.0f;
+                } else if (sub_type == HueSubType::HvsS) {
+                    final_sat = ImClamp(output_amount, 0.0f, 1.0f);
+                } else if (sub_type == HueSubType::HvsL) {
+                    final_val = ImClamp(0.5f + output_amount, 0.0f, 1.0f);
+                }
+
+                ImVec4 rgb_bg;
+                ImGui::ColorConvertHSVtoRGB(final_hue, final_sat, final_val, rgb_bg.x, rgb_bg.y, rgb_bg.z);
+                
+                float dist_from_center = fabsf((pos.y + y) - center_y_px);
+                float alpha = 0.0f;
+                if (dist_from_center < opaque_half_width) {
+                    alpha = 1.0f;
+                } else if (dist_from_center < strip_half_width) {
+                    alpha = 1.0f - (dist_from_center - opaque_half_width) / (strip_half_width - opaque_half_width);
+                }
+                
+                if (alpha > 0.0f) {
+                    ImVec4 rgb_strip;
+                    ImGui::ColorConvertHSVtoRGB(display_hue, 0.7f, 0.7f, rgb_strip.x, rgb_strip.y, rgb_strip.z);
+                    rgb_bg.x = ImLerp(rgb_bg.x, rgb_strip.x, alpha);
+                    rgb_bg.y = ImLerp(rgb_bg.y, rgb_strip.y, alpha);
+                    rgb_bg.z = ImLerp(rgb_bg.z, rgb_strip.z, alpha);
+                }
+                draw_list->AddRectFilled(ImVec2(pos.x + x, pos.y + y), ImVec2(pos.x + x + 1, pos.y + y + 1), IM_COL32(rgb_bg.x*255, rgb_bg.y*255, rgb_bg.z*255, 255));
+            }
+        }
     }
     draw_list->AddRect(pos, pos + size, IM_COL32(80, 80, 80, 255));
 }
 
-bool RenderCurveEditor(const char* id, std::vector<Point>& points, float default_y, bool is_additive, bool is_identity, float y_min, float y_max, CurveBackgroundType bg_type) {
+
+bool RenderCurveEditor(const char* id, std::vector<Point>& points, float default_y, bool is_additive, bool is_identity, float y_min, float y_max, CurveBackgroundType bg_type, HueSubType sub_type = HueSubType::HvsH) {
     // Ensure default points exist for interaction.
     if (points.empty()) {
         if (is_identity) {
@@ -53,13 +122,12 @@ bool RenderCurveEditor(const char* id, std::vector<Point>& points, float default
 
     // -- Background and Grid --
     ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
-    DrawCurveBackground(draw_list, canvas_pos, canvas_size, bg_type);
+    DrawCurveBackground(draw_list, canvas_pos, canvas_size, bg_type, sub_type, default_y, y_min, y_max);
     float y_center = canvas_pos.y + canvas_size.y * (y_max - default_y) / (y_max - y_min);
     draw_list->AddLine(ImVec2(canvas_pos.x, y_center), ImVec2(canvas_pos.x + canvas_size.x, y_center), IM_COL32(255, 255, 255, 100));
 
     // -- The Interactive Curve Widget --
-    CurvesEditor editor;
-    bool changed = editor.render(id, points, canvas_size, default_y, is_additive, is_identity, y_min, y_max);
+    bool changed = CurvesEditor::render(id, points, canvas_size, default_y, is_additive, is_identity, y_min, y_max);
     
     ImGui::PopID();
     return changed;
@@ -76,23 +144,23 @@ bool render_color_curves(AppState& state) {
     ImGui::BeginTabBar("ColorCurvesTabBar");
 
     if (ImGui::BeginTabItem("H vs H")) {
-        changed |= RenderCurveEditor("hvh", state.params.curve_hue_vs_hue, 0.0f, true, false, -0.5f, 0.5f, CurveBackgroundType::Hue);
+        changed |= RenderCurveEditor("hvh", state.params.curve_hue_vs_hue, 0.0f, true, false, -0.5f, 0.5f, CurveBackgroundType::Hue, HueSubType::HvsH);
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("H vs S")) {
-        changed |= RenderCurveEditor("hvs", state.params.curve_hue_vs_sat, 1.0f, false, false, 0.0f, 2.0f, CurveBackgroundType::Hue);
+        changed |= RenderCurveEditor("hvs", state.params.curve_hue_vs_sat, 1.0f, false, false, 0.0f, 2.0f, CurveBackgroundType::Hue, HueSubType::HvsS);
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("H vs L")) {
-        changed |= RenderCurveEditor("hvl", state.params.curve_hue_vs_lum, 0.0f, true, false, -0.5f, 0.5f, CurveBackgroundType::Hue);
+        changed |= RenderCurveEditor("hvl", state.params.curve_hue_vs_lum, 0.0f, true, false, -0.5f, 0.5f, CurveBackgroundType::Hue, HueSubType::HvsL);
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("L vs S")) {
-        changed |= RenderCurveEditor("lvs", state.params.curve_lum_vs_sat, 1.0f, false, false, 0.0f, 2.0f, CurveBackgroundType::Luma);
+        changed |= RenderCurveEditor("lvs", state.params.curve_lum_vs_sat, 1.0f, false, false, 0.0f, 2.0f, CurveBackgroundType::LumaVsSat);
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("S vs S")) {
-        changed |= RenderCurveEditor("svs", state.params.curve_sat_vs_sat, 1.0f, false, true, 0.0f, 1.0f, CurveBackgroundType::Saturation);
+        changed |= RenderCurveEditor("svs", state.params.curve_sat_vs_sat, 1.0f, false, true, 0.0f, 1.0f, CurveBackgroundType::SatVsSat);
         ImGui::EndTabItem();
     }
 
