@@ -28,3 +28,4 @@ inline Halide::Func pipeline_exposure(Halide::Func input,
 }
 
 #endif // STAGE_EXPOSURE_H
+

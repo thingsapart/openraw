@@ -20,7 +20,7 @@ public:
     DemosaicRI_T(Halide::Func deinterleaved, Halide::Var x_full, Halide::Var y_full, Halide::Var c_full) : qx("ri_qx"), qy("ri_qy") {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-        
+
         Halide::Type proc_type = deinterleaved.type();
 
         Func deinterleaved_f("deinterleaved_f_ri");
@@ -41,7 +41,7 @@ public:
             Func g_residual_gr("g_residual_gr"), g_residual_gb("g_residual_gb");
             g_residual_gr(qx, qy) = deinterleaved_f(qx, qy, 0) - avg(g_tentative_r(qx, qy), g_tentative_r(qx - 1, qy));
             g_residual_gb(qx, qy) = deinterleaved_f(qx, qy, 3) - avg(g_tentative_b(qx, qy), g_tentative_b(qx, qy + 1));
-            
+
             // Interpolate the residuals
             Func g_residual_interp_r("g_residual_interp_r"), g_residual_interp_b("g_residual_interp_b");
             g_residual_interp_r(qx, qy) = avg(g_residual_gr(qx, qy), g_residual_gr(qx - 1, qy));
@@ -100,3 +100,4 @@ public:
 };
 
 #endif // DEMOSAIC_RI_H
+

@@ -7,12 +7,14 @@
 #include <chrono>  // For timing
 #include <limits>  // For numeric_limits
 #include <cmath>   // for powf
+#include <iomanip> // for std::setprecision
 
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
 #include "tone_curve_utils.h"
 #include "process_options.h" // Use the new shared header
+#include "color_tools.h"     // For LUT generation
 
 // Conditionally include the generated pipeline headers based on the
 // macro defined by CMake.
@@ -36,6 +38,41 @@
 
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
+
+// --- DEBUG HELPER ---
+void print_lut_sample(const Buffer<float, 4>& lut) {
+    const int size = lut.dim(0).extent();
+    const int mid = size / 2;
+    const int end = size - 1;
+
+    printf("\n--- 3D LUT Sample (L*, C*, h*) ---\n");
+    printf("        Input Lch             |         Output L'c'h'\n");
+    printf("------------------------------|----------------------------------\n");
+
+    auto print_row = [&](int l, int c, int h, const std::string& label) {
+        float l_in = (float)l/(size-1)*100;
+        float c_in = (float)c/(size-1)*150;
+        float h_in = ((float)h/(size-1)*360)-180;
+
+        float l_out = lut(l, c, h, 0);
+        float c_out = lut(l, c, h, 1);
+        float h_out_rad = lut(l, c, h, 2);
+        float h_out_deg = h_out_rad * 180.0f / M_PI;
+
+        printf("%-8s: (%6.2f, %6.2f, %6.1f) | (%6.2f, %6.2f, %7.1f deg)\n",
+               label.c_str(), l_in, c_in, h_in, l_out, c_out, h_out_deg);
+    };
+
+    print_row(0, mid, mid, "Black");
+    print_row(mid, 0, mid, "Gray");
+    print_row(end, mid, mid, "White");
+    print_row(mid, mid, mid, "Mid Sat");
+    print_row(mid, end, mid, "High Sat");
+    print_row(mid, mid, 0, "Red Hue");
+    print_row(mid, mid, size/3, "Green Hue");
+    printf("-----------------------------------------------------------------\n\n");
+}
+
 
 int main(int argc, char **argv) {
     if (argc == 1) {
@@ -77,6 +114,10 @@ int main(int argc, char **argv) {
     Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
     Buffer<uint16_t, 2> tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
+    Buffer<float, 4> color_grading_lut = HostColor::generate_color_lut(cfg);
+
+    // Print a sample of the LUT for debugging.
+    print_lut_sample(color_grading_lut);
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
@@ -109,6 +150,7 @@ int main(int argc, char **argv) {
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              color_grading_lut,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
@@ -117,6 +159,7 @@ int main(int argc, char **argv) {
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              color_grading_lut,
                               output);
         #endif
         output.device_sync();

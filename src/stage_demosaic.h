@@ -21,24 +21,24 @@ class DemosaicDispatcherT {
 public:
     // The final, selected output Func
     Halide::Func output;
-    
+
     // A collection of ALL intermediate Funcs from ALL possible algorithms.
     // This is needed so the generator can schedule them.
     std::vector<Halide::Func> all_intermediates;
 
     DemosaicDispatcherT(Halide::Func deinterleaved, Halide::Expr algo_id, Halide::Var x, Halide::Var y, Halide::Var c) {
-        
+
         // --- Instantiate all demosaic algorithms ---
-        
+
         // Algorithm 0: AHD
         DemosaicAHD_T<T> ahd_builder(deinterleaved, x, y, c);
-        
+
         // Algorithm 1: LMMSE
         DemosaicLMMSE_T<T> lmmse_builder(deinterleaved, x, y, c);
-        
+
         // Algorithm 2: RI
         DemosaicRI_T<T> ri_builder(deinterleaved, x, y, c);
-        
+
         // Algorithm 3: Fast (the original algorithm)
         DemosaicFastT<T> fast_builder(deinterleaved, x, y, c);
 
@@ -50,7 +50,7 @@ public:
             algo_id == 2, ri_builder.output(x, y, c),        // if 2, use RI
                           fast_builder.output(x, y, c)       // else, use Fast
         );
-        
+
         // --- Collect all intermediates for the scheduler ---
         all_intermediates.insert(all_intermediates.end(), ahd_builder.intermediates.begin(), ahd_builder.intermediates.end());
         all_intermediates.insert(all_intermediates.end(), lmmse_builder.intermediates.begin(), lmmse_builder.intermediates.end());
@@ -60,3 +60,4 @@ public:
 };
 
 #endif // STAGE_DEMOSAIC_H
+

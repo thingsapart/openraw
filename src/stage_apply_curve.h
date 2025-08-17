@@ -24,7 +24,7 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
     return curved;
 #else
     Func curved("curved");
-    
+
     Expr val = input(x, y, c);
     Expr norm_val;
 
@@ -40,7 +40,7 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
     // Use the normalized value to index into the LUT.
     Expr lut_f_idx = clamp(norm_val, 0.0f, 1.0f) * (lut_size - 1.0f);
     Expr lut_idx = cast<int>(lut_f_idx);
-    
+
     Expr lut_val = lut(lut_idx, c);
 
     if (std::is_same<T, float>::value) {
@@ -55,9 +55,10 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
         // The LUT is passed as an Input, so we just need to ensure it's copied to the GPU.
         // Halide handles this automatically. No scheduling for the LUT itself is needed here.
     }
-    
+
     return curved;
 #endif
 }
 
 #endif // STAGE_APPLY_CURVE_H
+

@@ -39,7 +39,7 @@ struct ProcessConfig {
     int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma
     float gamma = 2.2f;
     float contrast = 50.0f;
-    
+
     // Curve points are now stored as vectors of points after parsing.
     // "luma" is the fallback/master, the others are overrides.
     std::vector<Point> curve_points_luma;
@@ -48,6 +48,20 @@ struct ProcessConfig {
     std::vector<Point> curve_points_b;
 
     int curve_mode = 1; // 0=Luma, 1=RGB
+
+    // --- New Color Grading parameters ---
+    Point shadows_wheel = {0.f, 0.f};
+    float shadows_luma = 0.f;
+    Point midtones_wheel = {0.f, 0.f};
+    float midtones_luma = 0.f;
+    Point highlights_wheel = {0.f, 0.f};
+    float highlights_luma = 0.f;
+
+    std::vector<Point> curve_hue_vs_hue;
+    std::vector<Point> curve_hue_vs_sat;
+    std::vector<Point> curve_hue_vs_lum;
+    std::vector<Point> curve_lum_vs_sat;
+    std::vector<Point> curve_sat_vs_sat;
 };
 
 
@@ -60,3 +74,4 @@ void print_usage();
 
 
 #endif // PROCESS_OPTIONS_H
+

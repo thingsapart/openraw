@@ -52,3 +52,4 @@ inline Halide::Expr smoothstep(Halide::Expr edge0, Halide::Expr edge1, Halide::E
 }
 
 #endif // PIPELINE_HELPERS_H
+

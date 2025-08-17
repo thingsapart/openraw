@@ -27,3 +27,4 @@ inline Halide::Func pipeline_deinterleave(Halide::Func raw, Halide::Var x, Halid
 }
 
 #endif // STAGE_DEINTERLEAVE_H
+

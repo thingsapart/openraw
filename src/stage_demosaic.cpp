@@ -22,7 +22,7 @@ DemosaicBuilder::DemosaicBuilder(Func deinterleaved, Var x, Var y, Var c, Expr a
     // Clamp the input deinterleaved Func to handle boundary conditions robustly.
     Region bounds = {{Expr(0), width / 2}, {Expr(0), height / 2}, {Expr(0), 4}};
     Func deinterleaved_clamped = Halide::BoundaryConditions::repeat_edge(deinterleaved, bounds);
-    
+
     // --- Define all algorithm paths ---
     simple_output = Func("demosaiced_simple");
     vhg_output = Func("demosaiced_vhg");
@@ -63,7 +63,7 @@ void DemosaicBuilder::build_simple(Func result, Func deinterleaved, Var x, Var y
     Func g_gr("g_gr_s"), r_r("r_r_s"), b_b("b_b_s"), g_gb("g_gb_s");
     g_gr(qx, qy) = deinterleaved(qx, qy, 0); r_r(qx, qy)  = deinterleaved(qx, qy, 1);
     b_b(qx, qy) = deinterleaved(qx, qy, 2); g_gb(qx, qy) = deinterleaved(qx, qy, 3);
-    
+
     Func g_at_r("g_at_r_s"), g_at_b("g_at_b_s");
     g_at_r(qx, qy) = (deinterleaved(qx, qy - 1, 3) + deinterleaved(qx, qy, 3) + deinterleaved(qx + 1, qy, 0) + deinterleaved(qx, qy, 0)) / 4.f;
     g_at_b(qx, qy) = (deinterleaved(qx, qy + 1, 0) + deinterleaved(qx, qy, 0) + deinterleaved(qx - 1, qy, 3) + deinterleaved(qx, qy, 3)) / 4.f;
@@ -190,7 +190,7 @@ void DemosaicBuilder::build_amaze(Func result, Func deinterleaved, Var x, Var y,
     Func rg_at_g("rg_at_g"), bg_at_g("bg_at_g");
     rg_at_g(qx, qy) = (R_minus_G(qx-1, qy) + R_minus_G(qx, qy))/2.f;
     bg_at_g(qx, qy) = (B_minus_G(qx, qy-1) + B_minus_G(qx, qy))/2.f;
-    
+
     // STEP 4: Interpolate color differences to missing color locations (R at B, B at R).
     Func rg_at_b("rg_at_b"), bg_at_r("bg_at_r");
     Expr rg_d1 = (R_minus_G(qx-1, qy) + R_minus_G(qx, qy+1))/2.f;
@@ -208,11 +208,12 @@ void DemosaicBuilder::build_amaze(Func result, Func deinterleaved, Var x, Var y,
     // STEP 5: Interleave the color difference channels.
     Func R_G_full = interleave(rg_at_g, R_minus_G, rg_at_b, rg_at_g);
     Func B_G_full = interleave(bg_at_g, bg_at_r, B_minus_G, bg_at_g);
-    
+
     // STEP 6: Reconstruct final R and B channels.
     Func r_full, b_full;
     r_full(x, y) = g_full(x, y) + R_G_full(x, y);
     b_full(x, y) = g_full(x, y) + B_G_full(x, y);
-    
+
     result(x, y, c) = mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)});
 }
+

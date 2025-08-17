@@ -32,7 +32,7 @@ public:
         // Algorithmic parameters
         // h is the filtering parameter, linked to user strength.
         // A base_h of 0.6 is a reasonable starting point for VST data with sigma ~1.
-        Expr h = 0.6f * strength * strength; 
+        Expr h = 0.6f * strength * strength;
         Expr h2 = h*h;
         // Avoid division by zero if strength is zero
         Expr inv_h2 = select(h2 > 0.f, 1.0f / h2, 0.f);
@@ -55,16 +55,16 @@ public:
         Expr ssd = ssd_func(x, y, r_search.x, r_search.y);
         Expr patch_area = cast<float>(patch_size * patch_size);
         Expr w = exp(-ssd * inv_h2 / patch_area);
-        
+
         // Sum of weights and sum of weighted pixel values over the search window.
         Func total_weight("nlmeans_total_weight");
         total_weight(x, y) = sum(w, "nl_total_weight_sum");
         fine_intermediates.push_back(total_weight);
-        
+
         Func weighted_sum("nlmeans_weighted_sum");
         weighted_sum(x, y) = sum(w * clamped(x + r_search.x, y + r_search.y), "nl_weighted_sum");
         fine_intermediates.push_back(weighted_sum);
-        
+
         // The final NL-Means result is the normalized sum
         output = Func("denoise_nlmeans_result");
         output(x, y) = weighted_sum(x, y) / total_weight(x, y);
@@ -72,3 +72,4 @@ public:
 };
 
 #endif // DENOISE_NLMEANS_H
+

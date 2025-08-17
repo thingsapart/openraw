@@ -24,7 +24,7 @@ public:
 
         Func deinterleaved_f("deinterleaved_f_fast");
         deinterleaved_f(qx, qy, c_full) = cast<float>(deinterleaved(qx, qy, c_full));
-        
+
         // --- High-quality Green interpolation
         Func g_at_r("g_at_r_fast"), g_at_b("g_at_b_fast");
         {
@@ -70,7 +70,7 @@ public:
 
             Expr green_correction_r_gb = gb_val - avg(g_at_r(qx, qy), g_at_r(qx, qy + 1));
             r_at_gb(qx, qy) = green_correction_r_gb + avg(r_val, deinterleaved_f(qx, qy + 1, 1));
-            
+
             Expr green_correction_b_gb = gb_val - avg(g_at_b(qx, qy), g_at_b(qx + 1, qy));
             b_at_gb(qx, qy) = green_correction_b_gb + avg(b_val, deinterleaved_f(qx + 1, qy, 2));
         }
@@ -95,7 +95,7 @@ public:
             Expr bp_r = g_at_r(qx, qy) - avg(g_at_b(qx, qy), g_at_b(qx + 1, qy - 1));
             bp_r += avg(deinterleaved_f(qx, qy, 2), deinterleaved_f(qx+1, qy-1, 2));
             Expr bpd_r = absd(deinterleaved_f(qx, qy, 2), deinterleaved_f(qx+1, qy-1, 2));
-            
+
             Expr bn_r = g_at_r(qx, qy) - avg(g_at_b(qx+1, qy), g_at_b(qx, qy-1));
             bn_r += avg(deinterleaved_f(qx+1, qy, 2), deinterleaved_f(qx, qy-1, 2));
             Expr bnd_r = absd(deinterleaved_f(qx+1, qy, 2), deinterleaved_f(qx, qy-1, 2));
@@ -131,3 +131,4 @@ public:
 };
 
 #endif // DEMOSAIC_FAST_H
+

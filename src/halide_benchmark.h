@@ -145,3 +145,4 @@ inline BenchmarkResult benchmark(const std::function<void()> &op, const Benchmar
 }  // namespace Halide
 
 #endif
+

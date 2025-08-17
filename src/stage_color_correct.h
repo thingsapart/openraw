@@ -55,10 +55,10 @@ public:
         Expr r_f_sensor = cc_matrix(3, 0) + cc_matrix(0, 0) * ir_sensor + cc_matrix(1, 0) * ig_sensor + cc_matrix(2, 0) * ib_sensor;
         Expr g_f_sensor = cc_matrix(3, 1) + cc_matrix(0, 1) * ir_sensor + cc_matrix(1, 1) * ig_sensor + cc_matrix(2, 1) * ib_sensor;
         Expr b_f_sensor = cc_matrix(3, 2) + cc_matrix(0, 2) * ir_sensor + cc_matrix(1, 2) * ig_sensor + cc_matrix(2, 2) * ib_sensor;
-        
+
         // Apply tint in the same space
         g_f_sensor = g_f_sensor * (1.0f - tint);
-        
+
         // Normalize the result to [0,1]
         Expr inv_range = 1.0f / range;
         Expr r_f_norm = (r_f_sensor - blackLevel) * inv_range;
@@ -77,3 +77,4 @@ public:
 };
 
 #endif // STAGE_COLOR_CORRECT_H
+

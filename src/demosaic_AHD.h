@@ -18,7 +18,7 @@ public:
     DemosaicAHD_T(Halide::Func deinterleaved, Halide::Var x_full, Halide::Var y_full, Halide::Var c_full) : qx("ahd_qx"), qy("ahd_qy") {
         using namespace Halide;
         using namespace Halide::ConciseCasts;
-        
+
         Halide::Type proc_type = deinterleaved.type();
 
         Func deinterleaved_f("deinterleaved_f_ahd");
@@ -31,7 +31,7 @@ public:
             Expr gb_c = deinterleaved_f(qx, qy, 3);
             Expr gr_c = deinterleaved_f(qx, qy, 0);
             Expr gr_cp1 = deinterleaved_f(qx + 1, qy, 0);
-            
+
             Expr gv_r = avg(gb_cm1, gb_c);
             Expr gvd_r = absd(gb_cm1, gb_c);
             Expr gh_r = avg(gr_cp1, gr_c);
@@ -40,7 +40,7 @@ public:
 
             Expr gr_cp1_v = deinterleaved_f(qx, qy + 1, 0);
             Expr gb_cm1_h = deinterleaved_f(qx - 1, qy, 3);
-            
+
             Expr gv_b = avg(gr_cp1_v, gr_c);
             Expr gvd_b = absd(gr_cp1_v, gr_c);
             Expr gh_b = avg(gb_cm1_h, gb_c);
@@ -64,7 +64,7 @@ public:
 
             Expr green_correction_r = gr_val - avg(g_at_r(qx, qy), g_at_r(qx-1, qy));
             Expr green_correction_b = gr_val - avg(g_at_b(qx, qy), g_at_b(qx, qy-1));
-            
+
             r_at_g(qx, qy) = r_at_gr_h + green_correction_r;
             b_at_g(qx, qy) = b_at_gr_v + green_correction_b;
         }
@@ -103,7 +103,7 @@ public:
         b_at_r.compute_inline();
         intermediates.push_back(r_at_b);
         intermediates.push_back(b_at_r);
-        
+
         Func green("green_ahd");
         green(x_full, y_full) = mux(y_full % 2,
                                    {mux(x_full % 2, {deinterleaved_f(x_full/2, y_full/2, 0), g_at_r(x_full/2, y_full/2)}),
@@ -130,3 +130,4 @@ public:
 };
 
 #endif // DEMOSAIC_AHD_H
+

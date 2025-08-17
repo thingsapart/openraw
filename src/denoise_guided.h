@@ -40,11 +40,11 @@ private:
         Func mean_II = box_filter_2d(box_II, R, R, "denoise_mean_II" + suffix);
         path_coarse.push_back(mean_I);
         path_coarse.push_back(mean_II);
-        
+
         Func var_I("var_I_denoise" + suffix);
         var_I(xi, yi) = mean_II(xi, yi) - mean_I(xi, yi) * mean_I(xi, yi);
         path_coarse.push_back(var_I);
-        
+
         Func a("a_denoise" + suffix);
         a(xi, yi) = var_I(xi, yi) / (var_I(xi, yi) + eps);
         path_coarse.push_back(a);
@@ -52,13 +52,13 @@ private:
         Func b("b_denoise" + suffix);
         b(xi, yi) = mean_I(xi, yi) * (1.0f - a(xi, yi));
         path_coarse.push_back(b);
-        
+
         Func upsampled_a("upsampled_a_denoise" + suffix), upsampled_b("upsampled_b_denoise" + suffix);
         upsampled_a(x, y) = a(x / subsample, y / subsample);
         upsampled_b(x, y) = b(x / subsample, y / subsample);
         path_fine.push_back(upsampled_a);
         path_fine.push_back(upsampled_b);
-        
+
         Func result("denoise_guided_result" + suffix);
         result(x, y) = upsampled_a(x, y) * guide(x, y) + upsampled_b(x, y);
 
@@ -73,7 +73,7 @@ public:
     DenoiseGuidedBuilder_T(Halide::Func vst_transformed,
                            Halide::Expr radius_expr,
                            Halide::Var x, Halide::Var y) {
-        
+
         float eps = 0.0001f;
         int s = 2; // Subsampling factor
 
@@ -95,7 +95,7 @@ public:
         coarse_intermediates.insert(coarse_intermediates.end(), path1.coarse_intermediates.begin(), path1.coarse_intermediates.end());
         coarse_intermediates.insert(coarse_intermediates.end(), path2.coarse_intermediates.begin(), path2.coarse_intermediates.end());
         coarse_intermediates.insert(coarse_intermediates.end(), path4.coarse_intermediates.begin(), path4.coarse_intermediates.end());
-        
+
         fine_intermediates.insert(fine_intermediates.end(), path1.fine_intermediates.begin(), path1.fine_intermediates.end());
         fine_intermediates.insert(fine_intermediates.end(), path2.fine_intermediates.begin(), path2.fine_intermediates.end());
         fine_intermediates.insert(fine_intermediates.end(), path4.fine_intermediates.begin(), path4.fine_intermediates.end());
@@ -103,3 +103,4 @@ public:
 };
 
 #endif // DENOISE_GUIDED_H
+

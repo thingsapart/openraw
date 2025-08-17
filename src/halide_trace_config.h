@@ -557,3 +557,4 @@ struct FuncTypeAndDim {
 }  // namespace Halide
 
 #endif  // HALIDE_TRACE_CONFIG_H
+

@@ -19,6 +19,8 @@
 #include "stage_sharpen.h"
 #include "stage_local_adjust_laplacian.h" // The new stage
 #include "stage_apply_curve.h"
+#include "color_tools.h"
+#include "stage_color_grading.h"
 
 #include "pipeline_schedule.h"
 
@@ -66,6 +68,10 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_highlights{"ll_highlights"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_blacks{"ll_blacks"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_whites{"ll_whites"};
+
+    // New input for global color grading
+    typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 4>> color_grading_lut{"color_grading_lut"};
+
 
     // --- Output ---
     typename Generator<CameraPipeGenerator<T>>::template Output<Buffer<uint8_t, 3>> processed{"processed"};
@@ -123,44 +129,56 @@ public:
                                                        color_temp, tint, x, y, c, whiteLevel, blackLevel);
         Func corrected_hi_fi = color_correct_builder.output;
 
-        SharpenBuilder_T<T> sharpen_builder(corrected_hi_fi, sharpen_strength, sharpen_radius, sharpen_threshold,
-                                            out_width, out_height, x, y, c);
-        Func sharpened = sharpen_builder.output;
-
-        // --- Local Laplacian Stage ---
-        // Create a normalized float version of the input for the builder.
-        Func laplacian_input("laplacian_input");
+        // Create a normalized float version of the input for subsequent stages.
+        Func corrected_f("corrected_f");
         if (std::is_same<T, float>::value) {
-            laplacian_input(x, y, c) = sharpened(x, y, c);
+            corrected_f(x, y, c) = corrected_hi_fi(x, y, c);
         } else {
-            laplacian_input(x, y, c) = cast<float>(sharpened(x, y, c)) / 65535.0f;
+            corrected_f(x, y, c) = cast<float>(corrected_hi_fi(x, y, c)) / 65535.0f;
         }
 
-        // The builder is now untemplated and works only on normalized floats.
+        // --- COLOR PROCESSING PIPELINE (Corrected Order) ---
+        // 1. Convert from linear sRGB to L*C*h*.
+        Func srgb_to_lch = HalideColor::linear_srgb_to_lch(corrected_f, x, y, c);
+        
+        // 2. Perform local adjustments. This stage now correctly modifies only the
+        //    L channel and passes the original C and h channels through.
         const int J = 8;
-        const int cutover_level = 3; // Set J < cutover_level to test the pure hi-fi path
+        const int cutover_level = 3;
         LocalLaplacianBuilder local_laplacian_builder(
-            laplacian_input, raw_bounded, color_correct_builder.cc_matrix,
+            srgb_to_lch,
+            raw_bounded, color_correct_builder.cc_matrix,
             x, y, c,
             ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
             blackLevel, whiteLevel,
             out_width, out_height, full_res_width, full_res_height, downscale_factor,
             J, cutover_level);
-        Func local_adjustments_f = local_laplacian_builder.output;
+        Func lch_local_adjusted = local_laplacian_builder.output;
 
-        // Convert the float output back to the pipeline's processing type.
-        Func local_adjustments("local_adjustments");
+        // 3. Apply the global 3D LUT for color grading. This operates on the L'-adjusted LCH data.
+        ColorGradeBuilder color_grade_builder(lch_local_adjusted, color_grading_lut, color_grading_lut.dim(0).extent(), x, y, c);
+        Func lch_final = color_grade_builder.output;
+
+        // 4. Convert the final L''C''H'' back to linear sRGB.
+        Func graded_srgb = HalideColor::lch_to_linear_srgb(lch_final, x, y, c);
+
+        // Convert the float output back to the pipeline's processing type for sharpening.
+        Func graded_srgb_proc_type("graded_srgb_proc_type");
         if (std::is_same<T, float>::value) {
-            local_adjustments(x, y, c) = local_adjustments_f(x, y, c);
+            graded_srgb_proc_type(x, y, c) = graded_srgb(x, y, c);
         } else {
-            local_adjustments(x, y, c) = u16_sat(local_adjustments_f(x, y, c) * 65535.0f);
+            graded_srgb_proc_type(x, y, c) = u16_sat(graded_srgb(x, y, c) * 65535.0f);
         }
+        
+        SharpenBuilder_T<T> sharpen_builder(graded_srgb_proc_type, sharpen_strength, sharpen_radius, sharpen_threshold,
+                                            out_width, out_height, x, y, c);
+        Func sharpened = sharpen_builder.output;
 
         Func tone_curve_func("tone_curve_func");
         Var lut_x("lut_x_var"), lut_c("lut_c_var");
         tone_curve_func(lut_x, lut_c) = tone_curve_lut(lut_x, lut_c);
 
-        Func curved = pipeline_apply_curve<T>(local_adjustments, blackLevel, whiteLevel,
+        Func curved = pipeline_apply_curve<T>(sharpened, blackLevel, whiteLevel,
                                            tone_curve_func, tone_curve_lut.dim(0).extent(), x, y, c,
                                            this->get_target(), this->using_autoscheduler());
 
@@ -181,9 +199,7 @@ public:
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
-        // The output estimate must not depend on an Input parameter for the autoscheduler,
-        // so we use the full-resolution estimates. Halide's bounds inference will
-        // handle the actual size during JIT compilation.
+        color_grading_lut.set_estimates({{0, 33}, {0, 33}, {0, 33}, {0, 3}});
         final_stage.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
         // ========== SCHEDULE ==========
@@ -192,7 +208,8 @@ public:
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
             downscaled, is_no_op, resize_builder,
             corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
-            color_correct_builder, tone_curve_func, halide_proc_type,
+            color_correct_builder, tone_curve_func, lch_final,
+            srgb_to_lch, graded_srgb, halide_proc_type,
             x, y, c, xo, xi, yo, yi,
             J, cutover_level);
 

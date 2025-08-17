@@ -29,28 +29,28 @@ public:
                          const std::string& name_prefix,
                          Halide::Expr input_width, Halide::Expr input_height,
                          Halide::Expr output_width, Halide::Expr output_height,
-                         Halide::Var x, Halide::Var y, Halide::Var c) 
+                         Halide::Var x, Halide::Var y, Halide::Var c)
         : output(name_prefix + "_output"),
           interp_y(name_prefix + "_interp_y"),
           x_coord(name_prefix + "_x_coord")
     {
         using namespace Halide;
-    
+
         // Calculate scale factors.
         Expr scale_x = cast<float>(input_width) / output_width;
         Expr scale_y = cast<float>(input_height) / output_height;
-        
+
         // Get source coordinates for a given output pixel (x, y).
         Expr src_x = (cast<float>(x) + 0.5f) * scale_x - 0.5f;
         Expr src_y = (cast<float>(y) + 0.5f) * scale_y - 0.5f;
-        
+
         Expr ix = cast<int>(floor(src_x));
         Expr iy = cast<int>(floor(src_y));
         Expr fx = src_x - ix;
         Expr fy = src_y - iy;
-        
+
         Func clamped = BoundaryConditions::repeat_edge(input, {{0, input_width}, {0, input_height}});
-        
+
         // --- Pass 1: Interpolate vertically ---
         // This Func computes an interpolated value for any input column `x_coord`
         // at the vertical position `y` from the final output grid.
@@ -61,7 +61,7 @@ public:
             clamped(x_coord, iy + 2, c),
             fy
         );
-        
+
         // --- Pass 2: Interpolate horizontally ---
         // This is the final output Func. It calls the first-pass Func four times
         // to get the vertically-interpolated values for the four neighboring columns.
@@ -76,3 +76,4 @@ public:
 };
 
 #endif // STAGE_RESIZE_H
+

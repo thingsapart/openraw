@@ -21,7 +21,7 @@ public:
 
     GuidedFilter2DBuilder(Halide::Func image, Halide::Func guide, Halide::Var x, Halide::Var y, int radius, Halide::Expr eps) {
         using namespace Halide;
-        
+
         std::string prefix = "gf2d_r" + std::to_string(radius);
 
         int s = 1; // No subsampling for denoising for max quality
@@ -55,7 +55,7 @@ public:
         Func upsampled_a(prefix + "_upsampled_a"), upsampled_b(prefix + "_upsampled_b");
         upsampled_a(x, y) = a(x / s, y / s);
         upsampled_b(x, y) = b(x / s, y / s);
-        
+
         // Schedule all intermediates to be inlined to form a single expression tree.
         small_guide.compute_inline();
         small_image.compute_inline();
@@ -97,7 +97,7 @@ public:
         using namespace Halide::ConciseCasts;
 
         // The input is already a normalized [0,1] float.
-        
+
         // --- 1. Apply Variance-Stabilizing Transform (Anscombe) ---
         Func vst("vst");
         vst(x, y) = 2.0f * sqrt(max(0.0f, input_float(x, y)) + 3.0f/8.0f);
@@ -117,7 +117,7 @@ public:
         // --- 4. Blend with original based on strength ---
         Func blended("denoise_blended");
         blended(x, y) = lerp(input_float(x, y), inv_vst(x, y), strength);
-        
+
         // Inline the entire chain of operations to create one large expression
         // for the final output. This is what allows specialize() to work.
         vst.compute_inline();
@@ -152,7 +152,7 @@ public:
         Func input_f("denoise_input_f");
         Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
         input_f(x, y) = (cast<float>(input_raw(x, y)) - blackLevel) * inv_range;
-        
+
         // --- 2. Apply Variance-Stabilizing Transform (Anscombe) ---
         Func vst("vst");
         vst(x, y) = 2.0f * sqrt(max(0.0f, input_f(x, y)) + 3.0f/8.0f);
@@ -172,7 +172,7 @@ public:
         // --- 5. Blend with original based on strength ---
         Func blended("denoise_blended");
         blended(x, y) = lerp(input_f(x, y), inv_vst(x, y), strength);
-        
+
         // Inline the entire chain of operations to create one large expression
         // for the final output. This is what allows specialize() to work.
         input_f.compute_inline();
@@ -196,3 +196,4 @@ public:
 };
 
 #endif // STAGE_DENOISE_H
+

@@ -2,6 +2,15 @@
 #include "tone_curve_utils.h"
 #include <iostream>
 #include <algorithm>
+#include <sstream>
+
+// Helper to parse a string "x,y" into a Point struct
+static bool parse_point(const std::string& s, Point& p) {
+    std::stringstream ss(s);
+    char comma;
+    ss >> p.x >> comma >> p.y;
+    return !ss.fail() && comma == ',';
+}
 
 void print_usage() {
     printf("Usage: ./process --input <raw.png> --output <out.png> [options]\n\n"
@@ -28,6 +37,18 @@ void print_usage() {
            "  --ll-highlights <val>  Highlight recovery, -100 to 100 (default: 0).\n"
            "  --ll-blacks <val>      Adjust black point, -100 to 100 (default: 0).\n"
            "  --ll-whites <val>      Adjust white point, -100 to 100 (default: 0).\n\n"
+           "Color Grading Options:\n"
+           "  --shadows-wheel <x,y>  Color wheel offset for shadows (e.g., \"0.1,-0.05\").\n"
+           "  --shadows-luma <val>   Luminance adjustment for shadows.\n"
+           "  --midtones-wheel <x,y> Color wheel offset for midtones.\n"
+           "  --midtones-luma <val>  Luminance adjustment for midtones.\n"
+           "  --highlights-wheel <x,y> Color wheel offset for highlights.\n"
+           "  --highlights-luma <val> Luminance adjustment for highlights.\n"
+           "  --h-vs-h <pts>         Hue vs Hue curve points, e.g. \"0:0,0.5:0.1,1:0\".\n"
+           "  --h-vs-s <pts>         Hue vs Sat curve points.\n"
+           "  --h-vs-l <pts>         Hue vs Luma curve points.\n"
+           "  --l-vs-s <pts>         Luma vs Sat curve points.\n"
+           "  --s-vs-s <pts>         Sat vs Sat curve points.\n\n"
            "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
@@ -52,7 +73,7 @@ ProcessConfig parse_args(int argc, char **argv) {
     if (argc > 1 && argv[1][0] != '-') {
         cfg.input_path = argv[1];
     }
-    
+
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -88,7 +109,7 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
         if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);
-        
+
         // --- Curve Parsing ---
         // Parse strings immediately into the vector<Point> representation.
         if (args.count("curve-points")) {
@@ -128,9 +149,24 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("ll-blacks")) cfg.ll_blacks = std::stof(args["ll-blacks"]);
         if (args.count("ll-whites")) cfg.ll_whites = std::stof(args["ll-whites"]);
 
+        // Color Grading arguments
+        if (args.count("shadows-wheel")) parse_point(args["shadows-wheel"], cfg.shadows_wheel);
+        if (args.count("shadows-luma")) cfg.shadows_luma = std::stof(args["shadows-luma"]);
+        if (args.count("midtones-wheel")) parse_point(args["midtones-wheel"], cfg.midtones_wheel);
+        if (args.count("midtones-luma")) cfg.midtones_luma = std::stof(args["midtones-luma"]);
+        if (args.count("highlights-wheel")) parse_point(args["highlights-wheel"], cfg.highlights_wheel);
+        if (args.count("highlights-luma")) cfg.highlights_luma = std::stof(args["highlights-luma"]);
+
+        if (args.count("h-vs-h")) ToneCurveUtils::parse_curve_points(args["h-vs-h"], cfg.curve_hue_vs_hue);
+        if (args.count("h-vs-s")) ToneCurveUtils::parse_curve_points(args["h-vs-s"], cfg.curve_hue_vs_sat);
+        if (args.count("h-vs-l")) ToneCurveUtils::parse_curve_points(args["h-vs-l"], cfg.curve_hue_vs_lum);
+        if (args.count("l-vs-s")) ToneCurveUtils::parse_curve_points(args["l-vs-s"], cfg.curve_lum_vs_sat);
+        if (args.count("s-vs-s")) ToneCurveUtils::parse_curve_points(args["s-vs-s"], cfg.curve_sat_vs_sat);
+
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Error parsing arguments: ") + e.what());
     }
 
     return cfg;
 }
+

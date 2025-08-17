@@ -45,7 +45,7 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
 
         Expr l = (c_max + c_min) / 2.0f;
         Expr s = select(delta < 1e-6f, 0.0f, delta / (1.0f - abs(2.0f * l - 1.0f)));
-        
+
         Expr h_intermediate = select(c_max == r_norm, halide_fmod((g_norm - b_norm) / delta, 6.0f),
                                 select(c_max == g_norm, (b_norm - r_norm) / delta + 2.0f,
                                                      (r_norm - g_norm) / delta + 4.0f));
@@ -57,7 +57,7 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr c_hsl = (1.0f - abs(2.0f * l - 1.0f)) * new_s;
         Expr x_hsl = c_hsl * (1.0f - abs(halide_fmod(h / 60.0f, 2.0f) - 1.0f));
         Expr m_hsl = l - c_hsl / 2.0f;
-        
+
         Expr r_hsl = select(h < 60.0f, c_hsl, select(h < 120.0f, x_hsl, select(h < 180.0f, 0.0f, select(h < 240.0f, 0.0f, select(h < 300.0f, x_hsl, c_hsl)))));
         Expr g_hsl = select(h < 60.0f, x_hsl, select(h < 120.0f, c_hsl, select(h < 180.0f, c_hsl, select(h < 240.0f, x_hsl, select(h < 300.0f, 0.0f, 0.0f)))));
         Expr b_hsl = select(h < 60.0f, 0.0f, select(h < 120.0f, 0.0f, select(h < 180.0f, x_hsl, select(h < 240.0f, c_hsl, select(h < 300.0f, c_hsl, x_hsl)))));
@@ -100,11 +100,11 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
         Expr fy_new = (L + 16.0f) / 116.0f;
         Expr fx_new = new_a / 500.0f + fy_new;
         Expr fz_new = fy_new - new_b / 200.0f;
-        
+
         Expr x_new_xyz = f_inv(fx_new) * xn;
         Expr y_new_xyz = f_inv(fy_new) * yn;
         Expr z_new_xyz = f_inv(fz_new) * zn;
-        
+
         Expr r_new_norm =  3.2406f * x_new_xyz - 1.5372f * y_new_xyz - 0.4986f * z_new_xyz;
         Expr g_new_norm = -0.9689f * x_new_xyz + 1.8758f * y_new_xyz + 0.0415f * z_new_xyz;
         Expr b_new_norm =  0.0557f * x_new_xyz - 0.2040f * y_new_xyz + 1.0570f * z_new_xyz;
@@ -115,7 +115,7 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
     // --- Final Selection ---
     // If saturation is 1.0 (a no-op), we can bypass the expensive color math
     // and just pass the original (unclamped) input through. This preserves highlight data.
-    saturated(x, y, c) = select(abs(saturation - 1.0f) < 1e-4f, 
+    saturated(x, y, c) = select(abs(saturation - 1.0f) < 1e-4f,
                                 input(x, y, c),
                                 select(algorithm == 0,
                                     hsl_saturated(x, y, c),
@@ -127,3 +127,4 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
 }
 
 #endif // STAGE_SATURATION_H
+

@@ -93,3 +93,4 @@ public:
 };
 
 #endif // STAGE_SHARPEN_H
+
