@@ -102,7 +102,7 @@ void RenderUI(AppState& state) {
 
         // Static Panes (top, non-scrolling)
         pane_manager.register_pane("Preview", Panes::render_preview, true);
-        pane_manager.register_pane("Histogram & Curves", Panes::render_histogram_curves, true);
+        pane_manager.register_pane("Histogram & Curves", create_debounced_render_func(Panes::render_histogram_curves), true);
 
         // Scrolling Panes
         pane_manager.register_pane("Core Pipeline", create_debounced_render_func(Panes::render_core_pipeline));
