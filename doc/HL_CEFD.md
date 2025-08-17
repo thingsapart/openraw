@@ -39,14 +39,12 @@ Compact Execution Flow Diagram (CEFD) - Schedule A (High-Performance)
 
 ---
 
-### Schedule C: Tiled Schedule with Local Laplacian
+### Schedule D: Tiled Schedule with Dehaze and Local Laplacian
 
-NOTES: This schedule is significantly more complex, reflecting the sophistication of the Local Laplacian filter. It uses a **hybrid tiling strategy**. The top-level `yo` loop parallelizes over horizontal strips. Within each strip, a sequential `xo` loop processes smaller, fixed-size tiles. This `(strip, tile)` model allows for fine-grained work while maintaining coarse parallelism.
-
-The key feature is the "forked" scheduling of the pyramid. `gPyramid_4..7` (low-frequency levels) are computed `@ yo`, once per strip, to manage their large stencils. `gPyramid_0..3` (high-frequency levels) are computed `@ xo`, once per tile, maximizing data locality. This hybrid approach prevents the large stencils from destroying the pipeline's overall efficiency.
+NOTES: This schedule adds the new pointwise `dehazed` stage. Crucially, it slots perfectly into the existing `xo` (per-tile) compute level alongside the other color manipulation stages (`srgb_to_lch`, `local_adjustments`, etc.). This preserves the pipeline's high performance, as the new stage is computed in-cache just before its consumer. The performance impact is negligible, demonstrating the power of scheduling pointwise operations.
 
 ```
-Compact Execution Flow Diagram (CEFD) - Schedule C (Local Laplacian)
+Compact Execution Flow Diagram (CEFD) - Schedule D (Dehaze + Local Laplacian)
 └─ FUNC final_stage @ root | S: (output)                               # Final output buffer
   ├─ FUNC cc_matrix @ root | S: (root)                                 # Global: Interpolated color matrix
   ├─ FUNC remap_detail_lut @ root | S: (root)                           # Global: LUT for local laplacian detail
@@ -67,12 +65,17 @@ Compact Execution Flow Diagram (CEFD) - Schedule C (Local Laplacian)
       ├─ FUNC outGPyramid_0..6 @ xo | S: ->xo | D: vectorize(xi)
       ├─ FUNC lab @ xo | S: ->xo | D: vectorize(xi)                      # Color conversions computed per tile
       ├─ FUNC corrected @ xo | S: ->xo | D: vectorize(xi)                # Color correction computed per tile
+      ├─ FUNC dehazed @ xo | S: ->xo | D: vectorize(xi)                  # NEW: Dehaze is pointwise, fits perfectly here
       ├─ FUNC sharpened @ xo | S: ->xo | D: vectorize(xi)                # Passthrough, but scheduled per tile
       ├─ FUNC local_adjustments @ xo | S: ->xo | D: vectorize(xi)        # Main adjustment stage computed per tile
       └─ LOOP var=yi [scanline]                                          # Innermost loops over pixels within a tile
         └─ LOOP var=xi [vector] >>vectorize
           └─ ... (pointwise funcs fused here)
 ```
+
+---
+
+### Schedule B: Low-Performance (The "Waterfall")
 
 ```
 Compact Execution Flow Diagram (CEFD) - Schedule B (Low-Performance)
@@ -85,4 +88,3 @@ Compact Execution Flow Diagram (CEFD) - Schedule B (Low-Performance)
       ├─ FUNC corrected @ yi | S: ->yo                            # SLOW: Loads `demoseiced`, writes its own temp buffer
       ├─ FUNC sharpened @ yi | S: ->yo                           # SLOW: Loads `corrected`, writes its own temp buffer
       └─ FUNC curved @ yi | S: ->yo                               # SLOW: Loads `sharpened`, writes its own temp buffer
-

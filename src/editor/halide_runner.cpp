@@ -159,6 +159,7 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
                                  color_grading_lut,
                                  state.params.vignette_amount, state.params.vignette_midpoint, state.params.vignette_roundness, state.params.vignette_highlights,
+                                 state.params.dehaze_strength,
                                  output_buffer);
 
     if (result != 0) {

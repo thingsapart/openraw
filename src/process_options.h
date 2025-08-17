@@ -23,6 +23,9 @@ struct ProcessConfig {
     float ca_strength = 0.0f;
     int timing_iterations = 5;
 
+    // Dehaze
+    float dehaze_strength = 0.0f;
+
     // Denoise
     float denoise_strength = 50.0f;
     float denoise_eps = 0.01f;

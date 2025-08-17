@@ -9,6 +9,7 @@
 #include "panes/pane_histogram_curves.h"
 #include "panes/pane_core_pipeline.h"
 #include "panes/pane_denoise.h"
+#include "panes/pane_dehaze.h"
 #include "panes/pane_lens_correction.h"
 #include "panes/pane_local_adjustments.h"
 #include "panes/pane_tone_curves.h"
@@ -108,6 +109,7 @@ void RenderUI(AppState& state) {
         // Scrolling Panes
         pane_manager.register_pane("Core Pipeline", create_debounced_render_func(Panes::render_core_pipeline));
         pane_manager.register_pane("Denoise", create_debounced_render_func(Panes::render_denoise));
+        pane_manager.register_pane("Dehaze", create_debounced_render_func(Panes::render_dehaze));
         pane_manager.register_pane("Vignette", create_debounced_render_func(Panes::render_vignette));
         pane_manager.register_pane("Local Adjustments", create_debounced_render_func(Panes::render_local_adjustments));
         pane_manager.register_pane("Color Wheels", create_debounced_render_func(Panes::render_color_wheels), false, false);

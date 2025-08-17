@@ -78,6 +78,9 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_roundness{"vignette_roundness"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_highlights{"vignette_highlights"};
 
+    // New input for dehaze
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> dehaze_strength{"dehaze_strength"};
+
 
     // --- Output ---
     typename Generator<CameraPipeGenerator<T>>::template Output<Buffer<uint8_t, 3>> processed{"processed"};
@@ -143,9 +146,37 @@ public:
             corrected_f(x, y, c) = cast<float>(corrected_hi_fi(x, y, c)) / 65535.0f;
         }
 
+        // --- Dehaze using Color Attenuation Prior ---
+        Func dehazed("dehazed");
+        {
+            Expr r = corrected_f(x, y, 0);
+            Expr g = corrected_f(x, y, 1);
+            Expr b = corrected_f(x, y, 2);
+            Expr v = max(r, g, b); // Brightness
+            Expr s = (v - min(r, g, b)) / (v + 1e-6f); // Saturation
+            Expr d = v - s; // Depth estimate
+
+            // Transmission = 1 - strength * depth. Clamp to avoid over-dehazing.
+            Expr t = clamp(1.0f - (dehaze_strength / 100.0f) * d, 0.1f, 1.0f);
+
+            // Assume atmospheric light A is pure white (1,1,1) for speed.
+            const float A = 1.0f;
+
+            // Invert the haze model: J = (I - A)/t + A
+            Expr val_dehazed = (corrected_f(x, y, c) - A) / t + A;
+            
+            // If dehaze is disabled, pass through. Otherwise, apply the dehazing and
+            // clamp the result to be non-negative to prevent numerical errors in subsequent
+            // color space conversions.
+            dehazed(x, y, c) = select(dehaze_strength < 0.001f,
+                                      corrected_f(x, y, c),
+                                      max(0.0f, val_dehazed));
+        }
+
+
         // --- COLOR PROCESSING PIPELINE (Corrected Order) ---
         // 1. Convert from linear sRGB to L*C*h*.
-        Func srgb_to_lch = HalideColor::linear_srgb_to_lch(corrected_f, x, y, c);
+        Func srgb_to_lch = HalideColor::linear_srgb_to_lch(dehazed, x, y, c);
         
         // 2. Perform local adjustments. This stage now correctly modifies only the
         //    L channel and passes the original C and h channels through.
@@ -263,7 +294,7 @@ public:
         schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
             downscaled, is_no_op, resize_builder,
-            corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
+            corrected_hi_fi, dehazed, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, lch_final,
             srgb_to_lch, graded_srgb, vignette_corrected, halide_proc_type,
             x, y, c, xo, xi, yo, yi,

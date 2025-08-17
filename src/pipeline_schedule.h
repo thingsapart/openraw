@@ -23,6 +23,7 @@ void schedule_pipeline(
     Halide::Expr is_no_op,
     ResizeBicubicBuilder& resize_builder,
     Halide::Func corrected_hi_fi,
+    Halide::Func dehazed,
     Halide::Func sharpened,
     LocalLaplacianBuilder& local_laplacian_builder,
     Halide::Func curved,
@@ -129,6 +130,7 @@ void schedule_pipeline(
             }
         }
 #endif
+        dehazed.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);
         srgb_to_lch.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);
         local_laplacian_builder.output.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);
         color_graded.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);

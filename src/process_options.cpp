@@ -26,6 +26,7 @@ void print_usage() {
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
+           "  --dehaze <val>         Dehaze strength, 0-100 (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
            "Denoise Options (Radius is fixed at 2.0):\n"
            "  --denoise-strength <val> Denoise strength, 0-100 (default: 50.0).\n"
@@ -111,6 +112,7 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);
         if (args.count("contrast")) cfg.contrast = std::stof(args["contrast"]);
         if (args.count("ca-strength")) cfg.ca_strength = std::stof(args["ca-strength"]);
+        if (args.count("dehaze")) cfg.dehaze_strength = std::stof(args["dehaze"]);
         if (args.count("iterations")) cfg.timing_iterations = std::stoi(args["iterations"]);
         if (args.count("denoise-strength")) cfg.denoise_strength = std::stof(args["denoise-strength"]);
         if (args.count("denoise-eps")) cfg.denoise_eps = std::stof(args["denoise-eps"]);

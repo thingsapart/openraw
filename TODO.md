@@ -11,6 +11,7 @@ These are fundamental adjustments that are missing and provide the most value fo
 - [x] **Blacks & Whites Sliders:** Expose controls to adjust the black and white clip points of the tone curve. (Integrated into Curve stage).
 - [x] **Custom Tone Curve:** Implement a flexible tone curve using user-defined control points, applied to either Luma or RGB, with optional per-channel overrides and a PNG visualization.
 - [x] **Vignette Correction:** Implement a basic radial darkening or brightening to counteract or add a lens vignette effect.
+- [x] **Dehaze:** Implement a specialized algorithm to remove or add atmospheric haze by analyzing local color and contrast.
 - [ ] **Crop Tool:** Add parameters to define a crop rectangle, effectively changing the output bounds of the pipeline.
 
 ## Priority 2: Core Features & Harder to Implement
@@ -33,8 +34,8 @@ These features are powerful but are very difficult to implement or are for more 
 - [ ] **Input Color Profile (DCP/ICC) Support:** Add the capability to parse standard camera profile files for more accurate color reproduction.
 - [ ] **Perspective Correction:** Implement a full projective transform to correct for geometric keystoning.
 - [ ] **LUT File Support:** Add the ability to load and apply 3D Look-Up Tables (e.g., from `.cube` files) for creative color grading.
-- [ ] **Dehaze:** Implement a specialized algorithm to remove or add atmospheric haze by analyzing local color and contrast.
 
 ## Tooling & Calibration
 
 - [ ] **VST Calibration Tool:** Write a helper tool to analyze a series of raw captures (at different signal levels) to estimate the `alpha` and `beta` parameters for the Variance-Stabilizing Transform. This is crucial for optimal noise reduction performance on a specific sensor.
+

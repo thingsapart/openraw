@@ -189,6 +189,7 @@ add_executable(rawr
     src/editor/panes/pane_preview.cpp
     src/editor/panes/pane_tone_curves.cpp
     src/editor/panes/pane_lens_correction.cpp
+    src/editor/panes/pane_dehaze.cpp
 )
 
 target_link_libraries(rawr PRIVATE
