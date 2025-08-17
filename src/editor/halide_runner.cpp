@@ -158,6 +158,7 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
                                  state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows,
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
                                  color_grading_lut,
+                                 state.params.vignette_amount, state.params.vignette_midpoint, state.params.vignette_roundness, state.params.vignette_highlights,
                                  output_buffer);
 
     if (result != 0) {
@@ -196,3 +197,4 @@ void RunHalidePipelines(AppState& state) {
     ComputeHistograms(state);
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);
 }
+

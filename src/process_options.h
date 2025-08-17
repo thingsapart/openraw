@@ -62,6 +62,12 @@ struct ProcessConfig {
     std::vector<Point> curve_hue_vs_lum;
     std::vector<Point> curve_lum_vs_sat;
     std::vector<Point> curve_sat_vs_sat;
+    
+    // --- Lens Correction ---
+    float vignette_amount = 0.0f; // Range [-100, 100] in UI
+    float vignette_midpoint = 50.0f; // Range [0, 100] in UI
+    float vignette_roundness = 100.0f; // Range [0, 100] in UI
+    float vignette_highlights = 0.0f; // Range [0, 100] in UI
 };
 
 

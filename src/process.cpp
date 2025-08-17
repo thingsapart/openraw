@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
                               color_grading_lut,
+                              cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
@@ -160,6 +161,7 @@ int main(int argc, char **argv) {
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
                               color_grading_lut,
+                              cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               output);
         #endif
         output.device_sync();
@@ -199,3 +201,4 @@ int main(int argc, char **argv) {
     printf("Success!\n");
     return 0;
 }
+

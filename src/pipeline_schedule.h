@@ -32,6 +32,7 @@ void schedule_pipeline(
     Halide::Func color_graded,
     Halide::Func srgb_to_lch,
     Halide::Func lch_to_srgb,
+    Halide::Func vignette_corrected,
     Halide::Type halide_proc_type,
     Halide::Var x, Halide::Var y, Halide::Var c, Halide::Var xo, Halide::Var xi, Halide::Var yo, Halide::Var yi,
     int J, int cutover_level)
@@ -133,8 +134,12 @@ void schedule_pipeline(
         color_graded.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);
         lch_to_srgb.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c,0,3).unroll(c);
         
+        // The new vignette stage is pointwise, so it can be computed at the same location as its consumer, `sharpened`.
+        vignette_corrected.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec_f).bound(c, 0, 3).unroll(c);
+        
         sharpened.compute_at(final_stage, xo).store_at(final_stage, yo).vectorize(x, vec).bound(c, 0, 3).unroll(c);
         curved.compute_at(final_stage, yi).vectorize(x, vec).bound(c, 0, 3).unroll(c);
     }
 }
 #endif // PIPELINE_SCHEDULE_H
+

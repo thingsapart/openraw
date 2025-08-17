@@ -7,7 +7,6 @@ namespace Panes {
 bool render_local_adjustments(AppState& state) {
     bool changed = false;
 
-    ImGui::Text("Based on Laplacian Pyramid");
     changed |= ImGui::SliderFloat("Detail", &state.params.ll_detail, -100.0f, 100.0f);
     changed |= ImGui::SliderFloat("Clarity", &state.params.ll_clarity, -100.0f, 100.0f);
     ImGui::Separator();

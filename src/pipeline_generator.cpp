@@ -72,6 +72,12 @@ public:
     // New input for global color grading
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 4>> color_grading_lut{"color_grading_lut"};
 
+    // New inputs for lens correction
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_amount{"vignette_amount"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_midpoint{"vignette_midpoint"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_roundness{"vignette_roundness"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_highlights{"vignette_highlights"};
+
 
     // --- Output ---
     typename Generator<CameraPipeGenerator<T>>::template Output<Buffer<uint8_t, 3>> processed{"processed"};
@@ -162,12 +168,62 @@ public:
         // 4. Convert the final L''C''H'' back to linear sRGB.
         Func graded_srgb = HalideColor::lch_to_linear_srgb(lch_final, x, y, c);
 
+        // 5. Apply Vignette Correction
+        Func vignette_corrected("vignette_corrected");
+        {
+            // Normalize sliders to [0, 1] range for calculations
+            Expr amount = vignette_amount * 0.01f;
+            Expr midpoint = vignette_midpoint * 0.01f;
+            Expr roundness = vignette_roundness * 0.01f;
+            Expr highlight_protection = vignette_highlights * 0.01f;
+
+            // --- Shape (Roundness) ---
+            Expr center_x = (cast<float>(out_width) - 1.0f) / 2.0f;
+            Expr center_y = (cast<float>(out_height) - 1.0f) / 2.0f;
+            Expr dx = cast<float>(x) - center_x;
+            Expr dy = cast<float>(y) - center_y;
+            
+            Expr max_r = max(center_x, center_y);
+            Expr min_r = min(center_x, center_y);
+            
+            // Lerp between a circular radius (based on min dimension) and an elliptical one (based on individual dimensions)
+            Expr scale_x = lerp(min_r, center_x, roundness);
+            Expr scale_y = lerp(min_r, center_y, roundness);
+            
+            Expr norm_x = dx / (scale_x + 1e-6f);
+            Expr norm_y = dy / (scale_y + 1e-6f);
+            Expr r_sq = norm_x * norm_x + norm_y * norm_y;
+
+            // --- Falloff (Midpoint) ---
+            // The midpoint slider controls the exponent of the falloff curve.
+            // Its mapping is non-linear to provide more fine-grained control for
+            // low-exponent (soft, broad) vignettes.
+            Expr r = sqrt(max(0.0f, r_sq));
+            Expr exponent = 0.25f * fast_pow(32.0f, midpoint); // Maps midpoint [0,1] to exponent [0.25, 8.0] non-linearly
+            Expr polynomial = fast_pow(r, exponent);
+
+            // --- Amount ---
+            Expr vignette_factor = 1.0f - amount * polynomial;
+
+            // --- Highlight Protection ---
+            Expr luma = 0.299f * graded_srgb(x, y, 0) + 0.587f * graded_srgb(x, y, 1) + 0.114f * graded_srgb(x, y, 2);
+            // Blend starts at a luma of 0.75, fully active at 1.0
+            Expr highlight_blend = smoothstep(0.75f, 1.0f, luma);
+            Expr protection_factor = lerp(vignette_factor, 1.0f, highlight_blend * highlight_protection);
+            
+            // Only apply highlight protection when correcting (brightening), not when darkening.
+            Expr final_factor = select(amount > 0, protection_factor, vignette_factor);
+
+            vignette_corrected(x, y, c) = graded_srgb(x, y, c) * final_factor;
+        }
+
+
         // Convert the float output back to the pipeline's processing type for sharpening.
         Func graded_srgb_proc_type("graded_srgb_proc_type");
         if (std::is_same<T, float>::value) {
-            graded_srgb_proc_type(x, y, c) = graded_srgb(x, y, c);
+            graded_srgb_proc_type(x, y, c) = vignette_corrected(x, y, c);
         } else {
-            graded_srgb_proc_type(x, y, c) = u16_sat(graded_srgb(x, y, c) * 65535.0f);
+            graded_srgb_proc_type(x, y, c) = u16_sat(vignette_corrected(x, y, c) * 65535.0f);
         }
         
         SharpenBuilder_T<T> sharpen_builder(graded_srgb_proc_type, sharpen_strength, sharpen_radius, sharpen_threshold,
@@ -209,7 +265,7 @@ public:
             downscaled, is_no_op, resize_builder,
             corrected_hi_fi, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, lch_final,
-            srgb_to_lch, graded_srgb, halide_proc_type,
+            srgb_to_lch, graded_srgb, vignette_corrected, halide_proc_type,
             x, y, c, xo, xi, yo, yi,
             J, cutover_level);
 
@@ -229,3 +285,4 @@ class CameraPipe : public CameraPipeGenerator<float> {};
 HALIDE_REGISTER_GENERATOR(CameraPipe, camera_pipe)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<float>, camera_pipe_f32)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<uint16_t>, camera_pipe_u16)
+

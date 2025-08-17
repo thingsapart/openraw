@@ -49,6 +49,11 @@ void print_usage() {
            "  --h-vs-l <pts>         Hue vs Luma curve points.\n"
            "  --l-vs-s <pts>         Luma vs Sat curve points.\n"
            "  --s-vs-s <pts>         Sat vs Sat curve points.\n\n"
+           "Lens Correction Options:\n"
+           "  --vignette-amount <val>    Vignette strength, -100 to 100 (default: 0).\n"
+           "  --vignette-midpoint <val>  Vignette feather/reach, 0 to 100 (default: 50).\n"
+           "  --vignette-roundness <val> Vignette shape, 0 (circular) to 100 (elliptical) (default: 100).\n"
+           "  --vignette-highlights <val> Highlight protection, 0 to 100 (default: 0).\n\n"
            "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
@@ -162,6 +167,12 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("h-vs-l")) ToneCurveUtils::parse_curve_points(args["h-vs-l"], cfg.curve_hue_vs_lum);
         if (args.count("l-vs-s")) ToneCurveUtils::parse_curve_points(args["l-vs-s"], cfg.curve_lum_vs_sat);
         if (args.count("s-vs-s")) ToneCurveUtils::parse_curve_points(args["s-vs-s"], cfg.curve_sat_vs_sat);
+
+        // Lens Correction
+        if (args.count("vignette-amount")) cfg.vignette_amount = std::stof(args["vignette-amount"]);
+        if (args.count("vignette-midpoint")) cfg.vignette_midpoint = std::stof(args["vignette-midpoint"]);
+        if (args.count("vignette-roundness")) cfg.vignette_roundness = std::stof(args["vignette-roundness"]);
+        if (args.count("vignette-highlights")) cfg.vignette_highlights = std::stof(args["vignette-highlights"]);
 
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Error parsing arguments: ") + e.what());
