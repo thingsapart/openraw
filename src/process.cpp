@@ -9,6 +9,11 @@
 #include <cmath>   // for powf
 #include <iomanip> // for std::setprecision
 
+// To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
+#ifdef USE_LENSFUN
+#include "lensfun/lensfun.h"
+#endif
+
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
@@ -108,6 +113,57 @@ int main(int argc, char **argv) {
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
 
+#ifdef USE_LENSFUN
+    if (cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty()) {
+        fprintf(stderr, "Applying Lensfun profile: %s\n", cfg.lens_profile_name.c_str());
+        lfDatabase* ldb = lf_db_new();
+        lf_db_load(ldb, NULL); // Load default database
+
+        // For this example, we'll use a generic camera model.
+        // A real application would parse this from EXIF data.
+        const lfCamera** cams = lf_db_find_cameras_ex(ldb, "Raspberry Pi", "High Quality Camera");
+        if (cams && cams[0]) {
+            const lfLens** lenses = lf_db_find_lenses(ldb, cams[0]);
+            const lfLens* lens = nullptr;
+            if (lenses) {
+                for (int i = 0; lenses[i]; i++) {
+                    if (std::string(lenses[i]->Model) == cfg.lens_profile_name) {
+                        lens = lenses[i];
+                        break;
+                    }
+                }
+            }
+            if(lens) {
+                // A focal length of 16mm is a reasonable default for the HQ camera.
+                lfModifier* mod = lf_modifier_new(lens, 16.0f, input.width(), input.height());
+                if (mod) {
+                    double k1, k2, k3;
+                    lf_modifier_get_distortion_params(mod, &k1, &k2, &k3);
+                    
+                    // Apply profile values only if they haven't been overridden on the command line.
+                    if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = static_cast<float>(k1);
+                    if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = static_cast<float>(k2);
+                    if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = static_cast<float>(k3);
+
+                    fprintf(stderr, "  -> Loaded distortion: k1=%.4f, k2=%.4f, k3=%.4f\n", k1, k2, k3);
+
+                    lf_modifier_destroy(mod);
+                }
+            } else {
+                 fprintf(stderr, "  -> Warning: Lens profile '%s' not found for camera.\n", cfg.lens_profile_name.c_str());
+            }
+        } else {
+            fprintf(stderr, "  -> Warning: Could not find base camera for Lensfun.\n");
+        }
+        lf_db_destroy(ldb);
+    }
+#endif
+
+    // If any distortion params are still unset, default them to 0 for the pipeline.
+    if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = 0.0f;
+    if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = 0.0f;
+    if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = 0.0f;
+
     // Calculate output dimensions based on crop and downscale factor
     int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
     int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
@@ -153,6 +209,11 @@ int main(int argc, char **argv) {
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
+                              cfg.ca_red_cyan, cfg.ca_blue_yellow,
+                              cfg.dist_k1, cfg.dist_k2, cfg.dist_k3,
+                              cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
+                              cfg.geo_keystone_v, cfg.geo_keystone_h,
+                              cfg.geo_offset_x, cfg.geo_offset_y,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
             camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
@@ -164,6 +225,11 @@ int main(int argc, char **argv) {
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
+                              cfg.ca_red_cyan, cfg.ca_blue_yellow,
+                              cfg.dist_k1, cfg.dist_k2, cfg.dist_k3,
+                              cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
+                              cfg.geo_keystone_v, cfg.geo_keystone_h,
+                              cfg.geo_offset_x, cfg.geo_offset_y,
                               output);
         #endif
         output.device_sync();
@@ -203,4 +269,3 @@ int main(int argc, char **argv) {
     printf("Success!\n");
     return 0;
 }
-

@@ -150,16 +150,26 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
     else if (state.params.demosaic_algorithm == "lmmse") demosaic_id = 1;
     else if (state.params.demosaic_algorithm == "ri") demosaic_id = 2;
 
+    // Use a local copy for lensfun overrides, defaulting to 0 if they were never set.
+    float dist_k1 = (state.params.dist_k1 == UNSET_F) ? 0.0f : state.params.dist_k1;
+    float dist_k2 = (state.params.dist_k2 == UNSET_F) ? 0.0f : state.params.dist_k2;
+    float dist_k3 = (state.params.dist_k3 == UNSET_F) ? 0.0f : state.params.dist_k3;
+
     int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                                  state.params.color_temp, state.params.tint, exposure_multiplier, state.params.ca_strength,
                                  denoise_strength_norm, state.params.denoise_eps,
                                  blackLevel, whiteLevel, pipeline_lut,
-                                 0.f, 0.f, 0.f,
+                                 0.f, 0.f, 0.f, // sharpen params (unused)
                                  state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows,
                                  state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
                                  color_grading_lut,
                                  state.params.vignette_amount, state.params.vignette_midpoint, state.params.vignette_roundness, state.params.vignette_highlights,
                                  state.params.dehaze_strength,
+                                 state.params.ca_red_cyan, state.params.ca_blue_yellow,
+                                 dist_k1, dist_k2, dist_k3,
+                                 state.params.geo_rotate, state.params.geo_scale, state.params.geo_aspect,
+                                 state.params.geo_keystone_v, state.params.geo_keystone_h,
+                                 state.params.geo_offset_x, state.params.geo_offset_y,
                                  output_buffer);
 
     if (result != 0) {
@@ -198,4 +208,3 @@ void RunHalidePipelines(AppState& state) {
     ComputeHistograms(state);
     ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);
 }
-

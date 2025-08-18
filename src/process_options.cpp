@@ -25,7 +25,7 @@ void print_usage() {
            "  --exposure <stops>     Exposure compensation in stops, e.g. -1.0, 0.5, 2.0 (default: 0.0).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
-           "  --ca-strength <val>    Chromatic aberration correction strength. 0=off (default: 0.0).\n"
+           "  --ca-strength <val>    Automatic CA correction strength. 0=off (default: 0.0).\n"
            "  --dehaze <val>         Dehaze strength, 0-100 (default: 0.0).\n"
            "  --iterations <n>       Number of timing iterations for benchmark (default: 5).\n\n"
            "Denoise Options (Radius is fixed at 2.0):\n"
@@ -50,11 +50,24 @@ void print_usage() {
            "  --h-vs-l <pts>         Hue vs Luma curve points.\n"
            "  --l-vs-s <pts>         Luma vs Sat curve points.\n"
            "  --s-vs-s <pts>         Sat vs Sat curve points.\n\n"
-           "Lens Correction Options:\n"
+           "Lens & Geometry Options:\n"
+           "  --lensfun <profile>    Name of lensfun profile to apply (e.g. \"Raspberry Pi High Quality Camera Lens\").\n"
+           "  --ca-red <val>         Manual Red/Cyan CA fringe control, -100 to 100 (default: 0).\n"
+           "  --ca-blue <val>        Manual Blue/Yellow CA fringe control, -100 to 100 (default: 0).\n"
            "  --vignette-amount <val>    Vignette strength, -100 to 100 (default: 0).\n"
            "  --vignette-midpoint <val>  Vignette feather/reach, 0 to 100 (default: 50).\n"
            "  --vignette-roundness <val> Vignette shape, 0 (circular) to 100 (elliptical) (default: 100).\n"
-           "  --vignette-highlights <val> Highlight protection, 0 to 100 (default: 0).\n\n"
+           "  --vignette-highlights <val> Highlight protection, 0 to 100 (default: 0).\n"
+           "  --dist-k1 <val>        Distortion coefficient k1 (overrides lensfun).\n"
+           "  --dist-k2 <val>        Distortion coefficient k2 (overrides lensfun).\n"
+           "  --dist-k3 <val>        Distortion coefficient k3 (overrides lensfun).\n"
+           "  --rotate <deg>         Rotation in degrees (default: 0).\n"
+           "  --scale <pct>          Scale/Zoom in percent (default: 100).\n"
+           "  --aspect <ratio>       Aspect ratio adjustment (default: 1.0).\n"
+           "  --keystone-v <val>     Vertical keystone correction, -100 to 100 (default: 0).\n"
+           "  --keystone-h <val>     Horizontal keystone correction, -100 to 100 (default: 0).\n"
+           "  --offset-x <px>        X offset in pixels (default: 0).\n"
+           "  --offset-y <px>        Y offset in pixels (default: 0).\n\n"
            "Tone Mapping Options (These are mutually exclusive; curves override others):\n"
            "  --tonemap <name>       Global tonemap operator. 'linear', 'reinhard', 'filmic', 'gamma' (default).\n"
            "  --gamma <val>          Gamma correction value (default: 2.2). Used if no curve is given.\n"
@@ -170,11 +183,25 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("l-vs-s")) ToneCurveUtils::parse_curve_points(args["l-vs-s"], cfg.curve_lum_vs_sat);
         if (args.count("s-vs-s")) ToneCurveUtils::parse_curve_points(args["s-vs-s"], cfg.curve_sat_vs_sat);
 
-        // Lens Correction
+        // Lens & Geometry
+        if (args.count("lensfun")) cfg.lens_profile_name = args["lensfun"];
+        if (args.count("ca-red")) cfg.ca_red_cyan = std::stof(args["ca-red"]);
+        if (args.count("ca-blue")) cfg.ca_blue_yellow = std::stof(args["ca-blue"]);
         if (args.count("vignette-amount")) cfg.vignette_amount = std::stof(args["vignette-amount"]);
         if (args.count("vignette-midpoint")) cfg.vignette_midpoint = std::stof(args["vignette-midpoint"]);
         if (args.count("vignette-roundness")) cfg.vignette_roundness = std::stof(args["vignette-roundness"]);
         if (args.count("vignette-highlights")) cfg.vignette_highlights = std::stof(args["vignette-highlights"]);
+        if (args.count("dist-k1")) cfg.dist_k1 = std::stof(args["dist-k1"]);
+        if (args.count("dist-k2")) cfg.dist_k2 = std::stof(args["dist-k2"]);
+        if (args.count("dist-k3")) cfg.dist_k3 = std::stof(args["dist-k3"]);
+        if (args.count("rotate")) cfg.geo_rotate = std::stof(args["rotate"]);
+        if (args.count("scale")) cfg.geo_scale = std::stof(args["scale"]);
+        if (args.count("aspect")) cfg.geo_aspect = std::stof(args["aspect"]);
+        if (args.count("keystone-v")) cfg.geo_keystone_v = std::stof(args["keystone-v"]);
+        if (args.count("keystone-h")) cfg.geo_keystone_h = std::stof(args["keystone-h"]);
+        if (args.count("offset-x")) cfg.geo_offset_x = std::stof(args["offset-x"]);
+        if (args.count("offset-y")) cfg.geo_offset_y = std::stof(args["offset-y"]);
+
 
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Error parsing arguments: ") + e.what());
@@ -182,4 +209,3 @@ ProcessConfig parse_args(int argc, char **argv) {
 
     return cfg;
 }
-

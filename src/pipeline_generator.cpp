@@ -21,8 +21,17 @@
 #include "stage_apply_curve.h"
 #include "color_tools.h"
 #include "stage_color_grading.h"
+#include "stage_dehaze.h"
+#include "stage_vignette.h"
+#include "stage_lens_geometry.h"
 
 #include "pipeline_schedule.h"
+
+// Define guards to disable parts of the lens correction for debugging.
+// To use, pass e.g. -D LENS_NO_GEO to the generator's compile command.
+// #define LENS_NO_GEO
+// #define LENS_NO_DISTORT
+// #define LENS_NO_CA
 
 using namespace Halide;
 
@@ -72,7 +81,7 @@ public:
     // New input for global color grading
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 4>> color_grading_lut{"color_grading_lut"};
 
-    // New inputs for lens correction
+    // Vignette inputs
     typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_amount{"vignette_amount"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_midpoint{"vignette_midpoint"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> vignette_roundness{"vignette_roundness"};
@@ -80,6 +89,20 @@ public:
 
     // New input for dehaze
     typename Generator<CameraPipeGenerator<T>>::template Input<float> dehaze_strength{"dehaze_strength"};
+
+    // New inputs for Lens Correction & Geometry
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_red_cyan{"ca_red_cyan"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_blue_yellow{"ca_blue_yellow"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k1{"dist_k1"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k2{"dist_k2"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k3{"dist_k3"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_rotate{"geo_rotate"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_scale{"geo_scale"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_aspect{"geo_aspect"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_keystone_v{"geo_keystone_v"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_keystone_h{"geo_keystone_h"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_offset_x{"geo_offset_x"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_offset_y{"geo_offset_y"};
 
 
     // --- Output ---
@@ -131,8 +154,8 @@ public:
                                             out_width, out_height, x, y, c);
         
         Func downscaled("downscaled");
-        Expr is_no_op = abs(downscale_factor - 1.0f) < 1e-6f;
-        downscaled(x, y, c) = select(is_no_op, demosaiced(x, y, c), resize_builder.output(x, y, c));
+        Expr is_no_op_resize = abs(downscale_factor - 1.0f) < 1e-6f;
+        downscaled(x, y, c) = select(is_no_op_resize, demosaiced(x, y, c), resize_builder.output(x, y, c));
 
         ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, matrix_3200, matrix_7000,
                                                        color_temp, tint, x, y, c, whiteLevel, blackLevel);
@@ -145,41 +168,15 @@ public:
         } else {
             corrected_f(x, y, c) = cast<float>(corrected_hi_fi(x, y, c)) / 65535.0f;
         }
-
-        // --- Dehaze using Color Attenuation Prior ---
-        Func dehazed("dehazed");
-        {
-            Expr r = corrected_f(x, y, 0);
-            Expr g = corrected_f(x, y, 1);
-            Expr b = corrected_f(x, y, 2);
-            Expr v = max(r, g, b); // Brightness
-            Expr s = (v - min(r, g, b)) / (v + 1e-6f); // Saturation
-            Expr d = v - s; // Depth estimate
-
-            // Transmission = 1 - strength * depth. Clamp to avoid over-dehazing.
-            Expr t = clamp(1.0f - (dehaze_strength / 100.0f) * d, 0.1f, 1.0f);
-
-            // Assume atmospheric light A is pure white (1,1,1) for speed.
-            const float A = 1.0f;
-
-            // Invert the haze model: J = (I - A)/t + A
-            Expr val_dehazed = (corrected_f(x, y, c) - A) / t + A;
-            
-            // If dehaze is disabled, pass through. Otherwise, apply the dehazing and
-            // clamp the result to be non-negative to prevent numerical errors in subsequent
-            // color space conversions.
-            dehazed(x, y, c) = select(dehaze_strength < 0.001f,
-                                      corrected_f(x, y, c),
-                                      max(0.0f, val_dehazed));
-        }
-
+        
+        DehazeBuilder dehaze_builder(corrected_f, dehaze_strength, x, y, c);
+        Func dehazed = dehaze_builder.output;
 
         // --- COLOR PROCESSING PIPELINE (Corrected Order) ---
         // 1. Convert from linear sRGB to L*C*h*.
         Func srgb_to_lch = HalideColor::linear_srgb_to_lch(dehazed, x, y, c);
         
-        // 2. Perform local adjustments. This stage now correctly modifies only the
-        //    L channel and passes the original C and h channels through.
+        // 2. Perform local adjustments.
         const int J = 8;
         const int cutover_level = 3;
         LocalLaplacianBuilder local_laplacian_builder(
@@ -192,7 +189,7 @@ public:
             J, cutover_level);
         Func lch_local_adjusted = local_laplacian_builder.output;
 
-        // 3. Apply the global 3D LUT for color grading. This operates on the L'-adjusted LCH data.
+        // 3. Apply the global 3D LUT for color grading.
         ColorGradeBuilder color_grade_builder(lch_local_adjusted, color_grading_lut, color_grading_lut.dim(0).extent(), x, y, c);
         Func lch_final = color_grade_builder.output;
 
@@ -200,61 +197,42 @@ public:
         Func graded_srgb = HalideColor::lch_to_linear_srgb(lch_final, x, y, c);
 
         // 5. Apply Vignette Correction
-        Func vignette_corrected("vignette_corrected");
-        {
-            // Normalize sliders to [0, 1] range for calculations
-            Expr amount = vignette_amount * 0.01f;
-            Expr midpoint = vignette_midpoint * 0.01f;
-            Expr roundness = vignette_roundness * 0.01f;
-            Expr highlight_protection = vignette_highlights * 0.01f;
+        VignetteBuilder vignette_builder(graded_srgb, out_width, out_height,
+                                         vignette_amount, vignette_midpoint, vignette_roundness, vignette_highlights,
+                                         x, y, c);
+        Func vignette_corrected = vignette_builder.output;
 
-            // --- Shape (Roundness) ---
-            Expr center_x = (cast<float>(out_width) - 1.0f) / 2.0f;
-            Expr center_y = (cast<float>(out_height) - 1.0f) / 2.0f;
-            Expr dx = cast<float>(x) - center_x;
-            Expr dy = cast<float>(y) - center_y;
-            
-            Expr max_r = max(center_x, center_y);
-            Expr min_r = min(center_x, center_y);
-            
-            // Lerp between a circular radius (based on min dimension) and an elliptical one (based on individual dimensions)
-            Expr scale_x = lerp(min_r, center_x, roundness);
-            Expr scale_y = lerp(min_r, center_y, roundness);
-            
-            Expr norm_x = dx / (scale_x + 1e-6f);
-            Expr norm_y = dy / (scale_y + 1e-6f);
-            Expr r_sq = norm_x * norm_x + norm_y * norm_y;
+        // --- LENS & GEOMETRY CORRECTION STAGE ---
+        LensGeometryBuilder lens_geometry_builder(vignette_corrected, x, y, c, out_width, out_height,
+                                                  dist_k1, dist_k2, dist_k3,
+                                                  ca_red_cyan, ca_blue_yellow,
+                                                  geo_rotate, geo_scale, geo_aspect,
+                                                  geo_keystone_v, geo_keystone_h,
+                                                  geo_offset_x, geo_offset_y);
+        Func resampled = lens_geometry_builder.output;
 
-            // --- Falloff (Midpoint) ---
-            // The midpoint slider controls the exponent of the falloff curve.
-            // Its mapping is non-linear to provide more fine-grained control for
-            // low-exponent (soft, broad) vignettes.
-            Expr r = sqrt(max(0.0f, r_sq));
-            Expr exponent = 0.25f * fast_pow(32.0f, midpoint); // Maps midpoint [0,1] to exponent [0.25, 8.0] non-linearly
-            Expr polynomial = fast_pow(r, exponent);
+        // --- RESAMPLE BYPASS SWITCH ---
+        const float e = 1e-6f;
+        Expr is_geo_default = abs(geo_rotate) < e && abs(geo_scale - 100.f) < e &&
+                              abs(geo_aspect - 1.f) < e && abs(geo_keystone_v) < e &&
+                              abs(geo_keystone_h) < e && abs(geo_offset_x) < e &&
+                              abs(geo_offset_y) < e;
+        Expr is_distort_default = abs(dist_k1) < e && abs(dist_k2) < e && abs(dist_k3) < e;
+        Expr is_ca_default = abs(ca_red_cyan) < e && abs(ca_blue_yellow) < e;
+        Expr is_no_op_resample = is_geo_default && is_distort_default && is_ca_default;
 
-            // --- Amount ---
-            Expr vignette_factor = 1.0f - amount * polynomial;
-
-            // --- Highlight Protection ---
-            Expr luma = 0.299f * graded_srgb(x, y, 0) + 0.587f * graded_srgb(x, y, 1) + 0.114f * graded_srgb(x, y, 2);
-            // Blend starts at a luma of 0.75, fully active at 1.0
-            Expr highlight_blend = smoothstep(0.75f, 1.0f, luma);
-            Expr protection_factor = lerp(vignette_factor, 1.0f, highlight_blend * highlight_protection);
-            
-            // Only apply highlight protection when correcting (brightening), not when darkening.
-            Expr final_factor = select(amount > 0, protection_factor, vignette_factor);
-
-            vignette_corrected(x, y, c) = graded_srgb(x, y, c) * final_factor;
-        }
+        Func resampled_or_bypass("resampled_or_bypass");
+        resampled_or_bypass(x, y, c) = select(is_no_op_resample,
+                                              vignette_corrected(x, y, c),
+                                              resampled(x, y, c));
 
 
         // Convert the float output back to the pipeline's processing type for sharpening.
         Func graded_srgb_proc_type("graded_srgb_proc_type");
         if (std::is_same<T, float>::value) {
-            graded_srgb_proc_type(x, y, c) = vignette_corrected(x, y, c);
+            graded_srgb_proc_type(x, y, c) = resampled_or_bypass(x, y, c);
         } else {
-            graded_srgb_proc_type(x, y, c) = u16_sat(vignette_corrected(x, y, c) * 65535.0f);
+            graded_srgb_proc_type(x, y, c) = u16_sat(resampled_or_bypass(x, y, c) * 65535.0f);
         }
         
         SharpenBuilder_T<T> sharpen_builder(graded_srgb_proc_type, sharpen_strength, sharpen_radius, sharpen_threshold,
@@ -293,13 +271,13 @@ public:
         // The schedule is now complex enough to warrant its own file.
         schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
             denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
-            downscaled, is_no_op, resize_builder,
-            corrected_hi_fi, dehazed, sharpened, local_laplacian_builder, curved, final_stage,
+            downscaled, is_no_op_resize, resize_builder,
+            corrected_hi_fi, dehazed, resampled, resampled_or_bypass, is_no_op_resample, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, lch_final,
             srgb_to_lch, graded_srgb, vignette_corrected, halide_proc_type,
             x, y, c, xo, xi, yo, yi,
             J, cutover_level);
-
+        
         processed = final_stage;
     }
 };
@@ -316,4 +294,3 @@ class CameraPipe : public CameraPipeGenerator<float> {};
 HALIDE_REGISTER_GENERATOR(CameraPipe, camera_pipe)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<float>, camera_pipe_f32)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<uint16_t>, camera_pipe_u16)
-

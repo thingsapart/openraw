@@ -5,10 +5,17 @@
 #include <vector>
 #include <map>
 #include <stdexcept>
+#include <limits>
 
 // A simple struct to represent a 2D point, used for curve controls.
 // This is now the canonical representation used in ProcessConfig.
 struct Point { float x, y; };
+
+// Use a very unlikely number as a sentinel to check if a parameter
+// was explicitly set by the user on the command line. This allows
+// the Lensfun loader to know whether it should apply a profile
+// value or respect the user's override.
+constexpr float UNSET_F = std::numeric_limits<float>::lowest();
 
 // All pipeline parameters are now encapsulated in this single struct.
 // It is shared between the command-line runner and the new UI editor.
@@ -67,10 +74,30 @@ struct ProcessConfig {
     std::vector<Point> curve_sat_vs_sat;
     
     // --- Lens Correction ---
+    // Chromatic Aberration (Manual Override)
+    float ca_red_cyan = 0.0f;
+    float ca_blue_yellow = 0.0f;
+
+    // Vignette
     float vignette_amount = 0.0f; // Range [-100, 100] in UI
     float vignette_midpoint = 50.0f; // Range [0, 100] in UI
     float vignette_roundness = 100.0f; // Range [0, 100] in UI
     float vignette_highlights = 0.0f; // Range [0, 100] in UI
+
+    // Distortion (Lensfun overrides)
+    std::string lens_profile_name = "None";
+    float dist_k1 = UNSET_F;
+    float dist_k2 = UNSET_F;
+    float dist_k3 = UNSET_F;
+
+    // Geometry
+    float geo_rotate = 0.0f;      // degrees
+    float geo_scale = 100.0f;     // percent
+    float geo_aspect = 1.0f;      // ratio
+    float geo_keystone_v = 0.0f;  // [-100, 100]
+    float geo_keystone_h = 0.0f;  // [-100, 100]
+    float geo_offset_x = 0.0f;    // pixels
+    float geo_offset_y = 0.0f;    // pixels
 };
 
 
@@ -83,4 +110,3 @@ void print_usage();
 
 
 #endif // PROCESS_OPTIONS_H
-

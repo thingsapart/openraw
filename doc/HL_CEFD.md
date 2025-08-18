@@ -39,36 +39,37 @@ Compact Execution Flow Diagram (CEFD) - Schedule A (High-Performance)
 
 ---
 
-### Schedule D: Tiled Schedule with Dehaze and Local Laplacian
+### Schedule E: Dehaze, Local Laplacian, and Lens Correction
 
-NOTES: This schedule adds the new pointwise `dehazed` stage. Crucially, it slots perfectly into the existing `xo` (per-tile) compute level alongside the other color manipulation stages (`srgb_to_lch`, `local_adjustments`, etc.). This preserves the pipeline's high performance, as the new stage is computed in-cache just before its consumer. The performance impact is negligible, demonstrating the power of scheduling pointwise operations.
+NOTES: This schedule adds the new `resampled` stage for all lens and geometry corrections. To satisfy the requirement of not interfering with the existing complex schedule, it is scheduled at `root`. This means it runs once, in full, creating a large temporary buffer. The subsequent tiled stages (like `sharpened`) then consume data from this buffer. This simplifies scheduling at the cost of memory bandwidth, but correctly isolates the complex data access patterns of the resampling stage.
 
 ```
-Compact Execution Flow Diagram (CEFD) - Schedule D (Dehaze + Local Laplacian)
-└─ FUNC final_stage @ root | S: (output)                               # Final output buffer
-  ├─ FUNC cc_matrix @ root | S: (root)                                 # Global: Interpolated color matrix
+Compact Execution Flow Diagram (CEFD) - Schedule E (Dehaze + Local Laplacian + Lens/Geo)
+└─ FUNC final_stage @ root | S: (output)                                # Final output buffer
+  ├─ FUNC cc_matrix @ root | S: (root)                                  # Global: Interpolated color matrix
   ├─ FUNC remap_detail_lut @ root | S: (root)                           # Global: LUT for local laplacian detail
-  └─ FUNC tone_curve_func @ root | S: (root)                           # Global: LUT for final tone mapping
+  ├─ FUNC tone_curve_func @ root | S: (root)                           # Global: LUT for final tone mapping
+  ├─ FUNC resampled @ root | S: (root) | D: parallel(y) vectorize(x)    # NEW: All geometric/lens correction happens here once.
   └─ LOOP var=yo [strip:32] >>parallel                                  # Parallelize over large horizontal strips
-    ├─ FUNC gPyramid_3..7 @ yo | S: ->yo | D: vectorize(x)              # SCHEDULE FORK: Low-freq pyramids computed per strip
-    ├─ FUNC inGPyramid_3..7 @ yo | S: ->yo | D: vectorize(x)            # -> Manages large stencils, prevents root-level computation
-    ├─ FUNC outGPyramid_7 @ yo | S: ->yo | D: vectorize(x)              # -> Coarsest output level also computed per strip
-    ├─ FUNC demosaiced @ yo | S: ->yo | D: vectorize(x)                 # Upstream stages computed per strip
+    ├─ FUNC gPyramid_3..7 @ yo | S: ->yo | D: vectorize(x)               # SCHEDULE FORK: Low-freq pyramids computed per strip
+    ├─ FUNC inGPyramid_3..7 @ yo | S: ->yo | D: vectorize(x)             # -> Manages large stencils, prevents root-level computation
+    ├─ FUNC outGPyramid_7 @ yo | S: ->yo | D: vectorize(x)               # -> Coarsest output level also computed per strip
+    ├─ FUNC demosaiced @ yo | S: ->yo | D: vectorize(x)                  # Upstream stages computed per strip
     ├─ FUNC deinterleaved @ yo | S: ->yo | D: vectorize(x)
     ├─ FUNC ca_corrected @ yo | S: ->yo | D: vectorize(x)
     ├─ FUNC denoised_raw @ yo | S: ->yo | D: vectorize(x)
-    └─ LOOP var=xo [tile:256]                                            # Sequentially process tiles within each strip
-      ├─ FUNC gPyramid_0..2 @ xo | S: ->xo | D: vectorize(xi)            # SCHEDULE FORK: High-freq pyramids computed per tile
-      ├─ FUNC inGPyramid_0..2 @ xo | S: ->xo | D: vectorize(xi)          # -> Maximizes locality for small stencils
-      ├─ FUNC lPyramid_0..7 @ xo | S: ->xo | D: vectorize(xi)            # -> All laplacian levels computed per tile
+    └─ LOOP var=xo [tile:256]                                             # Sequentially process tiles within each strip
+      ├─ FUNC gPyramid_0..2 @ xo | S: ->xo | D: vectorize(xi)             # SCHEDULE FORK: High-freq pyramids computed per tile
+      ├─ FUNC inGPyramid_0..2 @ xo | S: ->xo | D: vectorize(xi)           # -> Maximizes locality for small stencils
+      ├─ FUNC lPyramid_0..7 @ xo | S: ->xo | D: vectorize(xi)             # -> All laplacian levels computed per tile
       ├─ FUNC outLPyramid_0..7 @ xo | S: ->xo | D: vectorize(xi)
       ├─ FUNC outGPyramid_0..6 @ xo | S: ->xo | D: vectorize(xi)
-      ├─ FUNC lab @ xo | S: ->xo | D: vectorize(xi)                      # Color conversions computed per tile
-      ├─ FUNC corrected @ xo | S: ->xo | D: vectorize(xi)                # Color correction computed per tile
-      ├─ FUNC dehazed @ xo | S: ->xo | D: vectorize(xi)                  # NEW: Dehaze is pointwise, fits perfectly here
-      ├─ FUNC sharpened @ xo | S: ->xo | D: vectorize(xi)                # Passthrough, but scheduled per tile
-      ├─ FUNC local_adjustments @ xo | S: ->xo | D: vectorize(xi)        # Main adjustment stage computed per tile
-      └─ LOOP var=yi [scanline]                                          # Innermost loops over pixels within a tile
+      ├─ FUNC lab @ xo | S: ->xo | D: vectorize(xi)                       # Color conversions computed per tile
+      ├─ FUNC corrected @ xo | S: ->xo | D: vectorize(xi)                 # Color correction computed per tile
+      ├─ FUNC dehazed @ xo | S: ->xo | D: vectorize(xi)
+      ├─ FUNC sharpened @ xo | S: ->xo | D: vectorize(xi)                 # Now consumes from the root `resampled` buffer
+      ├─ FUNC local_adjustments @ xo | S: ->xo | D: vectorize(xi)         # Main adjustment stage computed per tile
+      └─ LOOP var=yi [scanline]                                           # Innermost loops over pixels within a tile
         └─ LOOP var=xi [vector] >>vectorize
           └─ ... (pointwise funcs fused here)
 ```
@@ -88,3 +89,5 @@ Compact Execution Flow Diagram (CEFD) - Schedule B (Low-Performance)
       ├─ FUNC corrected @ yi | S: ->yo                            # SLOW: Loads `demoseiced`, writes its own temp buffer
       ├─ FUNC sharpened @ yi | S: ->yo                           # SLOW: Loads `corrected`, writes its own temp buffer
       └─ FUNC curved @ yi | S: ->yo                               # SLOW: Loads `sharpened`, writes its own temp buffer
+
+
