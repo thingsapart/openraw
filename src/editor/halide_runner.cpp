@@ -1,133 +1,178 @@
-#include "halide_runner.h"
-#include "tone_curve_utils.h"
-#include "color_tools.h"
-
-#include <algorithm>
+#include "editor/halide_runner.h"
+#include <cmath>
 #include <iostream>
-#include <numeric> // for std::accumulate
-#include <cstring> // For memcpy
-#include <cmath>   // For powf
+#include <algorithm>
 
-// This project only builds the f32 pipeline for the UI for simplicity.
+// The editor exclusively uses the float32 pipeline.
+// Define this macro to ensure the correct generated header is included.
+#define PIPELINE_PRECISION_F32
+
+// To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
+#ifdef USE_LENSFUN
+#include "lensfun/lensfun.h"
+#endif
+
+// Conditionally include the generated pipeline headers
+#if defined(PIPELINE_PRECISION_F32)
 #include "camera_pipe_f32_lib.h"
+#elif defined(PIPELINE_PRECISION_U16)
+#include "camera_pipe_u16_lib.h"
+#else
+#error "PIPELINE_PRECISION_F32 or PIPELINE_PRECISION_U16 must be defined"
+#endif
 
-static void ConvertPlanarToInterleaved(const Halide::Runtime::Buffer<uint8_t>& planar_in, std::vector<uint8_t>& interleaved_out) {
-    if (planar_in.data() == nullptr) {
-        interleaved_out.clear();
-        return;
+namespace { // Anonymous namespace for local helpers
+
+// --- Lens Correction LUT Generation (Copied from process.cpp) ---
+namespace LensCorrection {
+    const int LUT_SIZE = 2048;
+    const float MAX_RD_SQUARED_NORM = 3.0f;
+
+    float solve_cubic_poly3(float p, float q) {
+        float p_3 = p / 3.0f;
+        float q_2 = q / 2.0f;
+        float discriminant = q_2 * q_2 + p_3 * p_3 * p_3;
+
+        if (discriminant >= 0) {
+            float root_discriminant = sqrtf(discriminant);
+            float term1 = cbrtf(-q_2 + root_discriminant);
+            float term2 = cbrtf(-q_2 - root_discriminant);
+            return term1 + term2;
+        } else {
+            float r = sqrtf(-p_3 * -p_3 * -p_3);
+            float phi = acosf(-q_2 / r);
+            float two_sqrt_p3 = 2.0f * sqrtf(-p_3);
+            return two_sqrt_p3 * cosf(phi / 3.0f);
+        }
     }
-    const int width = planar_in.width();
-    const int height = planar_in.height();
-    const int channels = planar_in.channels();
-    const size_t total_pixels = width * height;
 
-    interleaved_out.resize(total_pixels * channels);
+    float solve_poly5(float k1, float k2, float rd) {
+        float ru = rd; // Initial guess
+        for (int i = 0; i < 4; ++i) {
+            float ru2 = ru * ru;
+            float ru3 = ru2 * ru;
+            float ru4 = ru2 * ru2;
+            float ru5 = ru4 * ru;
+            float f = k2 * ru5 + k1 * ru3 + ru - rd;
+            float f_prime = 5.0f * k2 * ru4 + 3.0f * k1 * ru2 + 1.0f;
+            if (fabsf(f_prime) < 1e-6) break;
+            ru -= f / f_prime;
+        }
+        return ru;
+    }
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            for (int c = 0; c < channels; c++) {
-                interleaved_out[(y * width + x) * channels + c] = planar_in(x, y, c);
+    float solve_ptlens(float a, float b, float c, float rd) {
+        float ru = rd; // Initial guess
+        float d = 1.0f - a - b - c;
+        for (int i = 0; i < 4; ++i) {
+            float ru2 = ru * ru;
+            float ru3 = ru2 * ru;
+            float ru4 = ru2 * ru2;
+            float f = a * ru4 + b * ru3 + c * ru2 + d * ru - rd;
+            float f_prime = 4.0f * a * ru3 + 3.0f * b * ru2 + 2.0f * c * ru + d;
+            if (fabsf(f_prime) < 1e-6) break;
+            ru -= f / f_prime;
+        }
+        return ru;
+    }
+
+    Halide::Runtime::Buffer<float, 1> generate_identity_lut() {
+        Halide::Runtime::Buffer<float, 1> lut(LUT_SIZE);
+        for (int i = 0; i < LUT_SIZE; ++i) {
+            lut(i) = 1.0f;
+        }
+        return lut;
+    }
+
+#ifdef USE_LENSFUN
+    Halide::Runtime::Buffer<float, 1> generate_distortion_lut(const lfLensCalibDistortion& model) {
+        Halide::Runtime::Buffer<float, 1> lut(LUT_SIZE);
+        for (int i = 0; i < LUT_SIZE; ++i) {
+            float rd_sq_norm = (float)i * MAX_RD_SQUARED_NORM / (float)(LUT_SIZE - 1);
+            float rd_norm = sqrtf(rd_sq_norm);
+            float ru_norm = rd_norm;
+
+            switch (model.Model) {
+                case LF_DIST_MODEL_POLY3: {
+                    float k1 = model.Terms[0];
+                    if (fabsf(k1) > 1e-6f) {
+                        ru_norm = solve_cubic_poly3((1.0f - k1) / k1, -rd_norm / k1);
+                    }
+                    break;
+                }
+                case LF_DIST_MODEL_POLY5: {
+                    ru_norm = solve_poly5(model.Terms[0], model.Terms[1], rd_norm);
+                    break;
+                }
+                case LF_DIST_MODEL_PTLENS: {
+                    ru_norm = solve_ptlens(model.Terms[0], model.Terms[1], model.Terms[2], rd_norm);
+                    break;
+                }
+                default: break;
             }
+            lut(i) = (rd_norm > 1e-5f) ? (ru_norm / rd_norm) : 1.0f;
+        }
+        return lut;
+    }
+#endif
+} // namespace LensCorrection
+} // namespace
+
+
+void RunHalidePipelines(AppState& state) {
+    const ProcessConfig& cfg = state.params;
+
+    // --- Common Setup ---
+    int demosaic_id = 3; // default to 'fast'
+    if (cfg.demosaic_algorithm == "ahd") demosaic_id = 0;
+    else if (cfg.demosaic_algorithm == "lmmse") demosaic_id = 1;
+    else if (cfg.demosaic_algorithm == "ri") demosaic_id = 2;
+
+    float exposure_multiplier = powf(2.0f, cfg.exposure);
+    float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
+
+    // Generate the tone curve LUT and store it in the state to be passed to the pipeline.
+    state.pipeline_tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
+    auto color_grading_lut = HostColor::generate_color_lut(cfg);
+    auto distortion_lut = LensCorrection::generate_identity_lut(); // Start with identity
+
+#ifdef USE_LENSFUN
+    bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
+                         cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
+    bool lensfun_applied = false;
+    if (needs_lensfun && state.lensfun_db) {
+        const lfCamera** cams = lf_db_find_cameras(state.lensfun_db.get(), cfg.camera_make.c_str(), cfg.camera_model.c_str());
+        if (cams && cams[0]) {
+            const lfCamera* cam = cams[0];
+            const lfLens** lenses = lf_db_find_lenses_hd(state.lensfun_db.get(), cam, nullptr, cfg.lens_profile_name.c_str(), 0);
+            if (lenses && lenses[0]) {
+                const lfLens* lens = lenses[0];
+                lfLensCalibDistortion dist_model;
+                if (lens->InterpolateDistortion(cfg.focal_length, dist_model)) {
+                    if (dist_model.Model == LF_DIST_MODEL_POLY3 || dist_model.Model == LF_DIST_MODEL_POLY5 || dist_model.Model == LF_DIST_MODEL_PTLENS) {
+                        distortion_lut = LensCorrection::generate_distortion_lut(dist_model);
+                        lensfun_applied = true;
+                    }
+                }
+            }
+            if (lenses) lf_free(lenses);
+        }
+        if (cams) lf_free(cams);
+    }
+
+    // If a lensfun profile was NOT applied, check for manual overrides.
+    if (!lensfun_applied) {
+        const float e = 1e-6f;
+        if (fabsf(cfg.dist_k1) > e || fabsf(cfg.dist_k2) > e || fabsf(cfg.dist_k3) > e) {
+            lfLensCalibDistortion manual_model;
+            manual_model.Model = LF_DIST_MODEL_POLY5; // Treat manual k1/k2 as POLY5
+            manual_model.Terms[0] = cfg.dist_k1;
+            manual_model.Terms[1] = cfg.dist_k2;
+            // Note: k3 is ignored as POLY5 solver only uses k1, k2.
+            distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
         }
     }
-}
-
-// New function to compute histograms from the 8-bit preview image.
-static void ComputeHistograms(AppState& state) {
-    const auto& preview_image = state.thumb_output_planar;
-    if (preview_image.data() == nullptr) {
-        return;
-    }
-
-    const int width = preview_image.width();
-    const int height = preview_image.height();
-    const int bins = 256;
-
-    std::vector<int> counts_r(bins, 0), counts_g(bins, 0), counts_b(bins, 0), counts_luma(bins, 0);
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            // The preview_image from the pipeline is already gamma-corrected
-            // via the tone curve. We can bin the values directly.
-            uint8_t r = preview_image(x, y, 0);
-            uint8_t g = preview_image(x, y, 1);
-            uint8_t b = preview_image(x, y, 2);
-
-            // Calculate luma from the gamma-corrected RGB values.
-            uint8_t luma = static_cast<uint8_t>(0.299f * r + 0.587f * g + 0.114f * b);
-
-            counts_r[r]++;
-            counts_g[g]++;
-            counts_b[b]++;
-            counts_luma[luma]++;
-        }
-    }
-
-    // Find the max count to normalize the histograms for plotting.
-    // To prevent clipped blacks (bin 0) and whites (bin 255) from
-    // "smashing" the rest of the histogram, we find the max value
-    // only in the range [1, 254].
-    int max_count = 0;
-    auto find_max = [&](const std::vector<int>& counts) {
-        if (counts.size() == bins) {
-             max_count = std::max(max_count, *std::max_element(counts.begin() + 1, counts.end() - 1));
-        }
-    };
-    find_max(counts_r);
-    find_max(counts_g);
-    find_max(counts_b);
-    find_max(counts_luma);
-
-    if (max_count == 0) max_count = 1; // Avoid division by zero
-
-    // Resize and fill the float vectors in AppState with normalized values
-    auto normalize_and_store = [&](std::vector<float>& dest, const std::vector<int>& counts) {
-        dest.resize(bins);
-        for(int i = 0; i < bins; ++i) {
-            float normalized_val = static_cast<float>(counts[i]) / max_count;
-            // Clamp the value to 1.0f. This handles the outlier bins (0 and 255)
-            // so they don't "shoot out" of the top of the histogram view.
-            dest[i] = std::min(normalized_val, 1.0f);
-        }
-    };
-
-    normalize_and_store(state.histogram_r, counts_r);
-    normalize_and_store(state.histogram_g, counts_g);
-    normalize_and_store(state.histogram_b, counts_b);
-    normalize_and_store(state.histogram_luma, counts_luma);
-}
-
-
-static void run_pipeline_instance(AppState& state, float downscale_factor, Halide::Runtime::Buffer<uint8_t>& output_buffer, const std::string& view_name) {
-    if (state.input_image.data() == nullptr) {
-        return;
-    }
-
-    const int raw_w = state.input_image.width() - 32;
-    const int raw_h = state.input_image.height() - 24;
-    int out_width = static_cast<int>(raw_w / downscale_factor);
-    int out_height = static_cast<int>(raw_h / downscale_factor);
-
-    printf("\n--- Preparing Halide run for: %s ---\n", view_name.c_str());
-    printf("  Downscale Factor: %.4f, Calculated Output: %d x %d\n", downscale_factor, out_width, out_height);
-
-    if (out_width < 32 || out_height < 32) {
-        printf("  SKIPPING: Output size is too small.\n");
-        return;
-    }
-
-    if (output_buffer.data() == nullptr || output_buffer.width() != out_width || output_buffer.height() != out_height) {
-        output_buffer = Halide::Runtime::Buffer<uint8_t>(out_width, out_height, 3);
-    }
-
-    Halide::Runtime::Buffer<uint16_t, 2> pipeline_lut = ToneCurveUtils::generate_pipeline_lut(state.params);
-    Halide::Runtime::Buffer<float, 4> color_grading_lut = HostColor::generate_color_lut(state.params);
-
-    if (view_name == "Thumbnail") {
-        memcpy(state.pipeline_tone_curve_lut.data(), pipeline_lut.data(), pipeline_lut.size_in_bytes());
-        ToneCurveUtils::generate_linear_lut(state.params, state.ui_tone_curve_lut);
-    }
-
+#endif
 
     float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
                                {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
@@ -136,75 +181,123 @@ static void run_pipeline_instance(AppState& state, float downscale_factor, Halid
                                {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
                                {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
     Halide::Runtime::Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
-    for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++) {
-        matrix_3200(j, i) = _matrix_3200[i][j];
-        matrix_7000(j, i) = _matrix_7000[i][j];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 4; j++) {
+            matrix_3200(j, i) = _matrix_3200[i][j];
+            matrix_7000(j, i) = _matrix_7000[i][j];
+        }
     }
 
-    int blackLevel = 25;
-    int whiteLevel = 1023;
-    float denoise_strength_norm = std::max(0.0f, std::min(1.0f, state.params.denoise_strength / 100.0f));
-    float exposure_multiplier = powf(2.0f, state.params.exposure);
-    int demosaic_id = 3;
-    if (state.params.demosaic_algorithm == "ahd") demosaic_id = 0;
-    else if (state.params.demosaic_algorithm == "lmmse") demosaic_id = 1;
-    else if (state.params.demosaic_algorithm == "ri") demosaic_id = 2;
+    // --- Main Preview Pipeline ---
+    {
+        float downscale_factor = powf(2.0f, state.preview_downsample);
+        int out_width = static_cast<int>((state.input_image.width() - 32) / downscale_factor);
+        int out_height = static_cast<int>((state.input_image.height() - 24) / downscale_factor);
 
-    // Use a local copy for lensfun overrides, defaulting to 0 if they were never set.
-    float dist_k1 = (state.params.dist_k1 == UNSET_F) ? 0.0f : state.params.dist_k1;
-    float dist_k2 = (state.params.dist_k2 == UNSET_F) ? 0.0f : state.params.dist_k2;
-    float dist_k3 = (state.params.dist_k3 == UNSET_F) ? 0.0f : state.params.dist_k3;
+        if (!state.main_output_planar.data() || state.main_output_planar.width() != out_width || state.main_output_planar.height() != out_height) {
+            state.main_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{out_width, out_height, 3});
+        }
 
-    int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                                 state.params.color_temp, state.params.tint, exposure_multiplier, state.params.ca_strength,
-                                 denoise_strength_norm, state.params.denoise_eps,
-                                 blackLevel, whiteLevel, pipeline_lut,
-                                 0.f, 0.f, 0.f, // sharpen params (unused)
-                                 state.params.ll_detail, state.params.ll_clarity, state.params.ll_shadows,
-                                 state.params.ll_highlights, state.params.ll_blacks, state.params.ll_whites,
-                                 color_grading_lut,
-                                 state.params.vignette_amount, state.params.vignette_midpoint, state.params.vignette_roundness, state.params.vignette_highlights,
-                                 state.params.dehaze_strength,
-                                 state.params.ca_red_cyan, state.params.ca_blue_yellow,
-                                 dist_k1, dist_k2, dist_k3,
-                                 state.params.geo_rotate, state.params.geo_scale, state.params.geo_aspect,
-                                 state.params.geo_keystone_v, state.params.geo_keystone_h,
-                                 state.params.geo_offset_x, state.params.geo_offset_y,
-                                 output_buffer);
+        int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+                                  cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+                                  denoise_strength_norm, cfg.denoise_eps,
+                                  state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,
+                                  0.f, 0.f, 0.f, /* sharpen */
+                                  cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                                  color_grading_lut,
+                                  cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
+                                  cfg.dehaze_strength,
+                                  distortion_lut,
+                                  cfg.ca_red_cyan, cfg.ca_blue_yellow,
+                                  cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
+                                  cfg.geo_keystone_v, cfg.geo_keystone_h,
+                                  cfg.geo_offset_x, cfg.geo_offset_y,
+                                  state.main_output_planar);
 
-    if (result != 0) {
-        std::cerr << "Halide pipeline returned an error: " << result << std::endl;
+        if (result != 0) { std::cerr << "Main Halide pipeline returned an error: " << result << std::endl; }
+
+        state.main_output_interleaved.resize(out_width * out_height * 3);
+        // The pipeline's output is planar (x, y, c). We interleave it for OpenGL.
+        for (int y = 0; y < out_height; ++y) {
+            for (int x = 0; x < out_width; ++x) {
+                int inter_idx = (y * out_width + x) * 3;
+                state.main_output_interleaved[inter_idx + 0] = state.main_output_planar(x, y, 0);
+                state.main_output_interleaved[inter_idx + 1] = state.main_output_planar(x, y, 1);
+                state.main_output_interleaved[inter_idx + 2] = state.main_output_planar(x, y, 2);
+            }
+        }
     }
-}
 
-void RunHalidePipelines(AppState& state) {
-    if (state.input_image.data() == nullptr || state.main_view_size.x <= 0) {
-        return;
+    // --- Thumbnail Pipeline (for histogram/preview) ---
+    {
+        const int thumb_width = 256;
+        float thumb_downscale = static_cast<float>(state.input_image.width() - 32) / thumb_width;
+        int thumb_height = static_cast<int>((state.input_image.height() - 24) / thumb_downscale);
+
+        if (!state.thumb_output_planar.data() || state.thumb_output_planar.width() != thumb_width || state.thumb_output_planar.height() != thumb_height) {
+            state.thumb_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{thumb_width, thumb_height, 3});
+        }
+
+        int result = camera_pipe_f32(state.input_image, thumb_downscale, demosaic_id, matrix_3200, matrix_7000,
+                                  cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+                                  denoise_strength_norm, cfg.denoise_eps,
+                                  state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,
+                                  0.f, 0.f, 0.f, /* sharpen */
+                                  cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                                  color_grading_lut,
+                                  cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
+                                  cfg.dehaze_strength,
+                                  distortion_lut,
+                                  cfg.ca_red_cyan, cfg.ca_blue_yellow,
+                                  cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
+                                  cfg.geo_keystone_v, cfg.geo_keystone_h,
+                                  cfg.geo_offset_x, cfg.geo_offset_y,
+                                  state.thumb_output_planar);
+
+        if (result != 0) { std::cerr << "Thumbnail Halide pipeline returned an error: " << result << std::endl; }
+
+        // Interleave the thumbnail for OpenGL texture update.
+        state.thumb_output_interleaved.resize(thumb_width * thumb_height * 3);
+        for (int y = 0; y < thumb_height; ++y) {
+            for (int x = 0; x < thumb_width; ++x) {
+                int inter_idx = (y * thumb_width + x) * 3;
+                state.thumb_output_interleaved[inter_idx + 0] = state.thumb_output_planar(x, y, 0);
+                state.thumb_output_interleaved[inter_idx + 1] = state.thumb_output_planar(x, y, 1);
+                state.thumb_output_interleaved[inter_idx + 2] = state.thumb_output_planar(x, y, 2);
+            }
+        }
+
+        // Calculate histograms from the processed thumbnail
+        const int hist_size = 256;
+        state.histogram_r.assign(hist_size, 0);
+        state.histogram_g.assign(hist_size, 0);
+        state.histogram_b.assign(hist_size, 0);
+        state.histogram_luma.assign(hist_size, 0);
+
+        for (int y = 0; y < thumb_height; ++y) {
+            for (int x = 0; x < thumb_width; ++x) {
+                uint8_t r = state.thumb_output_planar(x, y, 0);
+                uint8_t g = state.thumb_output_planar(x, y, 1);
+                uint8_t b = state.thumb_output_planar(x, y, 2);
+                uint8_t luma = static_cast<uint8_t>(0.299f * r + 0.587f * g + 0.114f * b);
+                state.histogram_r[r]++;
+                state.histogram_g[g]++;
+                state.histogram_b[b]++;
+                state.histogram_luma[luma]++;
+            }
+        }
+
+        // Normalize histograms
+        auto normalize_hist = [](std::vector<float>& hist) {
+            float max_val = 0;
+            for (float v : hist) max_val = std::max(max_val, v);
+            if (max_val > 0) {
+                for (float& v : hist) v /= max_val;
+            }
+        };
+        normalize_hist(state.histogram_r);
+        normalize_hist(state.histogram_g);
+        normalize_hist(state.histogram_b);
+        normalize_hist(state.histogram_luma);
     }
-
-    const float raw_w = state.input_image.width() - 32;
-    const float raw_h = state.input_image.height() - 24;
-
-    // --- Main View Pipeline ---
-    float fit_scale = std::min(state.main_view_size.x / raw_w, state.main_view_size.y / raw_h);
-    float on_screen_width = raw_w * fit_scale * state.zoom;
-    float downscale_factor_main = raw_w / on_screen_width;
-
-    const float min_pipeline_width = 256.0f;
-    float max_downscale_factor = raw_w / min_pipeline_width;
-    downscale_factor_main = std::min(downscale_factor_main, max_downscale_factor);
-    downscale_factor_main = std::max(1.0f, downscale_factor_main);
-
-    run_pipeline_instance(state, downscale_factor_main, state.main_output_planar, "Main View");
-    ConvertPlanarToInterleaved(state.main_output_planar, state.main_output_interleaved);
-
-    // --- Thumbnail & Histogram Pipeline ---
-    const float PREVIEW_LONGEST_DIM = 1024.0f;
-    float downscale_factor_thumb = (raw_w > raw_h) ? (raw_w / PREVIEW_LONGEST_DIM) : (raw_h / PREVIEW_LONGEST_DIM);
-    downscale_factor_thumb = std::max(1.0f, downscale_factor_thumb);
-
-    run_pipeline_instance(state, downscale_factor_thumb, state.thumb_output_planar, "Thumbnail");
-
-    ComputeHistograms(state);
-    ConvertPlanarToInterleaved(state.thumb_output_planar, state.thumb_output_interleaved);
 }

@@ -6,7 +6,8 @@
 
 namespace Panes {
 
-void render_preview(AppState& state) {
+bool render_preview(AppState& state) {
+    bool changed = false;
     if (state.input_image.data()) {
         const float raw_width = state.input_image.width() - 32;
         const float raw_height = state.input_image.height() - 24;
@@ -29,7 +30,7 @@ void render_preview(AppState& state) {
                     float fit_scale = std::min(state.main_view_size.x / raw_width, state.main_view_size.y / raw_height);
                     state.pan_offset.x = (state.main_view_size.x - raw_width * fit_scale) * 0.5f;
                     state.pan_offset.y = (state.main_view_size.y - raw_height * fit_scale) * 0.5f;
-                    state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
+                    changed = true;
                 }
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     ImVec2 mouse_pos_in_thumb = ImGui::GetMousePos() - thumb_pos;
@@ -40,6 +41,7 @@ void render_preview(AppState& state) {
                     float zoomed_h = raw_height * fit_scale * state.zoom;
                     state.pan_offset.x = (state.main_view_size.x * 0.5f) - (norm_x * zoomed_w);
                     state.pan_offset.y = (state.main_view_size.y * 0.5f) - (norm_y * zoomed_h);
+                    changed = true;
                 }
             }
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -56,6 +58,7 @@ void render_preview(AppState& state) {
             draw_list->PopClipRect();
         }
     }
+    return changed;
 }
 
 } // namespace Panes

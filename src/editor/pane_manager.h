@@ -10,7 +10,7 @@
 struct AppState;
 
 // Define the type for a pane's rendering function
-using PaneRenderFunction = std::function<void(AppState&)>;
+using PaneRenderFunction = std::function<bool(AppState&)>;
 
 // Represents a single collapsible pane in the UI
 struct Pane {
@@ -25,7 +25,7 @@ public:
     void register_pane(const std::string& title, PaneRenderFunction render_func, bool is_static = false, bool default_open = true);
     
     // Renders all registered panes according to their static/scrolling state.
-    void render_all_panes(AppState& state);
+    bool render_all_panes(AppState& state);
 
 private:
     std::vector<Pane> static_panes_;

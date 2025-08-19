@@ -91,11 +91,9 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> dehaze_strength{"dehaze_strength"};
 
     // New inputs for Lens Correction & Geometry
+    typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 1>> distortion_lut{"distortion_lut"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_red_cyan{"ca_red_cyan"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_blue_yellow{"ca_blue_yellow"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k1{"dist_k1"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k2{"dist_k2"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> dist_k3{"dist_k3"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_rotate{"geo_rotate"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_scale{"geo_scale"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> geo_aspect{"geo_aspect"};
@@ -204,7 +202,7 @@ public:
 
         // --- LENS & GEOMETRY CORRECTION STAGE ---
         LensGeometryBuilder lens_geometry_builder(vignette_corrected, x, y, c, out_width, out_height,
-                                                  dist_k1, dist_k2, dist_k3,
+                                                  distortion_lut, distortion_lut.dim(0).extent(),
                                                   ca_red_cyan, ca_blue_yellow,
                                                   geo_rotate, geo_scale, geo_aspect,
                                                   geo_keystone_v, geo_keystone_h,
@@ -217,7 +215,10 @@ public:
                               abs(geo_aspect - 1.f) < e && abs(geo_keystone_v) < e &&
                               abs(geo_keystone_h) < e && abs(geo_offset_x) < e &&
                               abs(geo_offset_y) < e;
-        Expr is_distort_default = abs(dist_k1) < e && abs(dist_k2) < e && abs(dist_k3) < e;
+        // For the distortion LUT, a "default" state is one where all values are 1.0.
+        // We can check just the first and last elements as a proxy.
+        Expr is_distort_default = abs(distortion_lut(0) - 1.0f) < e &&
+                                  abs(distortion_lut(distortion_lut.dim(0).extent() - 1) - 1.0f) < e;
         Expr is_ca_default = abs(ca_red_cyan) < e && abs(ca_blue_yellow) < e;
         Expr is_no_op_resample = is_geo_default && is_distort_default && is_ca_default;
 
@@ -265,6 +266,7 @@ public:
         matrix_7000.set_estimates({{0, 4}, {0, 3}});
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
         color_grading_lut.set_estimates({{0, 33}, {0, 33}, {0, 33}, {0, 3}});
+        distortion_lut.set_estimates({{0, 2048}});
         final_stage.set_estimates({{0, out_width_est}, {0, out_height_est}, {0, 3}});
 
         // ========== SCHEDULE ==========

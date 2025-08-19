@@ -27,8 +27,8 @@
 #include <cstring>   // for memcpy
 
 // This function now uses the PaneManager to render the right-side panel.
-static void RenderRightPanel(PaneManager& pane_manager, AppState& state) {
-    pane_manager.render_all_panes(state);
+static bool RenderRightPanel(PaneManager& pane_manager, AppState& state) {
+    return pane_manager.render_all_panes(state);
 }
 
 static void RenderMainView(AppState& state) {
@@ -93,28 +93,19 @@ void RenderUI(AppState& state) {
     static PaneManager pane_manager;
     static bool panes_registered = false;
     if (!panes_registered) {
-        // Wrapper lambda to attach a debounce trigger to any pane function that returns 'true' on change.
-        auto create_debounced_render_func = [](auto render_func) {
-            return [render_func](AppState& s) {
-                if (render_func(s)) {
-                    s.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
-                }
-            };
-        };
-
         // Static Panes (top, non-scrolling)
         pane_manager.register_pane("Preview", Panes::render_preview, true);
-        pane_manager.register_pane("Histogram & Curves", create_debounced_render_func(Panes::render_histogram_curves), true);
+        pane_manager.register_pane("Histogram & Curves", Panes::render_histogram_curves, true);
 
         // Scrolling Panes
-        pane_manager.register_pane("Core Pipeline", create_debounced_render_func(Panes::render_core_pipeline));
-        pane_manager.register_pane("Denoise", create_debounced_render_func(Panes::render_denoise));
-        pane_manager.register_pane("Dehaze", create_debounced_render_func(Panes::render_dehaze));
-        pane_manager.register_pane("Lens Corrections", create_debounced_render_func(Panes::render_lens_correction), false, true);
-        pane_manager.register_pane("Local Adjustments", create_debounced_render_func(Panes::render_local_adjustments));
-        pane_manager.register_pane("Color Wheels", create_debounced_render_func(Panes::render_color_wheels), false, false);
-        pane_manager.register_pane("Color Curves", create_debounced_render_func(Panes::render_color_curves), false, false);
-        pane_manager.register_pane("Tone & Curve", create_debounced_render_func(Panes::render_tone_curves));
+        pane_manager.register_pane("Core Pipeline", Panes::render_core_pipeline);
+        pane_manager.register_pane("Denoise", Panes::render_denoise);
+        pane_manager.register_pane("Dehaze", Panes::render_dehaze);
+        pane_manager.register_pane("Lens Corrections", Panes::render_lens_correction, false, true);
+        pane_manager.register_pane("Local Adjustments", Panes::render_local_adjustments);
+        pane_manager.register_pane("Color Wheels", Panes::render_color_wheels, false, false);
+        pane_manager.register_pane("Color Curves", Panes::render_color_curves, false, false);
+        pane_manager.register_pane("Tone & Curve", Panes::render_tone_curves);
 
         panes_registered = true;
     }
@@ -162,9 +153,13 @@ void RenderUI(AppState& state) {
 
     // --- Render UI Components ---
     RenderMainView(state);
-    RenderRightPanel(pane_manager, state);
+    bool changed = RenderRightPanel(pane_manager, state);
 
     // --- Handle Debounced Pipeline Execution ---
+    if (changed) {
+        state.next_render_time = std::chrono::steady_clock::now() + AppState::DEBOUNCE_DURATION;
+    }
+
     auto now = std::chrono::steady_clock::now();
     if (state.ui_ready && now >= state.next_render_time) {
         std::cout << "Debounce triggered: Rerunning Halide pipeline..." << std::endl;

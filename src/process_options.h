@@ -90,10 +90,10 @@ struct ProcessConfig {
     float vignette_roundness = 100.0f; // Range [0, 100] in UI
     float vignette_highlights = 0.0f; // Range [0, 100] in UI
 
-    // Distortion (Lensfun overrides)
-    float dist_k1 = UNSET_F;
-    float dist_k2 = UNSET_F;
-    float dist_k3 = UNSET_F;
+    // Distortion (Manual overrides)
+    float dist_k1 = 0.0f;
+    float dist_k2 = 0.0f;
+    float dist_k3 = 0.0f;
 
     // Geometry
     float geo_rotate = 0.0f;      // degrees

@@ -28,6 +28,20 @@ if(NOT CMAKE_HALIDE_TARGET)
   message(STATUS "CMAKE_HALIDE_TARGET not set, defaulting to 'host'")
 endif()
 
+option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
+option(USE_LENSFUN "Use Lensfun lens correction tool" ON)
+if(USE_LENSFUN)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LENSFUN REQUIRED lensfun)
+    if(LENSFUN_FOUND)
+        message(STATUS "Found Lensfun (via pkg-config)")
+        add_definitions(-DUSE_LENSFUN)
+    else()
+        message(WARNING "Lensfun library (lensfun-1) not found by pkg-config. Building without lens correction support.")
+        set(USE_LENSFUN OFF)
+    endif()
+endif()
+
 # ==============================================================================
 #  1. PIPELINE GENERATOR
 # ==============================================================================
@@ -106,6 +120,7 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
         Halide::ImageIO
         PNG::PNG
         ${CMAKE_DL_LIBS}
+        ${LENSFUN_LIBRARIES}
     )
     add_dependencies(${PROCESS_TARGET} generate_${PIPELINE_NAME})
 endforeach()
@@ -181,6 +196,7 @@ add_executable(rawr
     src/color_tools.cpp
     src/tone_curve_utils.cpp
     src/editor/pane_manager.cpp
+    src/editor/imgui_custom_widgets.cpp
     src/editor/panes/pane_color_curves.cpp
     src/editor/panes/pane_color_wheels.cpp
     src/editor/panes/pane_core_pipeline.cpp
@@ -191,6 +207,7 @@ add_executable(rawr
     src/editor/panes/pane_tone_curves.cpp
     src/editor/panes/pane_lens_correction.cpp
     src/editor/panes/pane_dehaze.cpp
+    src/editor/panes/pane_lens_correction.cpp
 )
 
 target_compile_definitions(rawr PRIVATE USE_LENSFUN)

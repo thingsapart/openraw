@@ -55,15 +55,15 @@ void print_usage() {
            "  --camera-model <name>  Camera model for Lensfun lookup (e.g. \"High Quality Camera\").\n"
            "  --lensfun <profile>    Name of lensfun profile to apply (e.g. \"Raspberry Pi High Quality Camera Lens\").\n"
            "  --focal-length <mm>    Focal length in mm for Lensfun lookup (default: 16.0).\n"
+           "  --dist-k1 <val>        Manual distortion coefficient k1 (overrides lensfun).\n"
+           "  --dist-k2 <val>        Manual distortion coefficient k2 (overrides lensfun).\n"
+           "  --dist-k3 <val>        Manual distortion coefficient k3 (overrides lensfun).\n"
            "  --ca-red <val>         Manual Red/Cyan CA fringe control, -100 to 100 (default: 0).\n"
            "  --ca-blue <val>        Manual Blue/Yellow CA fringe control, -100 to 100 (default: 0).\n"
            "  --vignette-amount <val>    Vignette strength, -100 to 100 (default: 0).\n"
            "  --vignette-midpoint <val>  Vignette feather/reach, 0 to 100 (default: 50).\n"
            "  --vignette-roundness <val> Vignette shape, 0 (circular) to 100 (elliptical) (default: 100).\n"
            "  --vignette-highlights <val> Highlight protection, 0 to 100 (default: 0).\n"
-           "  --dist-k1 <val>        Distortion coefficient k1 (overrides lensfun).\n"
-           "  --dist-k2 <val>        Distortion coefficient k2 (overrides lensfun).\n"
-           "  --dist-k3 <val>        Distortion coefficient k3 (overrides lensfun).\n"
            "  --rotate <deg>         Rotation in degrees (default: 0).\n"
            "  --scale <pct>          Scale/Zoom in percent (default: 100).\n"
            "  --aspect <ratio>       Aspect ratio adjustment (default: 1.0).\n"
@@ -191,15 +191,15 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("camera-model")) cfg.camera_model = args["camera-model"];
         if (args.count("lensfun")) cfg.lens_profile_name = args["lensfun"];
         if (args.count("focal-length")) cfg.focal_length = std::stof(args["focal-length"]);
+        if (args.count("dist-k1")) cfg.dist_k1 = std::stof(args["dist-k1"]);
+        if (args.count("dist-k2")) cfg.dist_k2 = std::stof(args["dist-k2"]);
+        if (args.count("dist-k3")) cfg.dist_k3 = std::stof(args["dist-k3"]);
         if (args.count("ca-red")) cfg.ca_red_cyan = std::stof(args["ca-red"]);
         if (args.count("ca-blue")) cfg.ca_blue_yellow = std::stof(args["ca-blue"]);
         if (args.count("vignette-amount")) cfg.vignette_amount = std::stof(args["vignette-amount"]);
         if (args.count("vignette-midpoint")) cfg.vignette_midpoint = std::stof(args["vignette-midpoint"]);
         if (args.count("vignette-roundness")) cfg.vignette_roundness = std::stof(args["vignette-roundness"]);
         if (args.count("vignette-highlights")) cfg.vignette_highlights = std::stof(args["vignette-highlights"]);
-        if (args.count("dist-k1")) cfg.dist_k1 = std::stof(args["dist-k1"]);
-        if (args.count("dist-k2")) cfg.dist_k2 = std::stof(args["dist-k2"]);
-        if (args.count("dist-k3")) cfg.dist_k3 = std::stof(args["dist-k3"]);
         if (args.count("rotate")) cfg.geo_rotate = std::stof(args["rotate"]);
         if (args.count("scale")) cfg.geo_scale = std::stof(args["scale"]);
         if (args.count("aspect")) cfg.geo_aspect = std::stof(args["aspect"]);

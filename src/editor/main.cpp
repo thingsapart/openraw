@@ -57,22 +57,20 @@ int main(int argc, char** argv) {
 
     // --- Initialize Lensfun Database ---
 #ifdef USE_LENSFUN
-    app_state.lensfun_db.reset(lf_db_new());
+    app_state.lensfun_db.reset(new lfDatabase());
     if (app_state.lensfun_db) {
-        if (lf_db_load(app_state.lensfun_db.get()) == LF_NO_ERROR) {
-            const lfCamera *const *cameras = lf_db_get_cameras(app_state.lensfun_db.get());
-            std::set<std::string> makes;
-            if (cameras) {
-                for (int i = 0; cameras[i]; i++) {
-                    makes.insert(lf_mlstr_get(cameras[i]->Maker));
-                }
+        app_state.lensfun_db->Load();
+        const lfCamera *const *cameras = app_state.lensfun_db->GetCameras();
+        std::set<std::string> makes;
+        if (cameras) {
+            for (int i = 0; cameras[i]; i++) {
+                makes.insert(cameras[i]->Maker);
             }
-            app_state.lensfun_camera_makes.assign(makes.begin(), makes.end());
-            std::sort(app_state.lensfun_camera_makes.begin(), app_state.lensfun_camera_makes.end());
-        } else {
-            std::cerr << "Warning: Could not load Lensfun database." << std::endl;
-            app_state.lensfun_db.reset(); // Invalidate the DB pointer
         }
+        app_state.lensfun_camera_makes.assign(makes.begin(), makes.end());
+        std::sort(app_state.lensfun_camera_makes.begin(), app_state.lensfun_camera_makes.end());
+    } else {
+        std::cerr << "Warning: Could not create Lensfun database." << std::endl;
     }
 #endif
 

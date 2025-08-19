@@ -11,7 +11,8 @@ void PaneManager::register_pane(const std::string& title, PaneRenderFunction ren
     }
 }
 
-void PaneManager::render_all_panes(AppState& state) {
+bool PaneManager::render_all_panes(AppState& state) {
+    bool changed = false;
     ImGui::Begin("Adjustments");
 
     // --- Render Static (non-scrolling) Panes ---
@@ -21,7 +22,7 @@ void PaneManager::render_all_panes(AppState& state) {
         ImGui::PopStyleVar();
 
         if (is_open) {
-            pane.render_func(state);
+            changed |= pane.render_func(state);
         }
     }
 
@@ -42,10 +43,12 @@ void PaneManager::render_all_panes(AppState& state) {
         ImGui::PopStyleVar();
 
         if (is_open) {
-            pane.render_func(state);
+            changed |= pane.render_func(state);
         }
     }
 
     ImGui::EndChild();
     ImGui::End();
+
+    return changed;
 }

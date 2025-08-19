@@ -6,7 +6,7 @@
 #include <cstdlib> // For getenv
 #include <chrono>  // For timing
 #include <limits>  // For numeric_limits
-#include <cmath>   // for powf
+#include <cmath>   // for powf, cbrtf, sqrtf
 #include <iomanip> // for std::setprecision
 
 // To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
@@ -44,6 +44,8 @@
 using namespace Halide::Runtime;
 using namespace Halide::Tools;
 
+namespace { // Anonymous namespace for local helpers
+
 // --- DEBUG HELPER ---
 void print_lut_sample(const Buffer<float, 4>& lut) {
     const int size = lut.dim(0).extent();
@@ -77,6 +79,139 @@ void print_lut_sample(const Buffer<float, 4>& lut) {
     print_row(mid, mid, size/3, "Green Hue");
     printf("-----------------------------------------------------------------\n\n");
 }
+
+// --- Lens Correction LUT Generation ---
+namespace LensCorrection {
+    const int LUT_SIZE = 2048;
+    // This value defines the mapping from radius^2 to LUT index.
+    // It must be consistent between this host code and the Halide pipeline.
+    // A normalized corner for a 16:9 image is at sqrt(1^2 + (9/16)^2) = 1.14.
+    // Squared, this is ~1.3. A value of 3.0 is a very safe upper bound
+    // for even extreme wide-angle lenses and heavy distortion.
+    const float MAX_RD_SQUARED_NORM = 3.0f;
+
+    // Solves the depressed cubic equation: r_u^3 + p*r_u + q = 0
+    // using Cardano's method. We only need the single, positive real root.
+    float solve_cubic_poly3(float p, float q) {
+        float p_3 = p / 3.0f;
+        float q_2 = q / 2.0f;
+        float discriminant = q_2 * q_2 + p_3 * p_3 * p_3;
+
+        if (discriminant >= 0) {
+            float root_discriminant = sqrtf(discriminant);
+            float term1 = cbrtf(-q_2 + root_discriminant);
+            float term2 = cbrtf(-q_2 - root_discriminant);
+            return term1 + term2;
+        } else {
+            // Three real roots case. We need the one that's physically meaningful.
+            float r = sqrtf(-p_3 * -p_3 * -p_3);
+            float phi = acosf(-q_2 / r);
+            float two_sqrt_p3 = 2.0f * sqrtf(-p_3);
+            // The three roots are:
+            // float root1 = two_sqrt_p3 * cosf(phi / 3.0f);
+            // float root2 = two_sqrt_p3 * cosf((phi + 2.0f * M_PI) / 3.0f);
+            // float root3 = two_sqrt_p3 * cosf((phi - 2.0f * M_PI) / 3.0f);
+            // For lens distortion, the first root is the correct positive one.
+            return two_sqrt_p3 * cosf(phi / 3.0f);
+        }
+    }
+
+    // Solves for r_u using Newton-Raphson for the POLY5 model.
+    // f(r_u) = k2*r_u^5 + k1*r_u^3 + r_u - r_d = 0
+    float solve_poly5(float k1, float k2, float rd) {
+        float ru = rd; // Initial guess
+        for (int i = 0; i < 4; ++i) { // 4 iterations is plenty
+            float ru2 = ru * ru;
+            float ru3 = ru2 * ru;
+            float ru4 = ru2 * ru2;
+            float ru5 = ru4 * ru;
+            float f = k2 * ru5 + k1 * ru3 + ru - rd;
+            float f_prime = 5.0f * k2 * ru4 + 3.0f * k1 * ru2 + 1.0f;
+            if (fabsf(f_prime) < 1e-6) break; // Avoid division by zero
+            ru -= f / f_prime;
+        }
+        return ru;
+    }
+
+    // Solves for r_u using Newton-Raphson for the PTLENS model.
+    // f(r_u) = a*r_u^4 + b*r_u^3 + c*r_u^2 + (1-a-b-c)*r_u - r_d = 0
+    float solve_ptlens(float a, float b, float c, float rd) {
+        float ru = rd; // Initial guess
+        float d = 1.0f - a - b - c;
+        for (int i = 0; i < 4; ++i) { // 4 iterations is plenty
+            float ru2 = ru * ru;
+            float ru3 = ru2 * ru;
+            float ru4 = ru2 * ru2;
+            float f = a * ru4 + b * ru3 + c * ru2 + d * ru - rd;
+            float f_prime = 4.0f * a * ru3 + 3.0f * b * ru2 + 2.0f * c * ru + d;
+            if (fabsf(f_prime) < 1e-6) break; // Avoid division by zero
+            ru -= f / f_prime;
+        }
+        return ru;
+    }
+
+    // Generates an "identity" LUT for when no correction is needed.
+    Buffer<float, 1> generate_identity_lut() {
+        Buffer<float, 1> lut(LUT_SIZE);
+        for (int i = 0; i < LUT_SIZE; ++i) {
+            lut(i) = 1.0f;
+        }
+        return lut;
+    }
+
+    // Main LUT generation function.
+#ifdef USE_LENSFUN
+    Buffer<float, 1> generate_distortion_lut(const lfLensCalibDistortion& model) {
+        Buffer<float, 1> lut(LUT_SIZE);
+
+        for (int i = 0; i < LUT_SIZE; ++i) {
+            float rd_sq_norm = (float)i * MAX_RD_SQUARED_NORM / (float)(LUT_SIZE - 1);
+            float rd_norm = sqrtf(rd_sq_norm);
+            float ru_norm = rd_norm; // Default to no change
+
+            switch (model.Model) {
+                case LF_DIST_MODEL_POLY3: {
+                    // k1*r_u^3 + (1-k1)*r_u - r_d = 0
+                    // Standard form: r_u^3 + p*r_u + q = 0
+                    float k1 = model.Terms[0];
+                    if (fabsf(k1) > 1e-6f) {
+                        float p = (1.0f - k1) / k1;
+                        float q = -rd_norm / k1;
+                        ru_norm = solve_cubic_poly3(p, q);
+                    }
+                    break;
+                }
+                case LF_DIST_MODEL_POLY5: {
+                    float k1 = model.Terms[0];
+                    float k2 = model.Terms[1];
+                    ru_norm = solve_poly5(k1, k2, rd_norm);
+                    break;
+                }
+                case LF_DIST_MODEL_PTLENS: {
+                    float a = model.Terms[0];
+                    float b = model.Terms[1];
+                    float c = model.Terms[2];
+                    ru_norm = solve_ptlens(a, b, c, rd_norm);
+                    break;
+                }
+                default:
+                    // For unsupported models, ru_norm remains rd_norm,
+                    // resulting in a correction factor of 1.0.
+                    break;
+            }
+
+            if (rd_norm > 1e-5f) {
+                lut(i) = ru_norm / rd_norm;
+            } else {
+                lut(i) = 1.0f; // Avoid division by zero at the center
+            }
+        }
+        return lut;
+    }
+#endif // USE_LENSFUN
+
+} // namespace LensCorrection
+} // namespace
 
 
 int main(int argc, char **argv) {
@@ -117,80 +252,69 @@ int main(int argc, char **argv) {
     int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
     int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
 
+    Buffer<float, 1> distortion_lut = LensCorrection::generate_identity_lut();
+
 #ifdef USE_LENSFUN
     bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
                          cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
+    bool lensfun_applied = false;
     if (needs_lensfun) {
         fprintf(stderr, "Attempting to load Lensfun profile...\n");
         fprintf(stderr, "  Camera: %s %s\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
         fprintf(stderr, "  Lens: %s @ %.1fmm\n", cfg.lens_profile_name.c_str(), cfg.focal_length);
 
-        lfDatabase *ldb = lf_db_new();
-        if (!ldb) {
-            fprintf(stderr, "  -> Error: Could not create Lensfun database object.\n");
+        lfDatabase ldb;
+        ldb.Load();
+
+        const lfCamera** cams = lf_db_find_cameras(&ldb, cfg.camera_make.c_str(), cfg.camera_model.c_str());
+        if (!cams || !cams[0]) {
+            fprintf(stderr, "  -> Warning: Camera '%s %s' not found in Lensfun database.\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
         } else {
-            lf_db_load(ldb);
-
-            const lfCamera **cams = lf_db_find_cameras(ldb, cfg.camera_make.c_str(), cfg.camera_model.c_str());
-            if (!cams || !cams[0]) {
-                fprintf(stderr, "  -> Warning: Camera '%s %s' not found in Lensfun database.\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
+            const lfCamera *cam = cams[0]; // Use the first match
+            const lfLens** lenses = lf_db_find_lenses_hd(&ldb, cam, nullptr, cfg.lens_profile_name.c_str(), 0);
+            if (!lenses || !lenses[0]) {
+                fprintf(stderr, "  -> Warning: Lens profile '%s' not found for specified camera.\n", cfg.lens_profile_name.c_str());
             } else {
-                const lfCamera *cam = cams[0]; // Use the first match
+                const lfLens *lens = lenses[0]; // Use the best match
+                lfLensCalibDistortion distortion_model;
+                if (lens->InterpolateDistortion(cfg.focal_length, distortion_model)) {
+                    const char* model_name = "Unknown";
+                    if (distortion_model.Model == LF_DIST_MODEL_POLY3) model_name = "POLY3";
+                    else if (distortion_model.Model == LF_DIST_MODEL_POLY5) model_name = "POLY5";
+                    else if (distortion_model.Model == LF_DIST_MODEL_PTLENS) model_name = "PTLENS";
 
-                // Use lf_db_find_lenses_hd to find the lens by its model name, for the given camera
-                const lfLens **lenses = lf_db_find_lenses_hd(ldb, cam, nullptr, cfg.lens_profile_name.c_str(), 0);
+                    if (distortion_model.Model == LF_DIST_MODEL_POLY3 ||
+                        distortion_model.Model == LF_DIST_MODEL_POLY5 ||
+                        distortion_model.Model == LF_DIST_MODEL_PTLENS) {
 
-                if (!lenses || !lenses[0]) {
-                    fprintf(stderr, "  -> Warning: Lens profile '%s' not found for specified camera.\n", cfg.lens_profile_name.c_str());
-                } else {
-                    const lfLens *lens = lenses[0]; // Use the best match
-
-                    // Interpolate distortion parameters for the given focal length
-                    lfLensCalibDistortion distortion_model;
-                    if (lf_lens_interpolate_distortion(lens, cfg.focal_length, &distortion_model)) {
-                        if (distortion_model.Model == LF_DIST_MODEL_POLY5) {
-                            // This model is compatible with the Halide pipeline's k1 and k2 terms.
-                            if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = distortion_model.Terms[0];
-                            if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = distortion_model.Terms[1];
-                            if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = 0.0f; // POLY5 has no k3 term.
-                            fprintf(stderr, "  -> Profile loaded (POLY5). Using Distortion(k1,k2,k3): %.5f, %.5f, %.5f\n",
-                                    cfg.dist_k1, cfg.dist_k2, cfg.dist_k3);
-
-                        } else if (distortion_model.Model == LF_DIST_MODEL_POLY3) {
-                            // The Halide pipeline's model is a pure polynomial in r^2, r^4, r^6.
-                            // The lensfun.h header for POLY3 is r_d = r_u * (1 - k1 + k1 * r_u^2), which is not compatible.
-                            fprintf(stderr, "  -> Warning: Lens profile uses POLY3 distortion model, which is incompatible with this pipeline's math. Distortion not applied.\n");
-
-                        } else if (distortion_model.Model == LF_DIST_MODEL_PTLENS) {
-                            // PTLENS model is also not a pure even-power polynomial and is incompatible.
-                            fprintf(stderr, "  -> Warning: Lens profile uses PTLENS distortion model, which is incompatible with this pipeline's math. Distortion not applied.\n");
-                        } else {
-                            fprintf(stderr, "  -> Warning: Lens profile uses an unknown or unsupported distortion model. Distortion not applied.\n");
-                        }
-
+                        fprintf(stderr, "  -> Profile loaded (%s). Generating inverse distortion LUT...\n", model_name);
+                        distortion_lut = LensCorrection::generate_distortion_lut(distortion_model);
+                        lensfun_applied = true;
                     } else {
-                        fprintf(stderr, "  -> Warning: Could not retrieve distortion params for this focal length.\n");
+                        fprintf(stderr, "  -> Warning: Lens profile uses an unsupported distortion model (%s). Distortion not applied.\n", model_name);
                     }
-                    // TODO: Interpolate TCA and Vignetting when pipeline supports their specific models.
-                }
-
-                if (lenses) {
-                    lf_free((void*)lenses);
+                } else {
+                    fprintf(stderr, "  -> Warning: Could not retrieve distortion params for this focal length.\n");
                 }
             }
+            if (lenses) lf_free((void*)lenses);
+        }
+        if (cams) lf_free((void*)cams);
+    }
 
-            if (cams) {
-                lf_free((void*)cams);
-            }
-            lf_db_destroy(ldb);
+    // If a lensfun profile was NOT applied, check for manual overrides.
+    if (!lensfun_applied) {
+        const float e = 1e-6f;
+        if (fabsf(cfg.dist_k1) > e || fabsf(cfg.dist_k2) > e || fabsf(cfg.dist_k3) > e) {
+            fprintf(stderr, "Using manual distortion parameters k1, k2, k3...\n");
+            lfLensCalibDistortion manual_model;
+            manual_model.Model = LF_DIST_MODEL_POLY5;
+            manual_model.Terms[0] = cfg.dist_k1;
+            manual_model.Terms[1] = cfg.dist_k2;
+            distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
         }
     }
 #endif
-
-    // If any distortion params are still unset (either by user or lensfun), default them to 0.
-    if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = 0.0f;
-    if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = 0.0f;
-    if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = 0.0f;
 
     Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
@@ -234,8 +358,8 @@ int main(int argc, char **argv) {
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
+                              distortion_lut,
                               cfg.ca_red_cyan, cfg.ca_blue_yellow,
-                              cfg.dist_k1, cfg.dist_k2, cfg.dist_k3,
                               cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
                               cfg.geo_keystone_v, cfg.geo_keystone_h,
                               cfg.geo_offset_x, cfg.geo_offset_y,
@@ -250,8 +374,8 @@ int main(int argc, char **argv) {
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
+                              distortion_lut,
                               cfg.ca_red_cyan, cfg.ca_blue_yellow,
-                              cfg.dist_k1, cfg.dist_k2, cfg.dist_k3,
                               cfg.geo_rotate, cfg.geo_scale, cfg.geo_aspect,
                               cfg.geo_keystone_v, cfg.geo_keystone_h,
                               cfg.geo_offset_x, cfg.geo_offset_y,

@@ -18,30 +18,14 @@
 #ifdef USE_LENSFUN
 #include "lensfun/lensfun.h"
 
-// --- C++ RAII Wrappers for Lensfun C API ---
-
-// Custom deleter for the lfDatabase object.
-struct LfDatabaseDeleter {
-    void operator()(lfDatabase* db) const {
-        if (db) {
-            lf_db_destroy(db);
-        }
-    }
+// A helper struct to store both the user-facing display name of a camera
+// and its internal names needed for searching the database.
+struct CameraInfo {
+    std::string display_name;
+    std::string maker;
+    std::string model;
+    std::string variant;
 };
-using LfDatabasePtr = std::unique_ptr<lfDatabase, LfDatabaseDeleter>;
-
-// Custom deleter for memory allocated by lensfun that needs lf_free().
-// This is used for the arrays returned by the lf_db_find_* functions.
-struct LfFreeDeleter {
-    void operator()(void* ptr) const {
-        if (ptr) {
-            lf_free(ptr);
-        }
-    }
-};
-// A template alias to make using this deleter cleaner.
-template<typename T>
-using LfScopedPtr = std::unique_ptr<T, LfFreeDeleter>;
 
 #endif
 
@@ -62,11 +46,16 @@ struct AppState {
 
     ProcessConfig params;
 
+    // --- Data required by Halide pipeline but not directly in config ---
+    int blackLevel = 25;
+    int whiteLevel = 1023;
+    int preview_downsample = 2; // 0=1:1, 1=1:2, 2=1:4, etc.
+
     // Halide Buffers
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
-    
+
     // We now maintain two separate LUTs:
     // 1. The final, combined LUT for the pipeline and histogram.
     Halide::Runtime::Buffer<uint16_t, 2> pipeline_tone_curve_lut;
@@ -108,9 +97,11 @@ struct AppState {
 
 #ifdef USE_LENSFUN
     // --- Lensfun State ---
-    LfDatabasePtr lensfun_db;
+    // Use the C++ wrapper class from lensfun.hh for RAII
+    std::unique_ptr<lfDatabase> lensfun_db;
     // Cached lists for UI dropdowns
     std::vector<std::string> lensfun_camera_makes;
+    std::vector<CameraInfo> lensfun_cameras_in_make; // Updated when make is selected
     std::vector<std::string> lensfun_camera_models; // Updated when make is selected
     std::vector<std::string> lensfun_lens_models;   // Updated when camera is selected
 #endif

@@ -11,7 +11,8 @@
 
 // To enable Lensfun support, compile with -DUSE_LENSFUN
 #ifdef USE_LENSFUN
-// The main lensfun.h header is included via app_state.h
+// The main lensfun.h header is included via app_state.h.
+// The C++ wrapper `lensfun.hh` is avoided to prevent build issues.
 #endif
 
 namespace Panes {
@@ -140,11 +141,12 @@ bool render_lens_correction(AppState& state) {
                     }
                 }
                 if (selected_cam) {
-                    LfScopedPtr<const lfLens*> lenses((const lfLens**)lf_db_find_lenses_hd(state.lensfun_db.get(), selected_cam, nullptr, nullptr, 0));
+                    const lfLens** lenses = (const lfLens**)lf_db_find_lenses_hd(state.lensfun_db.get(), selected_cam, nullptr, nullptr, 0);
                     if (lenses) {
-                        for (int i = 0; lenses.get()[i]; ++i) {
-                            state.lensfun_lens_models.push_back(lf_mlstr_get(lenses.get()[i]->Model));
+                        for (int i = 0; lenses[i]; ++i) {
+                            state.lensfun_lens_models.push_back(lf_mlstr_get(lenses[i]->Model));
                         }
+                        lf_free(lenses);
                     }
                 }
                 std::sort(state.lensfun_lens_models.begin() + 1, state.lensfun_lens_models.end());
@@ -152,10 +154,14 @@ bool render_lens_correction(AppState& state) {
             DrawErrorOutline("Model");
 
             // -- Lens Profile --
-            SearchableCombo("Lens", params.lens_profile_name, state.lensfun_lens_models, "Filter lenses...");
+            if (SearchableCombo("Lens", params.lens_profile_name, state.lensfun_lens_models, "Filter lenses...")) {
+                changed = true; // Change on selection to immediately trigger a re-render
+            }
             DrawErrorOutline("Lens");
             
-            ImGui::SliderFloat("Focal Length", &params.focal_length, 1.0f, 600.0f, "%.1f mm", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::SliderFloat("Focal Length", &params.focal_length, 1.0f, 600.0f, "%.1f mm", ImGuiSliderFlags_Logarithmic)) {
+                changed = true;
+            }
 
             // -- Apply Button and Feedback --
             if (ImGui::Button("Apply Profile", ImVec2(-1, 0))) {
@@ -174,25 +180,41 @@ bool render_lens_correction(AppState& state) {
                         if (params.camera_model == lf_mlstr_get(cam_obj->Model)) { selected_cam = cam_obj; break; }
                     }
                     if (selected_cam) {
-                        LfScopedPtr<const lfLens*> lenses((const lfLens**)lf_db_find_lenses_hd(state.lensfun_db.get(), selected_cam, nullptr, params.lens_profile_name.c_str(), 0));
-                        if (lenses && lenses.get()[0]) {
+                        const lfLens** lenses = (const lfLens**)lf_db_find_lenses_hd(state.lensfun_db.get(), selected_cam, nullptr, params.lens_profile_name.c_str(), 0);
+                        if (lenses && lenses[0]) {
                             lfLensCalibDistortion dist_model;
-                            if (lf_lens_interpolate_distortion(lenses.get()[0], params.focal_length, &dist_model)) {
-                                if (dist_model.Model == LF_DIST_MODEL_POLY5) {
-                                    params.dist_k1 = dist_model.Terms[0];
-                                    params.dist_k2 = dist_model.Terms[1];
-                                    params.dist_k3 = 0.0f; // POLY5 has no k3
-                                    s_feedback_message = "POLY5 profile applied successfully.";
+                            if (lf_lens_interpolate_distortion(lenses[0], params.focal_length, &dist_model)) {
+                                if (dist_model.Model == LF_DIST_MODEL_POLY3 || dist_model.Model == LF_DIST_MODEL_POLY5 || dist_model.Model == LF_DIST_MODEL_PTLENS) {
+                                    // Reset manual overrides before applying profile values
+                                    params.dist_k1 = 0.0f;
+                                    params.dist_k2 = 0.0f;
+                                    params.dist_k3 = 0.0f;
+
+                                    if (dist_model.Model == LF_DIST_MODEL_POLY3) {
+                                        params.dist_k1 = dist_model.Terms[0];
+                                    } else if (dist_model.Model == LF_DIST_MODEL_POLY5) {
+                                        params.dist_k1 = dist_model.Terms[0];
+                                        params.dist_k2 = dist_model.Terms[1];
+                                    } else if (dist_model.Model == LF_DIST_MODEL_PTLENS) {
+                                        params.dist_k1 = dist_model.Terms[0];
+                                        params.dist_k2 = dist_model.Terms[1];
+                                        params.dist_k3 = dist_model.Terms[2];
+                                    }
+                                    
+                                    s_feedback_message = "Lens profile applied successfully.";
                                     s_feedback_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
                                     changed = true;
                                 } else {
-                                    s_feedback_message = "Error: Profile uses an incompatible model (not POLY5).";
+                                    s_feedback_message = "Error: Profile uses an incompatible model.";
                                     s_feedback_color = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
                                 }
                             } else {
                                 s_feedback_message = "Error: Could not get distortion for this focal length.";
                                 s_feedback_color = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
                             }
+                        }
+                        if (lenses) {
+                            lf_free(lenses);
                         }
                     }
                     s_feedback_time = std::chrono::steady_clock::now();
