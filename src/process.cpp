@@ -113,60 +113,85 @@ int main(int argc, char **argv) {
     Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
     fprintf(stderr, "       %d %d\n", input.width(), input.height());
 
+    // Calculate output dimensions based on crop and downscale factor
+    int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
+    int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
+
 #ifdef USE_LENSFUN
-    if (cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty()) {
-        fprintf(stderr, "Applying Lensfun profile: %s\n", cfg.lens_profile_name.c_str());
-        lfDatabase* ldb = lf_db_new();
-        lf_db_load(ldb, NULL); // Load default database
+    bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
+                         cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
+    if (needs_lensfun) {
+        fprintf(stderr, "Attempting to load Lensfun profile...\n");
+        fprintf(stderr, "  Camera: %s %s\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
+        fprintf(stderr, "  Lens: %s @ %.1fmm\n", cfg.lens_profile_name.c_str(), cfg.focal_length);
 
-        // For this example, we'll use a generic camera model.
-        // A real application would parse this from EXIF data.
-        const lfCamera** cams = lf_db_find_cameras_ex(ldb, "Raspberry Pi", "High Quality Camera");
-        if (cams && cams[0]) {
-            const lfLens** lenses = lf_db_find_lenses(ldb, cams[0]);
-            const lfLens* lens = nullptr;
-            if (lenses) {
-                for (int i = 0; lenses[i]; i++) {
-                    if (std::string(lenses[i]->Model) == cfg.lens_profile_name) {
-                        lens = lenses[i];
-                        break;
-                    }
-                }
-            }
-            if(lens) {
-                // A focal length of 16mm is a reasonable default for the HQ camera.
-                lfModifier* mod = lf_modifier_new(lens, 16.0f, input.width(), input.height());
-                if (mod) {
-                    double k1, k2, k3;
-                    lf_modifier_get_distortion_params(mod, &k1, &k2, &k3);
-                    
-                    // Apply profile values only if they haven't been overridden on the command line.
-                    if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = static_cast<float>(k1);
-                    if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = static_cast<float>(k2);
-                    if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = static_cast<float>(k3);
-
-                    fprintf(stderr, "  -> Loaded distortion: k1=%.4f, k2=%.4f, k3=%.4f\n", k1, k2, k3);
-
-                    lf_modifier_destroy(mod);
-                }
-            } else {
-                 fprintf(stderr, "  -> Warning: Lens profile '%s' not found for camera.\n", cfg.lens_profile_name.c_str());
-            }
+        lfDatabase *ldb = lf_db_new();
+        if (!ldb) {
+            fprintf(stderr, "  -> Error: Could not create Lensfun database object.\n");
         } else {
-            fprintf(stderr, "  -> Warning: Could not find base camera for Lensfun.\n");
+            lf_db_load(ldb);
+
+            const lfCamera **cams = lf_db_find_cameras(ldb, cfg.camera_make.c_str(), cfg.camera_model.c_str());
+            if (!cams || !cams[0]) {
+                fprintf(stderr, "  -> Warning: Camera '%s %s' not found in Lensfun database.\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
+            } else {
+                const lfCamera *cam = cams[0]; // Use the first match
+
+                // Use lf_db_find_lenses_hd to find the lens by its model name, for the given camera
+                const lfLens **lenses = lf_db_find_lenses_hd(ldb, cam, nullptr, cfg.lens_profile_name.c_str(), 0);
+
+                if (!lenses || !lenses[0]) {
+                    fprintf(stderr, "  -> Warning: Lens profile '%s' not found for specified camera.\n", cfg.lens_profile_name.c_str());
+                } else {
+                    const lfLens *lens = lenses[0]; // Use the best match
+
+                    // Interpolate distortion parameters for the given focal length
+                    lfLensCalibDistortion distortion_model;
+                    if (lf_lens_interpolate_distortion(lens, cfg.focal_length, &distortion_model)) {
+                        if (distortion_model.Model == LF_DIST_MODEL_POLY5) {
+                            // This model is compatible with the Halide pipeline's k1 and k2 terms.
+                            if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = distortion_model.Terms[0];
+                            if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = distortion_model.Terms[1];
+                            if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = 0.0f; // POLY5 has no k3 term.
+                            fprintf(stderr, "  -> Profile loaded (POLY5). Using Distortion(k1,k2,k3): %.5f, %.5f, %.5f\n",
+                                    cfg.dist_k1, cfg.dist_k2, cfg.dist_k3);
+
+                        } else if (distortion_model.Model == LF_DIST_MODEL_POLY3) {
+                            // The Halide pipeline's model is a pure polynomial in r^2, r^4, r^6.
+                            // The lensfun.h header for POLY3 is r_d = r_u * (1 - k1 + k1 * r_u^2), which is not compatible.
+                            fprintf(stderr, "  -> Warning: Lens profile uses POLY3 distortion model, which is incompatible with this pipeline's math. Distortion not applied.\n");
+
+                        } else if (distortion_model.Model == LF_DIST_MODEL_PTLENS) {
+                            // PTLENS model is also not a pure even-power polynomial and is incompatible.
+                            fprintf(stderr, "  -> Warning: Lens profile uses PTLENS distortion model, which is incompatible with this pipeline's math. Distortion not applied.\n");
+                        } else {
+                            fprintf(stderr, "  -> Warning: Lens profile uses an unknown or unsupported distortion model. Distortion not applied.\n");
+                        }
+
+                    } else {
+                        fprintf(stderr, "  -> Warning: Could not retrieve distortion params for this focal length.\n");
+                    }
+                    // TODO: Interpolate TCA and Vignetting when pipeline supports their specific models.
+                }
+
+                if (lenses) {
+                    lf_free((void*)lenses);
+                }
+            }
+
+            if (cams) {
+                lf_free((void*)cams);
+            }
+            lf_db_destroy(ldb);
         }
-        lf_db_destroy(ldb);
     }
 #endif
 
-    // If any distortion params are still unset, default them to 0 for the pipeline.
+    // If any distortion params are still unset (either by user or lensfun), default them to 0.
     if (cfg.dist_k1 == UNSET_F) cfg.dist_k1 = 0.0f;
     if (cfg.dist_k2 == UNSET_F) cfg.dist_k2 = 0.0f;
     if (cfg.dist_k3 == UNSET_F) cfg.dist_k3 = 0.0f;
 
-    // Calculate output dimensions based on crop and downscale factor
-    int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
-    int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
     Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
     Buffer<uint16_t, 2> tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);

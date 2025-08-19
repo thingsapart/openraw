@@ -51,7 +51,10 @@ void print_usage() {
            "  --l-vs-s <pts>         Luma vs Sat curve points.\n"
            "  --s-vs-s <pts>         Sat vs Sat curve points.\n\n"
            "Lens & Geometry Options:\n"
+           "  --camera-make <name>   Camera make for Lensfun lookup (e.g. \"Raspberry Pi\").\n"
+           "  --camera-model <name>  Camera model for Lensfun lookup (e.g. \"High Quality Camera\").\n"
            "  --lensfun <profile>    Name of lensfun profile to apply (e.g. \"Raspberry Pi High Quality Camera Lens\").\n"
+           "  --focal-length <mm>    Focal length in mm for Lensfun lookup (default: 16.0).\n"
            "  --ca-red <val>         Manual Red/Cyan CA fringe control, -100 to 100 (default: 0).\n"
            "  --ca-blue <val>        Manual Blue/Yellow CA fringe control, -100 to 100 (default: 0).\n"
            "  --vignette-amount <val>    Vignette strength, -100 to 100 (default: 0).\n"
@@ -184,7 +187,10 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("s-vs-s")) ToneCurveUtils::parse_curve_points(args["s-vs-s"], cfg.curve_sat_vs_sat);
 
         // Lens & Geometry
+        if (args.count("camera-make")) cfg.camera_make = args["camera-make"];
+        if (args.count("camera-model")) cfg.camera_model = args["camera-model"];
         if (args.count("lensfun")) cfg.lens_profile_name = args["lensfun"];
+        if (args.count("focal-length")) cfg.focal_length = std::stof(args["focal-length"]);
         if (args.count("ca-red")) cfg.ca_red_cyan = std::stof(args["ca-red"]);
         if (args.count("ca-blue")) cfg.ca_blue_yellow = std::stof(args["ca-blue"]);
         if (args.count("vignette-amount")) cfg.vignette_amount = std::stof(args["vignette-amount"]);

@@ -99,6 +99,7 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
         ${GENERATED_PIPELINE_DIR}
         ${stb_SOURCE_DIR}
     )
+    target_link_directories(${PROCESS_TARGET} PRIVATE ${LENSFUN_LIBRARY_DIRS})
     target_link_libraries(${PROCESS_TARGET} PRIVATE
         ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.a
         Halide::Runtime
@@ -192,6 +193,7 @@ add_executable(rawr
     src/editor/panes/pane_dehaze.cpp
 )
 
+target_link_directories(rawr PRIVATE ${LENSFUN_LIBRARY_DIRS})
 target_link_libraries(rawr PRIVATE
     imgui
     OpenGL::GL
@@ -210,3 +212,11 @@ target_include_directories(rawr PRIVATE
     ${SDL2_INCLUDE_DIRS} # This line was missing and is the fix.
 )
 set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)
+
+if(LENSFUN_FOUND)
+    # --- Build the lens_info utility ---
+    add_executable(lens_info src/lens_info.cpp)
+    target_include_directories(lens_info PRIVATE ${LENSFUN_INCLUDE_DIRS})
+    target_link_directories(lens_info PRIVATE ${LENSFUN_LIBRARY_DIRS})
+    target_link_libraries(lens_info PRIVATE ${LENSFUN_LIBRARIES})
+endif()

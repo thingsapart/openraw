@@ -74,6 +74,12 @@ struct ProcessConfig {
     std::vector<Point> curve_sat_vs_sat;
     
     // --- Lens Correction ---
+    // Lensfun profile info
+    std::string camera_make = "";
+    std::string camera_model = "";
+    std::string lens_profile_name = "None";
+    float focal_length = 16.0f;
+
     // Chromatic Aberration (Manual Override)
     float ca_red_cyan = 0.0f;
     float ca_blue_yellow = 0.0f;
@@ -85,7 +91,6 @@ struct ProcessConfig {
     float vignette_highlights = 0.0f; // Range [0, 100] in UI
 
     // Distortion (Lensfun overrides)
-    std::string lens_profile_name = "None";
     float dist_k1 = UNSET_F;
     float dist_k2 = UNSET_F;
     float dist_k3 = UNSET_F;
