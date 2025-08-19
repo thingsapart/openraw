@@ -12,6 +12,39 @@
 #include <chrono>
 #include <cstdint>
 #include <vector>
+#include <memory> // For std::unique_ptr
+
+// To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
+#ifdef USE_LENSFUN
+#include "lensfun/lensfun.h"
+
+// --- C++ RAII Wrappers for Lensfun C API ---
+
+// Custom deleter for the lfDatabase object.
+struct LfDatabaseDeleter {
+    void operator()(lfDatabase* db) const {
+        if (db) {
+            lf_db_destroy(db);
+        }
+    }
+};
+using LfDatabasePtr = std::unique_ptr<lfDatabase, LfDatabaseDeleter>;
+
+// Custom deleter for memory allocated by lensfun that needs lf_free().
+// This is used for the arrays returned by the lf_db_find_* functions.
+struct LfFreeDeleter {
+    void operator()(void* ptr) const {
+        if (ptr) {
+            lf_free(ptr);
+        }
+    }
+};
+// A template alias to make using this deleter cleaner.
+template<typename T>
+using LfScopedPtr = std::unique_ptr<T, LfFreeDeleter>;
+
+#endif
+
 
 // Enum to identify which curve is currently being edited in the UI.
 enum class ActiveCurveChannel {
@@ -72,6 +105,15 @@ struct AppState {
     // --- Debounce State ---
     std::chrono::steady_clock::time_point next_render_time = std::chrono::steady_clock::time_point::max();
     bool ui_ready = false;
+
+#ifdef USE_LENSFUN
+    // --- Lensfun State ---
+    LfDatabasePtr lensfun_db;
+    // Cached lists for UI dropdowns
+    std::vector<std::string> lensfun_camera_makes;
+    std::vector<std::string> lensfun_camera_models; // Updated when make is selected
+    std::vector<std::string> lensfun_lens_models;   // Updated when camera is selected
+#endif
 };
 
 #endif // APP_STATE_H

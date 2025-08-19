@@ -110,7 +110,7 @@ void RenderUI(AppState& state) {
         pane_manager.register_pane("Core Pipeline", create_debounced_render_func(Panes::render_core_pipeline));
         pane_manager.register_pane("Denoise", create_debounced_render_func(Panes::render_denoise));
         pane_manager.register_pane("Dehaze", create_debounced_render_func(Panes::render_dehaze));
-        pane_manager.register_pane("Vignette", create_debounced_render_func(Panes::render_vignette));
+        pane_manager.register_pane("Lens Corrections", create_debounced_render_func(Panes::render_lens_correction), false, true);
         pane_manager.register_pane("Local Adjustments", create_debounced_render_func(Panes::render_local_adjustments));
         pane_manager.register_pane("Color Wheels", create_debounced_render_func(Panes::render_color_wheels), false, false);
         pane_manager.register_pane("Color Curves", create_debounced_render_func(Panes::render_color_curves), false, false);

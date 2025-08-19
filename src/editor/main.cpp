@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <set>
 
 #include "imgui.h"
 #include "imgui_internal.h" // For accessing internal context state
@@ -53,6 +54,27 @@ int main(int argc, char** argv) {
     // They have a fixed size, so we can do this once at startup.
     app_state.pipeline_tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(65536, 3);
     app_state.ui_tone_curve_lut = Halide::Runtime::Buffer<uint16_t, 2>(65536, 3);
+
+    // --- Initialize Lensfun Database ---
+#ifdef USE_LENSFUN
+    app_state.lensfun_db.reset(lf_db_new());
+    if (app_state.lensfun_db) {
+        if (lf_db_load(app_state.lensfun_db.get()) == LF_NO_ERROR) {
+            const lfCamera *const *cameras = lf_db_get_cameras(app_state.lensfun_db.get());
+            std::set<std::string> makes;
+            if (cameras) {
+                for (int i = 0; cameras[i]; i++) {
+                    makes.insert(lf_mlstr_get(cameras[i]->Maker));
+                }
+            }
+            app_state.lensfun_camera_makes.assign(makes.begin(), makes.end());
+            std::sort(app_state.lensfun_camera_makes.begin(), app_state.lensfun_camera_makes.end());
+        } else {
+            std::cerr << "Warning: Could not load Lensfun database." << std::endl;
+            app_state.lensfun_db.reset(); // Invalidate the DB pointer
+        }
+    }
+#endif
 
     // --- Load Input Image ---
     try {

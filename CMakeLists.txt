@@ -193,6 +193,7 @@ add_executable(rawr
     src/editor/panes/pane_dehaze.cpp
 )
 
+target_compile_definitions(rawr PRIVATE USE_LENSFUN)
 target_link_directories(rawr PRIVATE ${LENSFUN_LIBRARY_DIRS})
 target_link_libraries(rawr PRIVATE
     imgui
@@ -201,6 +202,7 @@ target_link_libraries(rawr PRIVATE
     PNG::PNG
     ${GENERATED_PIPELINE_DIR}/camera_pipe_f32_lib.a
     Halide::Runtime
+    ${LENSFUN_LIBRARIES}
 )
 add_dependencies(rawr generate_camera_pipe_f32)
 
