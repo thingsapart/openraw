@@ -66,3 +66,4 @@ namespace ToneCurveUtils {
 } // namespace ToneCurveUtils
 
 #endif // TONE_CURVE_UTILS_H
+

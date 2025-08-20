@@ -132,3 +132,4 @@ public:
 
 #endif // DEMOSAIC_FAST_H
 
+

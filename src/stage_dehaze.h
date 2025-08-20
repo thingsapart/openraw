@@ -32,7 +32,7 @@ public:
 
         // Invert the haze model: J = (I - A)/t + A
         Expr val_dehazed = (input_srgb(x, y, c) - A) / t + A;
-        
+
         // If dehaze is disabled, pass through. Otherwise, apply the dehazing and
         // clamp the result to be non-negative to prevent numerical errors in subsequent
         // color space conversions.
@@ -43,3 +43,4 @@ public:
 };
 
 #endif // STAGE_DEHAZE_H
+

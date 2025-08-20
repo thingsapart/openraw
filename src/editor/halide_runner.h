@@ -1,12 +1,11 @@
-#ifndef HALIDE_RUNNER_H
-#define HALIDE_RUNNER_H
+#ifndef EDITOR_HALIDE_RUNNER_H
+#define EDITOR_HALIDE_RUNNER_H
 
-#include "app_state.h"
-#include "color_tools.h"
-#include "tone_curve_utils.h"
+// Forward-declare the AppState struct to avoid circular dependencies and redefinition errors.
+// The full definition will be included in the .cpp file.
+struct AppState;
 
-// Runs both the main and thumbnail Halide pipelines based on the current
-// application state. This is a synchronous, blocking call.
+// Main function to execute the Halide pipelines for preview and thumbnail.
 void RunHalidePipelines(AppState& state);
 
-#endif // HALIDE_RUNNER_H
+#endif // EDITOR_HALIDE_RUNNER_H

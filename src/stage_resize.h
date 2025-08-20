@@ -77,3 +77,4 @@ public:
 
 #endif // STAGE_RESIZE_H
 
+

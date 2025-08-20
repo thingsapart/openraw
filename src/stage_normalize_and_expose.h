@@ -36,3 +36,4 @@ inline Halide::Func pipeline_normalize_and_expose(Halide::Func input_uint16,
 
 #endif // STAGE_NORMALIZE_AND_EXPOSE_H
 
+

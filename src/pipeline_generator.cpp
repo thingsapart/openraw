@@ -11,6 +11,7 @@
 
 // Include the individual pipeline stages
 #include "stage_denoise.h"
+#include "stage_bayer_normalize.h" // NEW
 #include "stage_ca_correct.h"
 #include "stage_deinterleave.h"
 #include "stage_demosaic.h" // Now the dispatcher
@@ -51,6 +52,8 @@ public:
 
     // --- Inputs ---
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<uint16_t, 2>> input{"input"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<int> cfa_pattern{"cfa_pattern"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> green_balance{"green_balance"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> downscale_factor{"downscale_factor"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> demosaic_algorithm_id{"demosaic_algorithm_id"};
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
@@ -109,25 +112,24 @@ public:
     void generate() {
         using namespace Halide::ConciseCasts;
         // ========== THE ALGORITHM ==========
-        Expr full_res_width = input.width() - 32;
-        Expr full_res_height = input.height() - 24;
+        Expr full_res_width = input.width();
+        Expr full_res_height = input.height();
 
         // The final output dimensions are determined by the downscale factor.
         Expr out_width = cast<int>(full_res_width / downscale_factor);
         Expr out_height = cast<int>(full_res_height / downscale_factor);
 
-        // Define the crop to the valid sensor area.
-        Func initial_raw("initial_raw");
-        initial_raw(x, y) = input(x + 16, y + 12);
-
         // Create a bounded version of the raw data that is safe to read from.
         Func raw_bounded("raw_bounded");
-        raw_bounded = BoundaryConditions::repeat_edge(initial_raw, {{0, full_res_width}, {0, full_res_height}});
+        raw_bounded = BoundaryConditions::repeat_edge(input, {{0, full_res_width}, {0, full_res_height}});
 
         // Normalize, convert to float, and apply exposure compensation in one step.
         Func linear_exposed("linear_exposed");
         Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
         linear_exposed(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range * exposure_multiplier;
+
+        BayerNormalizeBuilder normalize_builder(linear_exposed, cfa_pattern, green_balance, x, y);
+        Func normalized_bayer = normalize_builder.output;
 
         DenoiseBuilder denoise_builder(linear_exposed, x, y,
                                        denoise_strength, denoise_eps,
@@ -135,12 +137,13 @@ public:
         Func denoised("denoised");
         denoised(x, y) = select(denoise_strength < 0.001f, linear_exposed(x, y), denoise_builder.output(x, y));
 
-        CACorrectBuilder ca_builder(denoised, x, y,
+        CACorrectBuilder ca_builder(normalized_bayer, x, y,
                                     ca_correction_strength,
                                     full_res_width, full_res_height,
                                     this->get_target(), this->using_autoscheduler());
         Func ca_corrected = ca_builder.output;
 
+        // The input to deinterleave is now guaranteed to be GRBG.
         Func deinterleaved_hi_fi = pipeline_deinterleave(ca_corrected, x, y, c);
 
         DemosaicDispatcherT<float> demosaic_dispatcher{deinterleaved_hi_fi, demosaic_algorithm_id, x, y, c};
@@ -150,13 +153,13 @@ public:
         ResizeBicubicBuilder resize_builder(demosaiced, "resize",
                                             full_res_width, full_res_height,
                                             out_width, out_height, x, y, c);
-        
+
         Func downscaled("downscaled");
         Expr is_no_op_resize = abs(downscale_factor - 1.0f) < 1e-6f;
         downscaled(x, y, c) = select(is_no_op_resize, demosaiced(x, y, c), resize_builder.output(x, y, c));
 
         ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, matrix_3200, matrix_7000,
-                                                       color_temp, tint, x, y, c, whiteLevel, blackLevel);
+                                                       color_temp, tint, x, y, c);
         Func corrected_hi_fi = color_correct_builder.output;
 
         // Create a normalized float version of the input for subsequent stages.
@@ -166,20 +169,21 @@ public:
         } else {
             corrected_f(x, y, c) = cast<float>(corrected_hi_fi(x, y, c)) / 65535.0f;
         }
-        
+
         DehazeBuilder dehaze_builder(corrected_f, dehaze_strength, x, y, c);
         Func dehazed = dehaze_builder.output;
 
         // --- COLOR PROCESSING PIPELINE (Corrected Order) ---
         // 1. Convert from linear sRGB to L*C*h*.
         Func srgb_to_lch = HalideColor::linear_srgb_to_lch(dehazed, x, y, c);
-        
+
         // 2. Perform local adjustments.
         const int J = 8;
         const int cutover_level = 3;
         LocalLaplacianBuilder local_laplacian_builder(
             srgb_to_lch,
             raw_bounded, color_correct_builder.cc_matrix,
+            cfa_pattern,
             x, y, c,
             ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
             blackLevel, whiteLevel,
@@ -235,7 +239,7 @@ public:
         } else {
             graded_srgb_proc_type(x, y, c) = u16_sat(resampled_or_bypass(x, y, c) * 65535.0f);
         }
-        
+
         SharpenBuilder_T<T> sharpen_builder(graded_srgb_proc_type, sharpen_strength, sharpen_radius, sharpen_threshold,
                                             out_width, out_height, x, y, c);
         Func sharpened = sharpen_builder.output;
@@ -257,9 +261,11 @@ public:
         }
 
         // ========== ESTIMATES ==========
-        const int out_width_est = 2592 - 32;
-        const int out_height_est = 1968 - 24;
-        input.set_estimates({{0, 2592}, {0, 1968}});
+        const int out_width_est = 4000;
+        const int out_height_est = 3000;
+        input.set_estimates({{0, out_width_est}, {0, out_height_est}});
+        cfa_pattern.set_estimate(4); // RGGB is common, but account for new patterns
+        green_balance.set_estimate(1.0f);
         downscale_factor.set_estimate(1.0f);
         demosaic_algorithm_id.set_estimate(3);
         matrix_3200.set_estimates({{0, 4}, {0, 3}});
@@ -272,14 +278,14 @@ public:
         // ========== SCHEDULE ==========
         // The schedule is now complex enough to warrant its own file.
         schedule_pipeline<T>(this->using_autoscheduler(), this->get_target(),
-            denoised, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
+            denoised, normalized_bayer, ca_builder, deinterleaved_hi_fi, demosaiced, demosaic_dispatcher,
             downscaled, is_no_op_resize, resize_builder,
             corrected_hi_fi, dehazed, resampled, resampled_or_bypass, is_no_op_resample, sharpened, local_laplacian_builder, curved, final_stage,
             color_correct_builder, tone_curve_func, lch_final,
             srgb_to_lch, graded_srgb, vignette_corrected, halide_proc_type,
             x, y, c, xo, xi, yo, yi,
             J, cutover_level);
-        
+
         processed = final_stage;
     }
 };
@@ -296,3 +302,4 @@ class CameraPipe : public CameraPipeGenerator<float> {};
 HALIDE_REGISTER_GENERATOR(CameraPipe, camera_pipe)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<float>, camera_pipe_f32)
 HALIDE_REGISTER_GENERATOR(CameraPipeGenerator<uint16_t>, camera_pipe_u16)
+

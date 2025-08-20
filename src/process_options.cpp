@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 #include <sstream>
+#include <set>
 
 // Helper to parse a string "x,y" into a Point struct
 static bool parse_point(const std::string& s, Point& p) {
@@ -13,16 +14,19 @@ static bool parse_point(const std::string& s, Point& p) {
 }
 
 void print_usage() {
-    printf("Usage: ./process --input <raw.png> --output <out.png> [options]\n\n"
+    printf("Usage: ./process --input <raw_file> --output <out.png> [options]\n\n"
            "This executable is compiled for a specific precision. Run 'process_f32' or 'process_u16'.\n"
            "The 'rawr' executable provides a graphical user interface.\n\n"
            "Required arguments for command-line processing:\n"
-           "  --input <path>         Path to the input 16-bit RAW PNG file.\n"
+           "  --input <path>         Path to the input RAW file (e.g. .dng, .arw, .cr2).\n"
            "  --output <path>        Path for the output 8-bit image file.\n\n"
+           "Input Options:\n"
+           "  --raw-png              Treat input as a 16-bit grayscale PNG (legacy format).\n\n"
            "Pipeline Options:\n"
            "  --demosaic <name>      Demosaic algorithm. 'fast', 'ahd', 'lmmse', or 'ri' (default: fast).\n"
            "  --downscale <factor>   Downscale image by this factor (e.g., 2.0 for half size). 1.0=off (default: 1.0).\n"
            "  --exposure <stops>     Exposure compensation in stops, e.g. -1.0, 0.5, 2.0 (default: 0.0).\n"
+           "  --green-balance <val>  Green channel equalization factor. 1.0=off (default: 1.0).\n"
            "  --color-temp <K>       Color temperature in Kelvin (default: 3700).\n"
            "  --tint <val>           Green/Magenta tint. >0 -> magenta, <0 -> green (default: 0.0).\n"
            "  --ca-strength <val>    Automatic CA correction strength. 0=off (default: 0.0).\n"
@@ -97,6 +101,7 @@ ProcessConfig parse_args(int argc, char **argv) {
     }
 
     std::map<std::string, std::string> args;
+    std::set<std::string> flags;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--help") {
@@ -104,10 +109,11 @@ ProcessConfig parse_args(int argc, char **argv) {
             exit(0);
         }
         if (arg.rfind("--", 0) == 0) {
-            if (i + 1 < argc) {
-                args[arg.substr(2)] = argv[++i];
+            std::string key = arg.substr(2);
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                args[key] = argv[++i];
             } else {
-                throw std::runtime_error("Missing value for argument " + arg);
+                flags.insert(key);
             }
         } else {
             // Assume it's the input file if not already set
@@ -120,9 +126,11 @@ ProcessConfig parse_args(int argc, char **argv) {
     try {
         if (args.count("input")) cfg.input_path = args["input"];
         if (args.count("output")) cfg.output_path = args["output"];
+        if (flags.count("raw-png")) cfg.raw_png = true;
         if (args.count("demosaic")) cfg.demosaic_algorithm = args["demosaic"];
         if (args.count("downscale")) cfg.downscale_factor = std::stof(args["downscale"]);
         if (args.count("exposure")) cfg.exposure = std::stof(args["exposure"]);
+        if (args.count("green-balance")) cfg.green_balance = std::stof(args["green-balance"]);
         if (args.count("color-temp")) cfg.color_temp = std::stof(args["color-temp"]);
         if (args.count("tint")) cfg.tint = std::stof(args["tint"]);
         if (args.count("gamma")) cfg.gamma = std::stof(args["gamma"]);

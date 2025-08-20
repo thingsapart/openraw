@@ -128,3 +128,4 @@ inline Halide::Func pipeline_saturation(Halide::Func input,
 
 #endif // STAGE_SATURATION_H
 
+

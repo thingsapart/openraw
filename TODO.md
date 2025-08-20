@@ -24,6 +24,7 @@ These features are central to modern RAW editing but require more complex algori
 - [ ] **HSL Color Panel:** Create a system to adjust the Hue, Saturation, and Luminance of specific color ranges (Reds, Greens, Blues, etc.).
 - [ ] **Lens Distortion Correction:** Implement a polynomial transform to correct for geometric barrel or pincushion distortion from lenses.
 - [ ] **Split Toning:** Add controls to apply separate color tints to the shadows and highlights of the image.
+- [ ] **Green Channel Balancing:** Before CA correction and demosaic, add a step to equalize the brightness of the two different green channels (Gr and Gb) to reduce subtle checkerboard artifacts on some sensors.
 
 ## Priority 3: Advanced, Niche, or Architecturally Complex
 

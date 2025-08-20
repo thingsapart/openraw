@@ -15,6 +15,7 @@ void schedule_pipeline(
     bool is_autoscheduled,
     const Halide::Target& target,
     Halide::Func denoised,
+    Halide::Func normalized_bayer,
     CACorrectBuilder& ca_builder,
     Halide::Func deinterleaved_hi_fi,
     Halide::Func demosaiced,
@@ -49,7 +50,7 @@ void schedule_pipeline(
         // A simple manual GPU schedule. Note the two "firebreaks" at vignette_corrected and resampled.
         Var block_x("gpu_block_x"), block_y("gpu_block_y");
         Var thread_x("gpu_thread_x"), thread_y("gpu_thread_y");
-        
+
         // Phase 1 output
         vignette_corrected.compute_root().gpu_tile(x, y, block_x, block_y, thread_x, thread_y, 16, 16, c);
         // Phase 2 output
@@ -66,10 +67,13 @@ void schedule_pipeline(
         const int strip_size = 32;
         const int tile_size_x = 256;
 
+        Var byi("byi"), byo("byo");
+        normalized_bayer.compute_root().split(y, byo, byi, 128).parallel(byo).vectorize(x, vec_f);
+
         // --- GLOBAL LOOKUP TABLES ---
         color_correct_builder.cc_matrix.compute_root();
         tone_curve_func.compute_root();
-        
+
         // --- PHASE 1: Original Tiled Pipeline ---
         // This phase computes everything up to the point before resampling.
         // `vignette_corrected` is the final output of this phase, materialized at root.
@@ -91,7 +95,7 @@ void schedule_pipeline(
         deinterleaved_hi_fi.compute_at(vignette_corrected, yo).store_at(vignette_corrected, yo).vectorize(x, vec_f);
         demosaiced.compute_at(vignette_corrected, yo).store_at(vignette_corrected, yo).vectorize(x, vec);
         demosaiced.bound(c, 0, 3).unroll(c);
-        
+
         downscaled.specialize(is_no_op_resize);
         downscaled.compute_at(vignette_corrected, yo).store_at(vignette_corrected, yo).vectorize(x, vec);
         downscaled.bound(c, 0, 3).unroll(c);
@@ -103,7 +107,7 @@ void schedule_pipeline(
 
 #ifndef BYPASS_LAPLACIAN_PYRAMID
         local_laplacian_builder.remap_lut.compute_root();
-        
+
         local_laplacian_builder.gPyramid[0].compute_at(vignette_corrected, xo).store_at(vignette_corrected, yo);
         bool perform_splice = (cutover_level > 0 && cutover_level < J);
 
@@ -119,7 +123,7 @@ void schedule_pipeline(
         } else {
             for (int j = 1; j < J; j++) local_laplacian_builder.gPyramid[j].compute_at(vignette_corrected, xo).store_at(vignette_corrected, yo).vectorize(local_laplacian_builder.gPyramid[j].args()[0], vec_f);
         }
-        
+
         for (int j = 0; j < J; j++) {
             auto& helpers = (perform_splice && j >= cutover_level) ? local_laplacian_builder.low_freq_pyramid_helpers : local_laplacian_builder.high_freq_pyramid_helpers;
             auto compute_loc = (perform_splice && j >= cutover_level) ? yo : xo;
@@ -144,7 +148,7 @@ void schedule_pipeline(
 
 
         // --- PHASE 2: Geometry, Sharpen, and Final Conversion ---
-        
+
         // This is the geometry "firebreak". It consumes the entire `vignette_corrected` buffer.
         resampled.compute_root()
             .parallel(y)
@@ -158,7 +162,7 @@ void schedule_pipeline(
             .parallel(yo)
             .vectorize(xi, vec);
         final_stage.bound(c, 0, 3).unroll(c);
-        
+
         // Give the bypass switch a concrete schedule so we can specialize it.
         // It's pointwise, so compute it at the same tile level as its consumer, `sharpened`.
         resampled_or_bypass

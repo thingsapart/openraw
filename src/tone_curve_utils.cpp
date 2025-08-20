@@ -206,7 +206,7 @@ void average_rgb_to_luma(ProcessConfig& cfg) {
     for (const auto& p : cfg.curve_points_r) x_coords.insert(p.x);
     for (const auto& p : cfg.curve_points_g) x_coords.insert(p.x);
     for (const auto& p : cfg.curve_points_b) x_coords.insert(p.x);
-    
+
     // Ensure the curve is sampled at the endpoints
     x_coords.insert(0.0f);
     x_coords.insert(1.0f);
@@ -291,3 +291,4 @@ std::string points_to_string(const std::vector<Point>& points) {
 }
 
 } // namespace ToneCurveUtils
+

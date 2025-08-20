@@ -71,7 +71,7 @@ public:
             current_y += center_y - geo_offset_y;
         }
         #endif
-        
+
         #ifndef LENS_NO_DISTORT
         {
             // --- Inverse mapping using the pre-computed LUT ---
@@ -102,7 +102,7 @@ public:
             // Clamp indices to be safely within the LUT bounds.
             Expr idx0 = clamp(lut_i_index, 0, lut_width - 2);
             Expr idx1 = idx0 + 1;
-            
+
             Expr factor1 = distortion_lut(idx0);
             Expr factor2 = distortion_lut(idx1);
             Expr correction_factor = lerp(factor1, factor2, frac);
@@ -113,7 +113,7 @@ public:
             current_y = center_y + norm_distort_y * correction_factor;
         }
         #endif
-        
+
         #ifndef LENS_NO_CA
         {
             const float ca_scale = 2e-5f;
@@ -132,7 +132,7 @@ public:
             current_y = select(c == 0, src_y_r, c == 2, src_y_b, current_y);
         }
         #endif
-        
+
         // --- 2. Sample the input image with manual boundary checking and bilinear interpolation ---
         Expr final_src_x = current_x;
         Expr final_src_y = current_y;
@@ -142,7 +142,7 @@ public:
 
         Expr in_bounds = (final_src_x >= src_min_x && final_src_x <= src_max_x &&
                           final_src_y >= src_min_y && final_src_y <= src_max_y);
-        
+
         Func safe_input = BoundaryConditions::repeat_edge(input_srgb, {{0, out_width}, {0, out_height}, {0, 3}});
 
         Expr ix = cast<int>(floor(final_src_x));
@@ -157,9 +157,10 @@ public:
         Expr interp_val = lerp(lerp(v00, v10, fx),
                                lerp(v01, v11, fx),
                                fy);
-        
+
         output(x, y, c) = select(in_bounds, interp_val, 0.0f);
     }
 };
 
 #endif // STAGE_LENS_GEOMETRY_H
+

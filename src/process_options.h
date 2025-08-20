@@ -22,11 +22,13 @@ constexpr float UNSET_F = std::numeric_limits<float>::lowest();
 struct ProcessConfig {
     std::string input_path;
     std::string output_path;
+    bool raw_png = false; // If true, load input as a 16-bit grayscale PNG
     std::string demosaic_algorithm = "fast";
     float downscale_factor = 1.0f;
     float color_temp = 3700.0f;
     float tint = 0.0f;
     float exposure = 0.0f; // in stops. Default to 0.0 (no change)
+    float green_balance = 1.0f; // For green channel equalization.
     float ca_strength = 0.0f;
     int timing_iterations = 5;
 

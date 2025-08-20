@@ -104,3 +104,4 @@ public:
 
 #endif // DENOISE_GUIDED_H
 
+

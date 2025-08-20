@@ -101,3 +101,4 @@ public:
 
 #endif // DEMOSAIC_RI_H
 
+

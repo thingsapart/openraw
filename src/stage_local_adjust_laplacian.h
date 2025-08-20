@@ -3,7 +3,6 @@
 
 #include "Halide.h"
 #include "pipeline_helpers.h"
-#include "stage_deinterleave.h"
 #include "stage_resize.h"
 #include "color_tools.h"
 #include <vector>
@@ -18,6 +17,33 @@
 
 class LocalLaplacianBuilder {
 private:
+    // This is the full, pattern-aware deinterleave logic, now encapsulated as a
+    // private static helper. It is required by the low-fidelity path which
+    // operates on the original raw bayer data.
+    static Halide::Func deinterleave_raw_pattern_aware(Halide::Func raw, Halide::Var x, Halide::Var y, Halide::Var c, Halide::Expr cfa_pattern) {
+        using namespace Halide;
+        Func deinterleaved("deinterleaved_low_fi");
+        Expr p00 = raw(2 * x, 2 * y);
+        Expr p10 = raw(2 * x + 1, 2 * y);
+        Expr p01 = raw(2 * x, 2 * y + 1);
+        Expr p11 = raw(2 * x + 1, 2 * y + 1);
+
+        Expr r_grbg = p10, gr_grbg = p00, b_grbg = p01, gb_grbg = p11;
+        Expr r_rggb = p00, gr_rggb = p10, b_rggb = p11, gb_rggb = p01;
+        Expr r_gbrg = p01, gr_gbrg = p11, b_gbrg = p10, gb_gbrg = p00;
+        Expr r_bggr = p11, gr_bggr = p01, b_bggr = p00, gb_bggr = p10;
+        Expr r_rgbg = p00, gr_rgbg = p10, b_rgbg = p01, gb_rgbg = p11;
+
+        Expr gr = select(cfa_pattern == 0, gr_grbg, select(cfa_pattern == 1, gr_rggb, select(cfa_pattern == 2, gr_gbrg, select(cfa_pattern == 3, gr_bggr, gr_rgbg))));
+        Expr r = select(cfa_pattern == 0, r_grbg, select(cfa_pattern == 1, r_rggb, select(cfa_pattern == 2, r_gbrg, select(cfa_pattern == 3, r_bggr, r_rgbg))));
+        Expr b = select(cfa_pattern == 0, b_grbg, select(cfa_pattern == 1, r_rggb, select(cfa_pattern == 2, b_gbrg, select(cfa_pattern == 3, b_bggr, b_rgbg))));
+        Expr gb = select(cfa_pattern == 0, gb_grbg, select(cfa_pattern == 1, gb_rggb, select(cfa_pattern == 2, gb_gbrg, select(cfa_pattern == 3, gb_bggr, gb_rgbg))));
+
+        deinterleaved(x, y, c) = mux(c, {gr, r, b, gb});
+        return deinterleaved;
+    }
+
+
     // Self-contained, safe pyramid helpers. They explicitly use boundary
     // conditions to handle small images and allow for pyramid levels that are
     // smaller than the filter kernels.
@@ -74,6 +100,7 @@ public:
     LocalLaplacianBuilder(Halide::Func input_lch,
                            Halide::Func raw_input,
                            Halide::Func cc_matrix,
+                           Halide::Expr cfa_pattern,
                            Halide::Var x, Halide::Var y, Halide::Var c,
                            Halide::Expr detail_sharpen, Halide::Expr clarity,
                            Halide::Expr shadows, Halide::Expr highlights,
@@ -106,7 +133,7 @@ public:
         Func lowfi_spliced_L("lowfi_spliced_L");
         {
             Var hx("hx_lf"), hy("hy_lf");
-            Func deinterleaved_raw = pipeline_deinterleave(raw_input, hx, hy, c);
+            Func deinterleaved_raw = deinterleave_raw_pattern_aware(raw_input, hx, hy, c, cfa_pattern);
             Func rgb_lowfi_sensor("rgb_lowfi_sensor");
             rgb_lowfi_sensor(hx,hy,c) = mux(c,{cast<float>(deinterleaved_raw(hx,hy,1)), avg(cast<float>(deinterleaved_raw(hx,hy,0)), cast<float>(deinterleaved_raw(hx,hy,3))), cast<float>(deinterleaved_raw(hx,hy,2))});
             deinterleaved_raw.compute_inline();
@@ -234,4 +261,3 @@ public:
 };
 
 #endif // STAGE_LOCAL_ADJUST_LAPLACIAN_H
-

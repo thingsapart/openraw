@@ -14,6 +14,9 @@
 #include <vector>
 #include <memory> // For std::unique_ptr
 
+// Forward declare LibRaw to avoid including the full header here
+class LibRaw;
+
 // To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
 #ifdef USE_LENSFUN
 #include "lensfun/lensfun.h"
@@ -49,12 +52,14 @@ struct AppState {
     // --- Data required by Halide pipeline but not directly in config ---
     int blackLevel = 25;
     int whiteLevel = 1023;
+    int cfa_pattern = 0; // 0=GRBG, 1=RGGB, 2=GBRG, 3=BGGR
     int preview_downsample = 2; // 0=1:1, 1=1:2, 2=1:4, etc.
 
     // Halide Buffers
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
+    std::shared_ptr<LibRaw> raw_processor; // Keeps raw data alive
 
     // We now maintain two separate LUTs:
     // 1. The final, combined LUT for the pipeline and histogram.

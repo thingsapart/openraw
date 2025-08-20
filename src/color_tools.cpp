@@ -53,7 +53,7 @@ namespace HostColor {
         float r =  3.2404542f*X - 1.5371385f*Y - 0.4985314f*Z;
         float g = -0.9692660f*X + 1.8760108f*Y + 0.0415560f*Z;
         float b_srgb =  0.0556434f*X - 0.2040259f*Y + 1.0572252f*Z;
-        
+
         return {r, g, b_srgb};
     }
 
@@ -90,7 +90,7 @@ namespace HostColor {
                     C_out *= H_v_S.evaluate(h_in_norm);
                     L_out += H_v_L.evaluate(h_in_norm) * 100.0f; // Additive, scaled to +/- 100 L
                     C_out *= L_v_S.evaluate(L_in);
-                    
+
                     // The Sat vs Sat curve maps a normalized saturation to a new normalized saturation.
                     // We must normalize the current C_out, evaluate, and then scale back.
                     C_out = S_v_S.evaluate(C_out / 150.0f) * 150.0f;
@@ -98,7 +98,7 @@ namespace HostColor {
                     // 3. Apply color wheels (in Lab space)
                     float a = C_out * cosf(h_out_rads);
                     float b = C_out * sinf(h_out_rads);
-                    
+
                     float luma_norm = L_out / 100.f;
                     float shadow_w = 1.0f - smoothstep(0.0f, 0.5f, luma_norm);
                     float hi_w = smoothstep(0.5f, 1.0f, luma_norm);
@@ -111,7 +111,7 @@ namespace HostColor {
                     L_out *= (1.0f + cfg.shadows_luma/100.f * shadow_w);
                     L_out *= (1.0f + cfg.midtones_luma/100.f * mid_w);
                     L_out *= (1.0f + cfg.highlights_luma/100.f * hi_w);
-                    
+
                     // 4. Convert back to Lch and store in LUT
                     C_out = sqrtf(a*a + b*b);
                     // Stabilize hue calculation for near-achromatic colors.
@@ -126,3 +126,4 @@ namespace HostColor {
         return lut;
     }
 }
+

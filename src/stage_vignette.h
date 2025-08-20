@@ -28,14 +28,14 @@ public:
         Expr center_y = (cast<float>(out_height) - 1.0f) / 2.0f;
         Expr dx = cast<float>(x) - center_x;
         Expr dy = cast<float>(y) - center_y;
-        
+
         Expr max_r = max(center_x, center_y);
         Expr min_r = min(center_x, center_y);
-        
+
         // Lerp between a circular radius (based on min dimension) and an elliptical one (based on individual dimensions).
         Expr scale_x = lerp(min_r, center_x, roundness);
         Expr scale_y = lerp(min_r, center_y, roundness);
-        
+
         Expr norm_x = dx / (scale_x + 1e-6f);
         Expr norm_y = dy / (scale_y + 1e-6f);
         Expr r_sq = norm_x * norm_x + norm_y * norm_y;
@@ -56,7 +56,7 @@ public:
         // Blend starts at a luma of 0.75, fully active at 1.0.
         Expr highlight_blend = smoothstep(0.75f, 1.0f, luma);
         Expr protection_factor = lerp(vignette_factor, 1.0f, highlight_blend * highlight_protection);
-        
+
         // Only apply highlight protection when brightening (amount > 0), not when darkening.
         Expr final_factor = select(amount > 0, protection_factor, vignette_factor);
 
@@ -65,3 +65,4 @@ public:
 };
 
 #endif // STAGE_VIGNETTE_H
+

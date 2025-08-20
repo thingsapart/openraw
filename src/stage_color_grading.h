@@ -31,7 +31,7 @@ public:
         Expr li = cast<int>(floor(lf));
         Expr Ci = cast<int>(floor(Cf));
         Expr hi = cast<int>(floor(hf));
-        
+
         Expr ld = lf - li;
         Expr Cd = Cf - Ci;
         Expr hd = hf - hi;
@@ -40,7 +40,7 @@ public:
         Func lut_clamped = BoundaryConditions::repeat_edge(lut, lut_bounds);
 
         // A clear, textbook implementation of trilinear interpolation.
-        
+
         // Interpolate along the L axis for the 8 corners of the cube.
         Expr c000 = lut_clamped(li, Ci, hi, c);
         Expr c100 = lut_clamped(li + 1, Ci, hi, c);
@@ -60,7 +60,7 @@ public:
         // Interpolate along C.
         Expr c0 = lerp(c00, c10, Cd);
         Expr c1 = lerp(c01, c11, Cd);
-        
+
         // Interpolate along H.
         output(x, y, c) = lerp(c0, c1, hd);
 #else
@@ -71,3 +71,4 @@ public:
 };
 
 #endif // STAGE_COLOR_GRADING_H
+

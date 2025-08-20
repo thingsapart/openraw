@@ -197,3 +197,4 @@ public:
 
 #endif // STAGE_DENOISE_H
 
+

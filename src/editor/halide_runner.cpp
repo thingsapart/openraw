@@ -1,7 +1,9 @@
 #include "editor/halide_runner.h"
+#include "editor/app_state.h"
 #include <cmath>
 #include <iostream>
 #include <algorithm>
+#include <vector>
 
 // The editor exclusively uses the float32 pipeline.
 // Define this macro to ensure the correct generated header is included.
@@ -11,6 +13,10 @@
 #ifdef USE_LENSFUN
 #include "lensfun/lensfun.h"
 #endif
+
+#include <libraw/libraw.h>
+#include "color_tools.h"
+#include "tone_curve_utils.h"
 
 // Conditionally include the generated pipeline headers
 #if defined(PIPELINE_PRECISION_F32)
@@ -180,25 +186,42 @@ void RunHalidePipelines(AppState& state) {
     float _matrix_7000[][4] = {{2.2997f, -0.4478f, 0.1706f, -39.0923f},
                                {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
                                {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
+
+    // If libraw loaded a file and found a color matrix, use it.
+    if (state.raw_processor && state.raw_processor->imgdata.color.rgb_cam[0][0] != 0) {
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 4; j++) {
+                _matrix_3200[i][j] = state.raw_processor->imgdata.color.rgb_cam[i][j];
+                _matrix_7000[i][j] = state.raw_processor->imgdata.color.rgb_cam[i][j];
+            }
+        }
+    }
+
     Halide::Runtime::Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
+    float inv_range = 1.0f;
+    if (state.whiteLevel > state.blackLevel) {
+        inv_range = 1.0f / (static_cast<float>(state.whiteLevel) - static_cast<float>(state.blackLevel));
+    }
     for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 4; j++) {
+        for (int j = 0; j < 3; j++) {
             matrix_3200(j, i) = _matrix_3200[i][j];
             matrix_7000(j, i) = _matrix_7000[i][j];
         }
+        matrix_3200(3, i) = _matrix_3200[i][3] * inv_range;
+        matrix_7000(3, i) = _matrix_7000[i][3] * inv_range;
     }
 
     // --- Main Preview Pipeline ---
     {
         float downscale_factor = powf(2.0f, state.preview_downsample);
-        int out_width = static_cast<int>((state.input_image.width() - 32) / downscale_factor);
-        int out_height = static_cast<int>((state.input_image.height() - 24) / downscale_factor);
+        int out_width = static_cast<int>(state.input_image.width() / downscale_factor);
+        int out_height = static_cast<int>(state.input_image.height() / downscale_factor);
 
         if (!state.main_output_planar.data() || state.main_output_planar.width() != out_width || state.main_output_planar.height() != out_height) {
             state.main_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{out_width, out_height, 3});
         }
 
-        int result = camera_pipe_f32(state.input_image, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                                   cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                                   denoise_strength_norm, cfg.denoise_eps,
                                   state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,
@@ -231,14 +254,14 @@ void RunHalidePipelines(AppState& state) {
     // --- Thumbnail Pipeline (for histogram/preview) ---
     {
         const int thumb_width = 256;
-        float thumb_downscale = static_cast<float>(state.input_image.width() - 32) / thumb_width;
-        int thumb_height = static_cast<int>((state.input_image.height() - 24) / thumb_downscale);
+        float thumb_downscale = static_cast<float>(state.input_image.width()) / thumb_width;
+        int thumb_height = static_cast<int>(state.input_image.height() / thumb_downscale);
 
         if (!state.thumb_output_planar.data() || state.thumb_output_planar.width() != thumb_width || state.thumb_output_planar.height() != thumb_height) {
             state.thumb_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{thumb_width, thumb_height, 3});
         }
 
-        int result = camera_pipe_f32(state.input_image, thumb_downscale, demosaic_id, matrix_3200, matrix_7000,
+        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, thumb_downscale, demosaic_id, matrix_3200, matrix_7000,
                                   cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                                   denoise_strength_norm, cfg.denoise_eps,
                                   state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,

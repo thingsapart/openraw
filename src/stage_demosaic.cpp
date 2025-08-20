@@ -217,3 +217,4 @@ void DemosaicBuilder::build_amaze(Func result, Func deinterleaved, Var x, Var y,
     result(x, y, c) = mux(c, {r_full(x, y), g_full(x, y), b_full(x, y)});
 }
 
+

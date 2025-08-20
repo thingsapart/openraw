@@ -4,14 +4,23 @@ project(RawrPipe)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Set a default build type if none is specified. This is good practice and
+# required by the RawSpeed build scripts.
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
+
 # --- Find Core Dependencies ---
 find_package(Halide REQUIRED)
 message(STATUS "Found Halide: ${Halide_DIR}")
 find_package(PNG REQUIRED)
+find_package(PkgConfig REQUIRED)
 
-# --- Fetch Header-only Dependencies ---
+# --- Fetch Dependencies ---
 include(FetchContent)
-set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+# Do NOT set FETCHCONTENT_BASE_DIR to a source directory. Let CMake use its default
+# location inside the build tree. This is the key fix for the "write to source" error.
 
 FetchContent_Declare(
   stb
@@ -19,7 +28,20 @@ FetchContent_Declare(
   GIT_TAG        master
   GIT_SHALLOW    TRUE
 )
-FetchContent_MakeAvailable(stb)
+
+FetchContent_Declare(
+  rawspeed
+  GIT_REPOSITORY https://github.com/darktable-org/rawspeed.git
+  GIT_TAG        develop
+  GIT_SHALLOW    TRUE
+)
+
+# Disable building tests and OpenMP for the RawSpeed subproject before making it available.
+set(BUILD_TESTING OFF)
+set(BUILD_BENCHMARKING OFF)
+set(WITH_OPENMP ON)
+# Use the modern, simpler MakeAvailable call for both.
+FetchContent_MakeAvailable(stb rawspeed)
 
 
 # Add a default target if not specified by the user/environment.
@@ -31,7 +53,6 @@ endif()
 option(USE_LIBCAMERA "Build the libcamera-based capture tool" OFF)
 option(USE_LENSFUN "Use Lensfun lens correction tool" ON)
 if(USE_LENSFUN)
-    find_package(PkgConfig REQUIRED)
     pkg_check_modules(LENSFUN REQUIRED lensfun)
     if(LENSFUN_FOUND)
         message(STATUS "Found Lensfun (via pkg-config)")
@@ -82,7 +103,7 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
             src/stage_local_adjust_bilateral.h src/stage_local_adjust_laplacian.h
             src/stage_local_tonal_adjustments.h src/stage_normalize_and_expose.h
             src/stage_resize.h src/stage_saturation.h src/stage_sharpen.h
-            src/tone_curve_utils.h src/process_options.h
+            src/tone_curve_utils.h src/process_options.h src/stage_bayer_normalize.h
         COMMENT "Generating ${FILE_BASE_NAME} library..."
     )
     add_custom_target(
@@ -100,7 +121,14 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
     set(FILE_BASE_NAME "${PIPELINE_NAME}_lib")
     set(PROCESS_TARGET "process_${VARIANT}")
 
-    add_executable(${PROCESS_TARGET} src/process.cpp src/tone_curve_utils.cpp src/process_options.cpp src/color_tools.cpp src/tone_curve_utils.cpp)
+    add_executable(${PROCESS_TARGET}
+                  src/process.cpp
+                  src/tone_curve_utils.cpp
+                  src/process_options.cpp
+                  src/color_tools.cpp
+                  src/tone_curve_utils.cpp
+                  src/raw_load.cpp
+                )
 
     if(VARIANT STREQUAL "f32")
         target_compile_definitions(${PROCESS_TARGET} PRIVATE PIPELINE_PRECISION_F32)
@@ -112,10 +140,12 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GENERATED_PIPELINE_DIR}
         ${stb_SOURCE_DIR}
+        ${rawspeed_SOURCE_DIR}/src
     )
     target_link_directories(${PROCESS_TARGET} PRIVATE ${LENSFUN_LIBRARY_DIRS})
     target_link_libraries(${PROCESS_TARGET} PRIVATE
         ${GENERATED_PIPELINE_DIR}/${FILE_BASE_NAME}.a
+        rawspeed
         Halide::Runtime
         Halide::ImageIO
         PNG::PNG
@@ -194,6 +224,7 @@ add_executable(rawr
     src/process_options.cpp
     src/tone_curve_utils.cpp
     src/color_tools.cpp
+    src/raw_load.cpp
     src/tone_curve_utils.cpp
     src/editor/pane_manager.cpp
     src/editor/imgui_custom_widgets.cpp
@@ -218,6 +249,7 @@ target_link_libraries(rawr PRIVATE
     Halide::ImageIO
     PNG::PNG
     ${GENERATED_PIPELINE_DIR}/camera_pipe_f32_lib.a
+    rawspeed
     Halide::Runtime
     ${LENSFUN_LIBRARIES}
 )
@@ -228,7 +260,8 @@ target_include_directories(rawr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/editor
     ${stb_SOURCE_DIR}
     ${GENERATED_PIPELINE_DIR}
-    ${SDL2_INCLUDE_DIRS} # This line was missing and is the fix.
+    ${SDL2_INCLUDE_DIRS}
+    ${rawspeed_SOURCE_DIR}/src
 )
 set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)
 

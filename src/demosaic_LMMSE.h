@@ -118,3 +118,4 @@ public:
 
 #endif // DEMOSAIC_LMMSE_H
 
+

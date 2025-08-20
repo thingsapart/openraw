@@ -131,10 +131,10 @@ FULL_OUTPUT=$(
       # Check if it's a regular file (and not a directory)
       if [ -f "$file" ]; then
         # Append the formatted block for the current file to our output
-        printf "\n%s\n" "$file"
+        printf "\n%s\n" "!>>> $file"
         printf '```\n'
         cat "$file"
-        printf '\n```\n'
+        printf '\n```\n!<<< end\n\n'
       fi
     done
   done

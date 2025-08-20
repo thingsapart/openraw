@@ -4,6 +4,7 @@
 #include <memory>
 #include <algorithm>
 #include <set>
+#include <tuple>
 
 #include "imgui.h"
 #include "imgui_internal.h" // For accessing internal context state
@@ -12,6 +13,7 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <SDL_opengl_glext.h> 
+#include <libraw/libraw.h>
 
 #include "process_options.h"
 #include "app_state.h"
@@ -21,6 +23,52 @@
 #include "texture_utils.h"
 #include "halide_image_io.h"
 #include "tone_curve_utils.h"
+
+
+// --- LibRaw Loading (Copied from process.cpp) ---
+std::tuple<Halide::Runtime::Buffer<uint16_t, 2>, std::shared_ptr<LibRaw>>
+load_raw_file_nocopy_ui(const std::string &path, int &cfa_pattern, int &black_level, int &white_level) {
+    auto processor = std::make_shared<LibRaw>();
+    processor->imgdata.params.output_bps = 16;
+    processor->imgdata.params.use_camera_wb = 0;
+    processor->imgdata.params.no_auto_bright = 1;
+
+    if (processor->open_file(path.c_str()) != LIBRAW_SUCCESS) {
+        throw std::runtime_error("LibRaw Error: Cannot open file " + path);
+    }
+    if (processor->unpack() != LIBRAW_SUCCESS) {
+        throw std::runtime_error("LibRaw Error: Cannot unpack file " + path);
+    }
+
+    int width = processor->imgdata.sizes.width;
+    int height = processor->imgdata.sizes.height;
+    int pitch = processor->imgdata.sizes.raw_pitch;
+
+    if (processor->imgdata.color.cblack[0] > 0) {
+        black_level = (processor->imgdata.color.cblack[0] + processor->imgdata.color.cblack[1] +
+                       processor->imgdata.color.cblack[2] + processor->imgdata.color.cblack[3]) / 4;
+    } else {
+        black_level = processor->imgdata.color.black;
+    }
+    white_level = processor->imgdata.color.maximum;
+
+    std::string pattern_str(processor->imgdata.idata.cdesc);
+    if (pattern_str == "GRBG") cfa_pattern = 0;
+    else if (pattern_str == "RGGB") cfa_pattern = 1;
+    else if (pattern_str == "GBRG") cfa_pattern = 2;
+    else if (pattern_str == "BGGR") cfa_pattern = 3;
+    else { cfa_pattern = 0; }
+
+    uint16_t* data = (uint16_t*)((uint8_t*)processor->imgdata.rawdata.raw_image +
+                                 (int64_t)processor->imgdata.sizes.top_margin * pitch) +
+                                 processor->imgdata.sizes.left_margin;
+    int stride_elements = pitch / sizeof(uint16_t);
+
+    std::vector<halide_dimension_t> shape = {{0, width, 1}, {0, height, stride_elements}};
+    Halide::Runtime::Buffer<uint16_t, 2> halide_buffer(data, shape);
+
+    return {halide_buffer, processor};
+}
 
 
 int main(int argc, char** argv) {
@@ -76,7 +124,16 @@ int main(int argc, char** argv) {
 
     // --- Load Input Image ---
     try {
-        app_state.input_image = Halide::Tools::load_and_convert_image(app_state.params.input_path);
+        if (app_state.params.raw_png) {
+             app_state.input_image = Halide::Tools::load_and_convert_image(app_state.params.input_path);
+        } else {
+            auto result = load_raw_file_nocopy_ui(app_state.params.input_path,
+                                                  app_state.cfa_pattern,
+                                                  app_state.blackLevel,
+                                                  app_state.whiteLevel);
+            app_state.input_image = std::get<0>(result);
+            app_state.raw_processor = std::get<1>(result);
+        }
         std::cout << "Loaded image: " << app_state.params.input_path << " (" 
                   << app_state.input_image.width() << "x" << app_state.input_image.height() << ")" << std::endl;
     } catch (const std::runtime_error& e) {

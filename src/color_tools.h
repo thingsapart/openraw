@@ -122,3 +122,4 @@ namespace HostColor {
 }
 
 #endif // COLOR_TOOLS_H
+

@@ -22,3 +22,4 @@ inline Halide::Func pipeline_hot_pixel_suppression(Halide::Func input, Halide::V
 
 #endif // STAGE_HOT_PIXEL_SUPPRESSION_H
 
+

@@ -62,3 +62,4 @@ inline Halide::Func pipeline_apply_curve(Halide::Func input,
 
 #endif // STAGE_APPLY_CURVE_H
 
+

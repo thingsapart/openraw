@@ -154,3 +154,4 @@ int main(int argc, char** argv) {
     // All resources are automatically cleaned up when ldb goes out of scope.
     return 0;
 }
+

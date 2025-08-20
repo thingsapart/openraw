@@ -8,18 +8,23 @@
 #include <limits>  // For numeric_limits
 #include <cmath>   // for powf, cbrtf, sqrtf
 #include <iomanip> // for std::setprecision
+#include <memory>  // for std::shared_ptr
+#include <tuple>   // for std::tuple
+#include <vector>  // for std::vector
 
 // To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
 #ifdef USE_LENSFUN
 #include "lensfun/lensfun.h"
 #endif
 
+#include "raw_load.h" // NEW: Use the raw loading module
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
 #include "tone_curve_utils.h"
 #include "process_options.h" // Use the new shared header
 #include "color_tools.h"     // For LUT generation
+#include "simple_timer.h"    // Include the new timer header
 
 // Conditionally include the generated pipeline headers based on the
 // macro defined by CMake.
@@ -215,6 +220,8 @@ namespace LensCorrection {
 
 
 int main(int argc, char **argv) {
+    SimpleTimer total_timer("Total Application Time");
+
     if (argc == 1) {
         print_usage();
         return 0;
@@ -235,6 +242,24 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // --- Load Input using the new raw_load module ---
+    RawImageData raw_data;
+    if (cfg.raw_png) {
+        fprintf(stderr, "input (raw png): %s\n", cfg.input_path.c_str());
+        raw_data = load_raw_png(cfg.input_path);
+    } else {
+        fprintf(stderr, "input (rawspeed): %s\n", cfg.input_path.c_str());
+        raw_data = load_raw(cfg.input_path);
+    }
+    
+    Buffer<uint16_t, 2> input = raw_data.bayer_data;
+    int cfa_pattern = raw_data.cfa_pattern;
+    int blackLevel = raw_data.black_level;
+    int whiteLevel = raw_data.white_level;
+
+    fprintf(stderr, "       %d %d\n", input.width(), input.height());
+
+
     // Convert string-based algorithm name to the integer ID the Halide pipeline expects
     int demosaic_id = 3; // default to 'fast'
     if (cfg.demosaic_algorithm == "ahd") demosaic_id = 0;
@@ -244,112 +269,114 @@ int main(int argc, char **argv) {
         std::cerr << "Warning: unknown demosaic algorithm '" << cfg.demosaic_algorithm << "'. Defaulting to fast.\n";
     }
 
-    fprintf(stderr, "input: %s\n", cfg.input_path.c_str());
-    Buffer<uint16_t, 2> input = load_and_convert_image(cfg.input_path);
-    fprintf(stderr, "       %d %d\n", input.width(), input.height());
-
     // Calculate output dimensions based on crop and downscale factor
-    int out_width = static_cast<int>((input.width() - 32) / cfg.downscale_factor);
-    int out_height = static_cast<int>((input.height() - 24) / cfg.downscale_factor);
+    int out_width = static_cast<int>(input.width() / cfg.downscale_factor);
+    int out_height = static_cast<int>(input.height() / cfg.downscale_factor);
 
-    Buffer<float, 1> distortion_lut = LensCorrection::generate_identity_lut();
-
+    Buffer<float, 1> distortion_lut;
+    {
+        SimpleTimer lens_timer("Lens Correction LUT Generation");
+        distortion_lut = LensCorrection::generate_identity_lut();
 #ifdef USE_LENSFUN
-    bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
-                         cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
-    bool lensfun_applied = false;
-    if (needs_lensfun) {
-        fprintf(stderr, "Attempting to load Lensfun profile...\n");
-        fprintf(stderr, "  Camera: %s %s\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
-        fprintf(stderr, "  Lens: %s @ %.1fmm\n", cfg.lens_profile_name.c_str(), cfg.focal_length);
+        bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
+                             cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
+        bool lensfun_applied = false;
+        if (needs_lensfun) {
+            fprintf(stderr, "Attempting to load Lensfun profile...\n");
+            fprintf(stderr, "  Camera: %s %s\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
+            fprintf(stderr, "  Lens: %s @ %.1fmm\n", cfg.lens_profile_name.c_str(), cfg.focal_length);
 
-        lfDatabase ldb;
-        ldb.Load();
+            lfDatabase ldb;
+            ldb.Load();
 
-        const lfCamera** cams = lf_db_find_cameras(&ldb, cfg.camera_make.c_str(), cfg.camera_model.c_str());
-        if (!cams || !cams[0]) {
-            fprintf(stderr, "  -> Warning: Camera '%s %s' not found in Lensfun database.\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
-        } else {
-            const lfCamera *cam = cams[0]; // Use the first match
-            const lfLens** lenses = lf_db_find_lenses_hd(&ldb, cam, nullptr, cfg.lens_profile_name.c_str(), 0);
-            if (!lenses || !lenses[0]) {
-                fprintf(stderr, "  -> Warning: Lens profile '%s' not found for specified camera.\n", cfg.lens_profile_name.c_str());
+            const lfCamera** cams = lf_db_find_cameras(&ldb, cfg.camera_make.c_str(), cfg.camera_model.c_str());
+            if (!cams || !cams[0]) {
+                fprintf(stderr, "  -> Warning: Camera '%s %s' not found in Lensfun database.\n", cfg.camera_make.c_str(), cfg.camera_model.c_str());
             } else {
-                const lfLens *lens = lenses[0]; // Use the best match
-                lfLensCalibDistortion distortion_model;
-                if (lens->InterpolateDistortion(cfg.focal_length, distortion_model)) {
-                    const char* model_name = "Unknown";
-                    if (distortion_model.Model == LF_DIST_MODEL_POLY3) model_name = "POLY3";
-                    else if (distortion_model.Model == LF_DIST_MODEL_POLY5) model_name = "POLY5";
-                    else if (distortion_model.Model == LF_DIST_MODEL_PTLENS) model_name = "PTLENS";
-
-                    if (distortion_model.Model == LF_DIST_MODEL_POLY3 ||
-                        distortion_model.Model == LF_DIST_MODEL_POLY5 ||
-                        distortion_model.Model == LF_DIST_MODEL_PTLENS) {
-
-                        fprintf(stderr, "  -> Profile loaded (%s). Generating inverse distortion LUT...\n", model_name);
-                        distortion_lut = LensCorrection::generate_distortion_lut(distortion_model);
-                        lensfun_applied = true;
-                    } else {
-                        fprintf(stderr, "  -> Warning: Lens profile uses an unsupported distortion model (%s). Distortion not applied.\n", model_name);
-                    }
+                const lfCamera *cam = cams[0]; // Use the first match
+                const lfLens** lenses = lf_db_find_lenses_hd(&ldb, cam, nullptr, cfg.lens_profile_name.c_str(), 0);
+                if (!lenses || !lenses[0]) {
+                    fprintf(stderr, "  -> Warning: Lens profile '%s' not found for specified camera.\n", cfg.lens_profile_name.c_str());
                 } else {
-                    fprintf(stderr, "  -> Warning: Could not retrieve distortion params for this focal length.\n");
+                    const lfLens *lens = lenses[0]; // Use the best match
+                    lfLensCalibDistortion distortion_model;
+                    if (lens->InterpolateDistortion(cfg.focal_length, distortion_model)) {
+                        const char* model_name = "Unknown";
+                        if (distortion_model.Model == LF_DIST_MODEL_POLY3) model_name = "POLY3";
+                        else if (distortion_model.Model == LF_DIST_MODEL_POLY5) model_name = "POLY5";
+                        else if (distortion_model.Model == LF_DIST_MODEL_PTLENS) model_name = "PTLENS";
+
+                        if (distortion_model.Model == LF_DIST_MODEL_POLY3 ||
+                            distortion_model.Model == LF_DIST_MODEL_POLY5 ||
+                            distortion_model.Model == LF_DIST_MODEL_PTLENS) {
+
+                            fprintf(stderr, "  -> Profile loaded (%s). Generating inverse distortion LUT...\n", model_name);
+                            distortion_lut = LensCorrection::generate_distortion_lut(distortion_model);
+                            lensfun_applied = true;
+                        } else {
+                            fprintf(stderr, "  -> Warning: Lens profile uses an unsupported distortion model (%s). Distortion not applied.\n", model_name);
+                        }
+                    } else {
+                        fprintf(stderr, "  -> Warning: Could not retrieve distortion params for this focal length.\n");
+                    }
                 }
+                if (lenses) lf_free((void*)lenses);
             }
-            if (lenses) lf_free((void*)lenses);
+            if (cams) lf_free((void*)cams);
         }
-        if (cams) lf_free((void*)cams);
-    }
 
-    // If a lensfun profile was NOT applied, check for manual overrides.
-    if (!lensfun_applied) {
-        const float e = 1e-6f;
-        if (fabsf(cfg.dist_k1) > e || fabsf(cfg.dist_k2) > e || fabsf(cfg.dist_k3) > e) {
-            fprintf(stderr, "Using manual distortion parameters k1, k2, k3...\n");
-            lfLensCalibDistortion manual_model;
-            manual_model.Model = LF_DIST_MODEL_POLY5;
-            manual_model.Terms[0] = cfg.dist_k1;
-            manual_model.Terms[1] = cfg.dist_k2;
-            distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
+        if (!lensfun_applied) {
+            const float e = 1e-6f;
+            if (fabsf(cfg.dist_k1) > e || fabsf(cfg.dist_k2) > e || fabsf(cfg.dist_k3) > e) {
+                fprintf(stderr, "Using manual distortion parameters k1, k2, k3...\n");
+                lfLensCalibDistortion manual_model;
+                manual_model.Model = LF_DIST_MODEL_POLY5;
+                manual_model.Terms[0] = cfg.dist_k1;
+                manual_model.Terms[1] = cfg.dist_k2;
+                distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
+            }
         }
-    }
 #endif
-
+    }
+    
     Buffer<uint8_t, 3> output(out_width, out_height, 3);
 
-    Buffer<uint16_t, 2> tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
-    Buffer<float, 4> color_grading_lut = HostColor::generate_color_lut(cfg);
-
-    // Print a sample of the LUT for debugging.
-    print_lut_sample(color_grading_lut);
-
-    float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
-                               {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
-                               {-0.2175f, -1.8751f, 6.9640f, -26.6970f}};
-    float _matrix_7000[][4] = {{2.2997f, -0.4478f, 0.1706f, -39.0923f},
-                               {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
-                               {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
+    Buffer<uint16_t, 2> tone_curve_lut;
+    Buffer<float, 4> color_grading_lut;
+    {
+        SimpleTimer lut_timer("Host LUT Generation");
+        tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
+        color_grading_lut = HostColor::generate_color_lut(cfg);
+        print_lut_sample(color_grading_lut);
+    }
+    
     Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
+    float inv_range = 1.0f / (static_cast<float>(raw_data.white_level) - static_cast<float>(raw_data.black_level));
     for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 4; j++) {
-            matrix_3200(j, i) = _matrix_3200[i][j];
-            matrix_7000(j, i) = _matrix_7000[i][j];
+        for (int j = 0; j < 3; j++) { // Copy 3x3 rotational part
+            matrix_3200(j, i) = raw_data.matrix_3200[i][j];
+            matrix_7000(j, i) = raw_data.matrix_7000[i][j];
         }
+        // Normalize the 4th (offset) column
+        matrix_3200(3, i) = raw_data.matrix_3200[i][3] * inv_range;
+        matrix_7000(3, i) = raw_data.matrix_7000[i][3] * inv_range;
     }
 
-    int blackLevel = 25;
-    int whiteLevel = 1023;
+    if (raw_data.has_matrix) {
+        fprintf(stderr, "Using color matrix from RAW file metadata.\n");
+    } else {
+        fprintf(stderr, "Using hardcoded DNG color matrices.\n");
+    }
+
     float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
     float exposure_multiplier = powf(2.0f, cfg.exposure);
 
-    // --- Simple Timing/Profiling Loop ---
+    // --- Halide Pipeline Execution and Benchmarking ---
     double best_time = std::numeric_limits<double>::infinity();
     for (int i = 0; i < cfg.timing_iterations; i++) {
         auto start = std::chrono::high_resolution_clock::now();
-
         #if defined(PIPELINE_PRECISION_F32)
-            camera_pipe_f32(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+            camera_pipe_f32(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
@@ -365,7 +392,7 @@ int main(int argc, char **argv) {
                               cfg.geo_offset_x, cfg.geo_offset_y,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
-            camera_pipe_u16(input, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
+            camera_pipe_u16(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
                               cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
@@ -382,7 +409,6 @@ int main(int argc, char **argv) {
                               output);
         #endif
         output.device_sync();
-
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end - start;
         if (elapsed.count() < best_time) {
@@ -390,25 +416,25 @@ int main(int argc, char **argv) {
         }
     }
 
-    // The profiler will print its report to stderr automatically when the program
-    // exits, so we just need to print our own timing results.
-    // Check if profiling was enabled to avoid printing benchmark time when it's not relevant.
     if (getenv("HL_PROFILE") == nullptr) {
         #if defined(PIPELINE_PRECISION_F32)
-            fprintf(stderr, "Using float32 pipeline.\n");
+            fprintf(stdout, "Using float32 pipeline.\n");
         #elif defined(PIPELINE_PRECISION_U16)
-            fprintf(stderr, "Using uint16_t pipeline.\n");
+            fprintf(stdout, "Using uint16_t pipeline.\n");
         #endif
-        fprintf(stderr, "Halide (manual):\t%gus\n", best_time * 1e6);
+        fprintf(stdout, "Halide pipeline execution time: %f ms\n", best_time * 1000.0);
     }
 
 #ifndef NO_AUTO_SCHEDULE
-    // Auto-schedule benchmarking would go here, with a similar if/else structure
+    // Auto-schedule benchmarking would go here
 #endif
-
-    fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
-    convert_and_save_image(output, cfg.output_path);
-    fprintf(stderr, "        %d %d\n", output.width(), output.height());
+    
+    {
+        SimpleTimer save_timer("Image Save");
+        fprintf(stderr, "output: %s\n", cfg.output_path.c_str());
+        convert_and_save_image(output, cfg.output_path);
+        fprintf(stderr, "        %d %d\n", output.width(), output.height());
+    }
 
     std::string curve_png_path = cfg.output_path.substr(0, cfg.output_path.find_last_of('.')) + "_curve.png";
     if (ToneCurveUtils::render_curves_to_png(cfg, curve_png_path.c_str())) {
@@ -418,3 +444,4 @@ int main(int argc, char **argv) {
     printf("Success!\n");
     return 0;
 }
+
