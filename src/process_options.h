@@ -46,6 +46,7 @@ struct ProcessConfig {
     float ll_highlights = 0.0f;
     float ll_blacks = 0.0f;
     float ll_whites = 0.0f;
+    int ll_debug_level = -1; // -1 = off. N>0 reconstructs from N coarsest levels.
 
     // Tone Mapping
     int tonemap_algorithm = 3; // 0=linear, 1=reinhard, 2=filmic, 3=gamma

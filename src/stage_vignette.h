@@ -57,12 +57,11 @@ public:
         Expr highlight_blend = smoothstep(0.75f, 1.0f, luma);
         Expr protection_factor = lerp(vignette_factor, 1.0f, highlight_blend * highlight_protection);
 
-        // Only apply highlight protection when brightening (amount > 0), not when darkening.
-        Expr final_factor = select(amount > 0, protection_factor, vignette_factor);
+        // Only apply highlight protection when brightening (amount < 0), not when darkening (amount > 0).
+        Expr final_factor = select(amount < 0, protection_factor, vignette_factor);
 
         output(x, y, c) = input_srgb(x, y, c) * final_factor;
     }
 };
 
 #endif // STAGE_VIGNETTE_H
-

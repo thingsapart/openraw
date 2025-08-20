@@ -4,6 +4,8 @@
 #include "Halide.h"
 #include "pipeline_helpers.h"
 #include "stage_resize.h"
+#include "stage_deinterleave.h"
+#include "stage_bayer_normalize.h"
 #include "color_tools.h"
 #include <vector>
 #include <string>
@@ -17,33 +19,6 @@
 
 class LocalLaplacianBuilder {
 private:
-    // This is the full, pattern-aware deinterleave logic, now encapsulated as a
-    // private static helper. It is required by the low-fidelity path which
-    // operates on the original raw bayer data.
-    static Halide::Func deinterleave_raw_pattern_aware(Halide::Func raw, Halide::Var x, Halide::Var y, Halide::Var c, Halide::Expr cfa_pattern) {
-        using namespace Halide;
-        Func deinterleaved("deinterleaved_low_fi");
-        Expr p00 = raw(2 * x, 2 * y);
-        Expr p10 = raw(2 * x + 1, 2 * y);
-        Expr p01 = raw(2 * x, 2 * y + 1);
-        Expr p11 = raw(2 * x + 1, 2 * y + 1);
-
-        Expr r_grbg = p10, gr_grbg = p00, b_grbg = p01, gb_grbg = p11;
-        Expr r_rggb = p00, gr_rggb = p10, b_rggb = p11, gb_rggb = p01;
-        Expr r_gbrg = p01, gr_gbrg = p11, b_gbrg = p10, gb_gbrg = p00;
-        Expr r_bggr = p11, gr_bggr = p01, b_bggr = p00, gb_bggr = p10;
-        Expr r_rgbg = p00, gr_rgbg = p10, b_rgbg = p01, gb_rgbg = p11;
-
-        Expr gr = select(cfa_pattern == 0, gr_grbg, select(cfa_pattern == 1, gr_rggb, select(cfa_pattern == 2, gr_gbrg, select(cfa_pattern == 3, gr_bggr, gr_rgbg))));
-        Expr r = select(cfa_pattern == 0, r_grbg, select(cfa_pattern == 1, r_rggb, select(cfa_pattern == 2, r_gbrg, select(cfa_pattern == 3, r_bggr, r_rgbg))));
-        Expr b = select(cfa_pattern == 0, b_grbg, select(cfa_pattern == 1, r_rggb, select(cfa_pattern == 2, b_gbrg, select(cfa_pattern == 3, b_bggr, b_rgbg))));
-        Expr gb = select(cfa_pattern == 0, gb_grbg, select(cfa_pattern == 1, gb_rggb, select(cfa_pattern == 2, gb_gbrg, select(cfa_pattern == 3, gb_bggr, gb_rgbg))));
-
-        deinterleaved(x, y, c) = mux(c, {gr, r, b, gb});
-        return deinterleaved;
-    }
-
-
     // Self-contained, safe pyramid helpers. They explicitly use boundary
     // conditions to handle small images and allow for pyramid levels that are
     // smaller than the filter kernels.
@@ -101,10 +76,12 @@ public:
                            Halide::Func raw_input,
                            Halide::Func cc_matrix,
                            Halide::Expr cfa_pattern,
+                           Halide::Expr wb_r_gain, Halide::Expr wb_g_gain, Halide::Expr wb_b_gain, Halide::Expr green_balance, Halide::Expr exposure_multiplier,
                            Halide::Var x, Halide::Var y, Halide::Var c,
                            Halide::Expr detail_sharpen, Halide::Expr clarity,
                            Halide::Expr shadows, Halide::Expr highlights,
                            Halide::Expr blacks, Halide::Expr whites,
+                           Halide::Expr debug_level,
                            Halide::Expr blackLevel, Halide::Expr whiteLevel,
                            Halide::Expr width, Halide::Expr height,
                            Halide::Expr raw_width, Halide::Expr raw_height,
@@ -132,26 +109,42 @@ public:
         // --- PATH 2: Low-Fidelity Path ---
         Func lowfi_spliced_L("lowfi_spliced_L");
         {
-            Var hx("hx_lf"), hy("hy_lf");
-            Func deinterleaved_raw = deinterleave_raw_pattern_aware(raw_input, hx, hy, c, cfa_pattern);
-            Func rgb_lowfi_sensor("rgb_lowfi_sensor");
-            rgb_lowfi_sensor(hx,hy,c) = mux(c,{cast<float>(deinterleaved_raw(hx,hy,1)), avg(cast<float>(deinterleaved_raw(hx,hy,0)), cast<float>(deinterleaved_raw(hx,hy,3))), cast<float>(deinterleaved_raw(hx,hy,2))});
-            deinterleaved_raw.compute_inline();
-            rgb_lowfi_sensor.compute_inline();
+            Var hx("hx"), hy("hy"); // Use distinct Var names
+            // 1. Replicate the main pipeline's initial normalization and exposure step.
+            Func linear_exposed_lowfi("linear_exposed_lowfi");
+            Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
+            linear_exposed_lowfi(hx, hy) = (cast<float>(raw_input(hx, hy)) - cast<float>(blackLevel)) * inv_range * exposure_multiplier;
+            low_fi_intermediates.push_back(linear_exposed_lowfi);
 
+            // 2. Replicate the main pipeline's white balancing step.
+            BayerNormalizeBuilder normalize_builder_lowfi(linear_exposed_lowfi, cfa_pattern, green_balance, wb_r_gain, wb_g_gain, wb_b_gain, hx, hy);
+            Func normalized_bayer_lowfi = normalize_builder_lowfi.output;
+            low_fi_intermediates.push_back(normalized_bayer_lowfi);
+
+            // 3. Deinterleave the now-canonical GRBG bayer data.
+            Func deinterleaved_lowfi = pipeline_deinterleave(normalized_bayer_lowfi, hx, hy, c);
+            low_fi_intermediates.push_back(deinterleaved_lowfi);
+            
+            // 4. Perform a cheap demosaic.
+            Func rgb_lowfi_sensor("rgb_lowfi_sensor");
+            rgb_lowfi_sensor(hx,hy,c) = mux(c,{
+                deinterleaved_lowfi(hx,hy,1),
+                avg(deinterleaved_lowfi(hx,hy,0), deinterleaved_lowfi(hx,hy,3)),
+                deinterleaved_lowfi(hx,hy,2)
+            });
+            low_fi_intermediates.push_back(rgb_lowfi_sensor);
+
+            // 5. Apply the color matrix.
             Expr ir_sensor = rgb_lowfi_sensor(hx,hy,0), ig_sensor = rgb_lowfi_sensor(hx,hy,1), ib_sensor = rgb_lowfi_sensor(hx,hy,2);
             Expr r_f_sensor = cc_matrix(3, 0) + cc_matrix(0, 0) * ir_sensor + cc_matrix(1, 0) * ig_sensor + cc_matrix(2, 0) * ib_sensor;
             Expr g_f_sensor = cc_matrix(3, 1) + cc_matrix(0, 1) * ir_sensor + cc_matrix(1, 1) * ig_sensor + cc_matrix(2, 1) * ib_sensor;
             Expr b_f_sensor = cc_matrix(3, 2) + cc_matrix(0, 2) * ir_sensor + cc_matrix(1, 2) * ig_sensor + cc_matrix(2, 2) * ib_sensor;
 
-            Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
             Func corrected_lowfi_norm("corrected_lowfi_norm");
-            // This is the critical bug fix. The low-fidelity color conversion can produce
-            // out-of-range values. Clamping ensures a valid [0,1] sRGB image is
-            // passed to the LCH converter, preventing color corruption.
-            corrected_lowfi_norm(hx,hy,c) = clamp(mux(c, {(r_f_sensor-blackLevel)*inv_range, (g_f_sensor-blackLevel)*inv_range, (b_f_sensor-blackLevel)*inv_range}), 0.0f, 1.0f);
+            corrected_lowfi_norm(hx,hy,c) = clamp(mux(c, {r_f_sensor, g_f_sensor, b_f_sensor}), 0.0f, 1.0f);
             low_fi_intermediates.push_back(corrected_lowfi_norm);
 
+            // 6. Optional downscaling to match the main pipeline's output resolution.
             Func lowfi_rgb_maybe_downscaled("lowfi_rgb_maybe_downscaled");
             Expr is_no_op = abs(downscale_factor - 1.0f) < 1e-6f;
             Expr lowfi_w = raw_width / 2, lowfi_h = raw_height / 2;
@@ -162,7 +155,7 @@ public:
 
             Expr current_w = select(is_no_op, lowfi_w, lowfi_down_w), current_h = select(is_no_op, lowfi_h, lowfi_down_h);
 
-            // This path must now convert to Lch to get the L channel.
+            // 7. Convert the now-correct sRGB image to LCH to get the luminance signal.
             Var dx("dx_lf"), dy("dy_lf"), dc("dc_lf");
             Func lch_lowfi = HalideColor::linear_srgb_to_lch(lowfi_rgb_maybe_downscaled, dx, dy, dc);
             low_fi_intermediates.push_back(lch_lowfi);
@@ -170,6 +163,7 @@ public:
             Func L_lowfi("L_lowfi");
             L_lowfi(dx, dy) = lch_lowfi(dx, dy, 0);
 
+            // 8. Downsample the L channel to the splice level for the pyramid.
             Func L_lowfi_downsampled = L_lowfi;
             for (int j = 1; j < cutover_level; j++) {
                 Func prev = L_lowfi_downsampled;
@@ -220,7 +214,12 @@ public:
 
         for(int j=0; j < pyramid_levels; j++) {
             outLPyramid[j] = Func("outLPyramid_"+std::to_string(j));
-            outLPyramid[j](x,y) = inLPyramid[j](x,y) * select(j < detail_level_cutoff, detail_gain, select(j < clarity_level_cutoff, clarity_gain, 1.0f));
+            Expr adjusted_laplacian = inLPyramid[j](x,y) * select(j < detail_level_cutoff, detail_gain, select(j < clarity_level_cutoff, clarity_gain, 1.0f));
+
+            // If debug_level is active (>0), zero out the finest levels.
+            outLPyramid[j](x,y) = select(debug_level > 0 && j < (pyramid_levels - debug_level),
+                                         0.0f,
+                                         adjusted_laplacian);
         }
 
         const float target_sh_size = 256.0f;
@@ -247,12 +246,11 @@ public:
         Func L_out("L_out");
         Expr blacks_level = blacks/100.f * 0.5f, whites_level = 1.f - whites/100.f * 0.5f;
         Expr remap_denom = whites_level - blacks_level;
-        L_out(x,y) = ((L_out_norm(x,y) - blacks_level) / select(abs(remap_denom)<1e-5f, 1e-5f, remap_denom)) * 100.0f;
+        Expr L_remapped = (L_out_norm(x,y) - blacks_level) / select(abs(remap_denom)<1e-5f, 1e-5f, remap_denom);
+        L_out(x,y) = clamp(L_remapped, 0.f, 1.f) * 100.f; // Clamp normalized result before scaling
         reconstruction_intermediates = {L_out_norm, L_out};
 
-        Expr is_default = clarity == 0 && shadows == 0 && highlights == 0 && blacks == 0 && whites == 0;
-        // This is the crucial bug fix. This stage's job is to adjust L and pass through
-        // the C and h channels that it received as input.
+        Expr is_default = detail_sharpen == 0 && clarity == 0 && shadows == 0 && highlights == 0 && blacks == 0 && whites == 0 && debug_level <= 0;
         output(x, y, c) = mux(c, { select(is_default, L_in(x,y), L_out(x,y)), C_in(x,y), h_in(x,y) });
 #else
         output(x, y, c) = input_lch(x, y, c);
@@ -261,3 +259,4 @@ public:
 };
 
 #endif // STAGE_LOCAL_ADJUST_LAPLACIAN_H
+

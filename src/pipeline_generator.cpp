@@ -56,10 +56,13 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> green_balance{"green_balance"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> downscale_factor{"downscale_factor"};
     typename Generator<CameraPipeGenerator<T>>::template Input<int> demosaic_algorithm_id{"demosaic_algorithm_id"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_3200{"matrix_3200"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> matrix_7000{"matrix_7000"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> color_temp{"color_temp"};
-    typename Generator<CameraPipeGenerator<T>>::template Input<float> tint{"tint"};
+    
+    // White Balance and Color Correction Inputs
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> wb_r_gain{"wb_r_gain"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> wb_g_gain{"wb_g_gain"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<float> wb_b_gain{"wb_b_gain"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 2>> color_matrix{"color_matrix"};
+
     typename Generator<CameraPipeGenerator<T>>::template Input<float> exposure_multiplier{"exposure_multiplier"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ca_correction_strength{"ca_correction_strength"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> denoise_strength{"denoise_strength"};
@@ -80,6 +83,7 @@ public:
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_highlights{"ll_highlights"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_blacks{"ll_blacks"};
     typename Generator<CameraPipeGenerator<T>>::template Input<float> ll_whites{"ll_whites"};
+    typename Generator<CameraPipeGenerator<T>>::template Input<int> ll_debug_level{"ll_debug_level"};
 
     // New input for global color grading
     typename Generator<CameraPipeGenerator<T>>::template Input<Buffer<float, 4>> color_grading_lut{"color_grading_lut"};
@@ -128,7 +132,7 @@ public:
         Expr inv_range = 1.0f / (cast<float>(whiteLevel) - cast<float>(blackLevel));
         linear_exposed(x, y) = (cast<float>(raw_bounded(x, y)) - cast<float>(blackLevel)) * inv_range * exposure_multiplier;
 
-        BayerNormalizeBuilder normalize_builder(linear_exposed, cfa_pattern, green_balance, x, y);
+        BayerNormalizeBuilder normalize_builder(linear_exposed, cfa_pattern, green_balance, wb_r_gain, wb_g_gain, wb_b_gain, x, y);
         Func normalized_bayer = normalize_builder.output;
 
         DenoiseBuilder denoise_builder(linear_exposed, x, y,
@@ -158,8 +162,7 @@ public:
         Expr is_no_op_resize = abs(downscale_factor - 1.0f) < 1e-6f;
         downscaled(x, y, c) = select(is_no_op_resize, demosaiced(x, y, c), resize_builder.output(x, y, c));
 
-        ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, matrix_3200, matrix_7000,
-                                                       color_temp, tint, x, y, c);
+        ColorCorrectBuilder_T<T> color_correct_builder(downscaled, halide_proc_type, color_matrix, x, y, c);
         Func corrected_hi_fi = color_correct_builder.output;
 
         // Create a normalized float version of the input for subsequent stages.
@@ -183,9 +186,9 @@ public:
         LocalLaplacianBuilder local_laplacian_builder(
             srgb_to_lch,
             raw_bounded, color_correct_builder.cc_matrix,
-            cfa_pattern,
+            cfa_pattern, wb_r_gain, wb_g_gain, wb_b_gain, green_balance, exposure_multiplier,
             x, y, c,
-            ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites,
+            ll_detail, ll_clarity, ll_shadows, ll_highlights, ll_blacks, ll_whites, ll_debug_level,
             blackLevel, whiteLevel,
             out_width, out_height, full_res_width, full_res_height, downscale_factor,
             J, cutover_level);
@@ -268,8 +271,8 @@ public:
         green_balance.set_estimate(1.0f);
         downscale_factor.set_estimate(1.0f);
         demosaic_algorithm_id.set_estimate(3);
-        matrix_3200.set_estimates({{0, 4}, {0, 3}});
-        matrix_7000.set_estimates({{0, 4}, {0, 3}});
+        ll_debug_level.set_estimate(-1);
+        color_matrix.set_estimates({{0, 4}, {0, 3}});
         tone_curve_lut.set_estimates({{0, 65536}, {0, 3}});
         color_grading_lut.set_estimates({{0, 33}, {0, 33}, {0, 33}, {0, 3}});
         distortion_lut.set_estimates({{0, 2048}});

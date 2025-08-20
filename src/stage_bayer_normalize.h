@@ -10,6 +10,9 @@ public:
     BayerNormalizeBuilder(Halide::Func input,
                           Halide::Expr cfa_pattern,
                           Halide::Expr green_balance,
+                          Halide::Expr wb_r_gain,
+                          Halide::Expr wb_g_gain,
+                          Halide::Expr wb_b_gain,
                           Halide::Var x, Halide::Var y) {
         using namespace Halide;
         output = Func("bayer_normalized");
@@ -91,14 +94,24 @@ public:
                 select(!is_y_even && is_x_even,  qy + dy_b,
                                                  qy + dy_gb)));
 
-        // --- Read the pixel and apply green balance ---
+        // --- Read the pixel and apply gains ---
         Expr val = input(src_x, src_y);
 
-        // Apply green balance only to the G_b pixels.
-        // In the target GRBG pattern, G_b is at (odd, odd) locations.
-        Expr is_gb_location = !is_y_even && !is_x_even;
+        // The output is now in a canonical GRBG pattern.
+        // Apply white balance and green balance gains based on the output pixel's position.
+        // G R
+        // B G
+        Expr is_g_r_loc = is_y_even && is_x_even;
+        Expr is_r_loc = is_y_even && !is_x_even;
+        Expr is_b_loc = !is_y_even && is_x_even;
+        Expr is_g_b_loc = !is_y_even && !is_x_even;
 
-        output(x, y) = select(is_gb_location, val * green_balance, val);
+        Expr gain = select(is_r_loc, wb_r_gain,
+                    select(is_b_loc, wb_b_gain,
+                    select(is_g_b_loc, wb_g_gain * green_balance,
+                                        wb_g_gain))); // G_r location
+
+        output(x, y) = val * gain;
     }
 };
 

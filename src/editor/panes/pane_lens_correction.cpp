@@ -246,7 +246,7 @@ bool render_lens_correction(AppState& state) {
         changed |= ImGui::SliderFloat("Amount##vignette", &params.vignette_amount, -100.0f, 100.0f, "%.1f");
         changed |= ImGui::SliderFloat("Feather", &params.vignette_midpoint, 0.0f, 100.0f, "%.1f");
         changed |= ImGui::SliderFloat("Roundness", &params.vignette_roundness, 0.0f, 100.0f, "%.1f");
-        changed |= ImGui::SliderFloat("Highlights", &params.vignette_highlights, 0.0f, 100.0f, "%.1f");
+        changed |= ImGui::SliderFloat("Highlights##vignette", &params.vignette_highlights, 0.0f, 100.0f, "%.1f");
     }
 
     // --- Section: Geometry ---

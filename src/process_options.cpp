@@ -41,7 +41,8 @@ void print_usage() {
            "  --ll-shadows <val>     Shadow recovery, -100 to 100 (default: 0).\n"
            "  --ll-highlights <val>  Highlight recovery, -100 to 100 (default: 0).\n"
            "  --ll-blacks <val>      Adjust black point, -100 to 100 (default: 0).\n"
-           "  --ll-whites <val>      Adjust white point, -100 to 100 (default: 0).\n\n"
+           "  --ll-whites <val>      Adjust white point, -100 to 100 (default: 0).\n"
+           "  --ll-debug-levels <N>  DEBUG: Reconstruct from N coarsest levels only. -1=off (default: -1).\n\n"
            "Color Grading Options:\n"
            "  --shadows-wheel <x,y>  Color wheel offset for shadows (e.g., \"0.1,-0.05\").\n"
            "  --shadows-luma <val>   Luminance adjustment for shadows.\n"
@@ -179,6 +180,7 @@ ProcessConfig parse_args(int argc, char **argv) {
         if (args.count("ll-highlights")) cfg.ll_highlights = std::stof(args["ll-highlights"]);
         if (args.count("ll-blacks")) cfg.ll_blacks = std::stof(args["ll-blacks"]);
         if (args.count("ll-whites")) cfg.ll_whites = std::stof(args["ll-whites"]);
+        if (args.count("ll-debug-levels")) cfg.ll_debug_level = std::stoi(args["ll-debug-levels"]);
 
         // Color Grading arguments
         if (args.count("shadows-wheel")) parse_point(args["shadows-wheel"], cfg.shadows_wheel);

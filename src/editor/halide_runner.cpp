@@ -82,8 +82,10 @@ void RunHalidePipelines(AppState& state) {
     }
 #endif
 
-    Halide::Runtime::Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
-    PipelineUtils::prepare_color_matrices(state.raw_image_data, matrix_3200, matrix_7000);
+    // Calculate white balance gains and the single interpolated color matrix.
+    auto wb_gains = PipelineUtils::kelvin_to_rgb_gains(cfg.color_temp, cfg.tint);
+    Halide::Runtime::Buffer<float, 2> color_matrix(4, 3);
+    PipelineUtils::get_interpolated_color_matrix(state.raw_image_data, cfg.color_temp, color_matrix);
 
     // --- Main Preview Pipeline ---
     {
@@ -95,12 +97,14 @@ void RunHalidePipelines(AppState& state) {
             state.main_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{out_width, out_height, 3});
         }
 
-        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                                  cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, downscale_factor, demosaic_id,
+                                  wb_gains.r, wb_gains.g, wb_gains.b, color_matrix,
+                                  exposure_multiplier, cfg.ca_strength,
                                   denoise_strength_norm, cfg.denoise_eps,
                                   state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,
                                   0.f, 0.f, 0.f, /* sharpen */
                                   cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                                  cfg.ll_debug_level,
                                   color_grading_lut,
                                   cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                                   cfg.dehaze_strength,
@@ -135,12 +139,14 @@ void RunHalidePipelines(AppState& state) {
             state.thumb_output_planar = Halide::Runtime::Buffer<uint8_t>(std::vector<int>{thumb_width, thumb_height, 3});
         }
 
-        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, thumb_downscale, demosaic_id, matrix_3200, matrix_7000,
-                                  cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+        int result = camera_pipe_f32(state.input_image, state.cfa_pattern, cfg.green_balance, thumb_downscale, demosaic_id,
+                                  wb_gains.r, wb_gains.g, wb_gains.b, color_matrix,
+                                  exposure_multiplier, cfg.ca_strength,
                                   denoise_strength_norm, cfg.denoise_eps,
                                   state.blackLevel, state.whiteLevel, state.pipeline_tone_curve_lut,
                                   0.f, 0.f, 0.f, /* sharpen */
                                   cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                                  cfg.ll_debug_level,
                                   color_grading_lut,
                                   cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                                   cfg.dehaze_strength,

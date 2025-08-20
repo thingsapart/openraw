@@ -220,14 +220,17 @@ int main(int argc, char **argv) {
         print_lut_sample(color_grading_lut);
     }
     
-    Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
-    PipelineUtils::prepare_color_matrices(raw_data, matrix_3200, matrix_7000);
+    // Get the final interpolated color matrix for the pipeline.
+    Buffer<float, 2> color_matrix(4, 3);
+    PipelineUtils::get_interpolated_color_matrix(raw_data, cfg.color_temp, color_matrix);
 
     if (raw_data.has_matrix) {
-        fprintf(stderr, "Using color matrix from RAW file metadata.\n");
+        fprintf(stderr, "Using interpolated color matrix from RAW file metadata for temp %.0fK.\n", cfg.color_temp);
     } else {
-        fprintf(stderr, "Using hardcoded DNG color matrices.\n");
+        fprintf(stderr, "Using interpolated hardcoded DNG color matrices for temp %.0fK.\n", cfg.color_temp);
     }
+    
+    auto wb_gains = PipelineUtils::kelvin_to_rgb_gains(cfg.color_temp, cfg.tint);
 
     float denoise_strength_norm = std::max(0.0f, std::min(1.0f, cfg.denoise_strength / 100.0f));
     float exposure_multiplier = powf(2.0f, cfg.exposure);
@@ -237,12 +240,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < cfg.timing_iterations; i++) {
         auto start = std::chrono::high_resolution_clock::now();
         #if defined(PIPELINE_PRECISION_F32)
-            camera_pipe_f32(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+            camera_pipe_f32(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id, 
+                              wb_gains.r, wb_gains.g, wb_gains.b, color_matrix,
+                              exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              cfg.ll_debug_level,
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
@@ -253,12 +258,14 @@ int main(int argc, char **argv) {
                               cfg.geo_offset_x, cfg.geo_offset_y,
                               output);
         #elif defined(PIPELINE_PRECISION_U16)
-            camera_pipe_u16(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id, matrix_3200, matrix_7000,
-                              cfg.color_temp, cfg.tint, exposure_multiplier, cfg.ca_strength,
+            camera_pipe_u16(input, cfa_pattern, cfg.green_balance, cfg.downscale_factor, demosaic_id,
+                              wb_gains.r, wb_gains.g, wb_gains.b, color_matrix,
+                              exposure_multiplier, cfg.ca_strength,
                               denoise_strength_norm, cfg.denoise_eps,
                               blackLevel, whiteLevel, tone_curve_lut,
                               0.f, 0.f, 0.f, /* sharpen */
                               cfg.ll_detail, cfg.ll_clarity, cfg.ll_shadows, cfg.ll_highlights, cfg.ll_blacks, cfg.ll_whites,
+                              cfg.ll_debug_level,
                               color_grading_lut,
                               cfg.vignette_amount, cfg.vignette_midpoint, cfg.vignette_roundness, cfg.vignette_highlights,
                               cfg.dehaze_strength,
