@@ -126,8 +126,8 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
                   src/tone_curve_utils.cpp
                   src/process_options.cpp
                   src/color_tools.cpp
-                  src/tone_curve_utils.cpp
                   src/raw_load.cpp
+                  src/pipeline_utils.cpp
                 )
 
     if(VARIANT STREQUAL "f32")
@@ -219,13 +219,12 @@ add_executable(rawr
     src/editor/editor_theme.cpp
     src/editor/halide_runner.cpp
     src/editor/texture_utils.cpp
-    src/editor/texture_utils.cpp
     src/editor/curves_editor.cpp
     src/process_options.cpp
     src/tone_curve_utils.cpp
     src/color_tools.cpp
     src/raw_load.cpp
-    src/tone_curve_utils.cpp
+    src/pipeline_utils.cpp
     src/editor/pane_manager.cpp
     src/editor/imgui_custom_widgets.cpp
     src/editor/panes/pane_color_curves.cpp
@@ -238,7 +237,6 @@ add_executable(rawr
     src/editor/panes/pane_tone_curves.cpp
     src/editor/panes/pane_lens_correction.cpp
     src/editor/panes/pane_dehaze.cpp
-    src/editor/panes/pane_lens_correction.cpp
 )
 
 target_compile_definitions(rawr PRIVATE USE_LENSFUN)

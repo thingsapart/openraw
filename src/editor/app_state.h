@@ -8,14 +8,12 @@
 #include "process_options.h"
 #include "HalideBuffer.h"
 #include "imgui.h" // Include the main Dear ImGui header to define ImVec2
+#include "raw_load.h" // For RawImageData
 
 #include <chrono>
 #include <cstdint>
 #include <vector>
 #include <memory> // For std::unique_ptr
-
-// Forward declare LibRaw to avoid including the full header here
-class LibRaw;
 
 // To enable Lensfun support, compile with -DUSE_LENSFUN and link against liblensfun.
 #ifdef USE_LENSFUN
@@ -50,16 +48,19 @@ struct AppState {
     ProcessConfig params;
 
     // --- Data required by Halide pipeline but not directly in config ---
+    // This data is now sourced from the raw_image_data struct after loading.
     int blackLevel = 25;
     int whiteLevel = 1023;
     int cfa_pattern = 0; // 0=GRBG, 1=RGGB, 2=GBRG, 3=BGGR
     int preview_downsample = 2; // 0=1:1, 1=1:2, 2=1:4, etc.
 
-    // Halide Buffers
+    // This struct holds the raw bayer data buffer and its metadata.
+    RawImageData raw_image_data;
+    
+    // Halide Buffers (pointers to data owned by raw_image_data or this class)
     Halide::Runtime::Buffer<uint16_t> input_image;
     Halide::Runtime::Buffer<uint8_t> main_output_planar;
     Halide::Runtime::Buffer<uint8_t> thumb_output_planar;
-    std::shared_ptr<LibRaw> raw_processor; // Keeps raw data alive
 
     // We now maintain two separate LUTs:
     // 1. The final, combined LUT for the pipeline and histogram.

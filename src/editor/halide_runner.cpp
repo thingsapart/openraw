@@ -14,9 +14,9 @@
 #include "lensfun/lensfun.h"
 #endif
 
-#include <libraw/libraw.h>
 #include "color_tools.h"
 #include "tone_curve_utils.h"
+#include "pipeline_utils.h"
 
 // Conditionally include the generated pipeline headers
 #if defined(PIPELINE_PRECISION_F32)
@@ -26,104 +26,6 @@
 #else
 #error "PIPELINE_PRECISION_F32 or PIPELINE_PRECISION_U16 must be defined"
 #endif
-
-namespace { // Anonymous namespace for local helpers
-
-// --- Lens Correction LUT Generation (Copied from process.cpp) ---
-namespace LensCorrection {
-    const int LUT_SIZE = 2048;
-    const float MAX_RD_SQUARED_NORM = 3.0f;
-
-    float solve_cubic_poly3(float p, float q) {
-        float p_3 = p / 3.0f;
-        float q_2 = q / 2.0f;
-        float discriminant = q_2 * q_2 + p_3 * p_3 * p_3;
-
-        if (discriminant >= 0) {
-            float root_discriminant = sqrtf(discriminant);
-            float term1 = cbrtf(-q_2 + root_discriminant);
-            float term2 = cbrtf(-q_2 - root_discriminant);
-            return term1 + term2;
-        } else {
-            float r = sqrtf(-p_3 * -p_3 * -p_3);
-            float phi = acosf(-q_2 / r);
-            float two_sqrt_p3 = 2.0f * sqrtf(-p_3);
-            return two_sqrt_p3 * cosf(phi / 3.0f);
-        }
-    }
-
-    float solve_poly5(float k1, float k2, float rd) {
-        float ru = rd; // Initial guess
-        for (int i = 0; i < 4; ++i) {
-            float ru2 = ru * ru;
-            float ru3 = ru2 * ru;
-            float ru4 = ru2 * ru2;
-            float ru5 = ru4 * ru;
-            float f = k2 * ru5 + k1 * ru3 + ru - rd;
-            float f_prime = 5.0f * k2 * ru4 + 3.0f * k1 * ru2 + 1.0f;
-            if (fabsf(f_prime) < 1e-6) break;
-            ru -= f / f_prime;
-        }
-        return ru;
-    }
-
-    float solve_ptlens(float a, float b, float c, float rd) {
-        float ru = rd; // Initial guess
-        float d = 1.0f - a - b - c;
-        for (int i = 0; i < 4; ++i) {
-            float ru2 = ru * ru;
-            float ru3 = ru2 * ru;
-            float ru4 = ru2 * ru2;
-            float f = a * ru4 + b * ru3 + c * ru2 + d * ru - rd;
-            float f_prime = 4.0f * a * ru3 + 3.0f * b * ru2 + 2.0f * c * ru + d;
-            if (fabsf(f_prime) < 1e-6) break;
-            ru -= f / f_prime;
-        }
-        return ru;
-    }
-
-    Halide::Runtime::Buffer<float, 1> generate_identity_lut() {
-        Halide::Runtime::Buffer<float, 1> lut(LUT_SIZE);
-        for (int i = 0; i < LUT_SIZE; ++i) {
-            lut(i) = 1.0f;
-        }
-        return lut;
-    }
-
-#ifdef USE_LENSFUN
-    Halide::Runtime::Buffer<float, 1> generate_distortion_lut(const lfLensCalibDistortion& model) {
-        Halide::Runtime::Buffer<float, 1> lut(LUT_SIZE);
-        for (int i = 0; i < LUT_SIZE; ++i) {
-            float rd_sq_norm = (float)i * MAX_RD_SQUARED_NORM / (float)(LUT_SIZE - 1);
-            float rd_norm = sqrtf(rd_sq_norm);
-            float ru_norm = rd_norm;
-
-            switch (model.Model) {
-                case LF_DIST_MODEL_POLY3: {
-                    float k1 = model.Terms[0];
-                    if (fabsf(k1) > 1e-6f) {
-                        ru_norm = solve_cubic_poly3((1.0f - k1) / k1, -rd_norm / k1);
-                    }
-                    break;
-                }
-                case LF_DIST_MODEL_POLY5: {
-                    ru_norm = solve_poly5(model.Terms[0], model.Terms[1], rd_norm);
-                    break;
-                }
-                case LF_DIST_MODEL_PTLENS: {
-                    ru_norm = solve_ptlens(model.Terms[0], model.Terms[1], model.Terms[2], rd_norm);
-                    break;
-                }
-                default: break;
-            }
-            lut(i) = (rd_norm > 1e-5f) ? (ru_norm / rd_norm) : 1.0f;
-        }
-        return lut;
-    }
-#endif
-} // namespace LensCorrection
-} // namespace
-
 
 void RunHalidePipelines(AppState& state) {
     const ProcessConfig& cfg = state.params;
@@ -140,7 +42,7 @@ void RunHalidePipelines(AppState& state) {
     // Generate the tone curve LUT and store it in the state to be passed to the pipeline.
     state.pipeline_tone_curve_lut = ToneCurveUtils::generate_pipeline_lut(cfg);
     auto color_grading_lut = HostColor::generate_color_lut(cfg);
-    auto distortion_lut = LensCorrection::generate_identity_lut(); // Start with identity
+    auto distortion_lut = PipelineUtils::LensCorrection::generate_identity_lut(); // Start with identity
 
 #ifdef USE_LENSFUN
     bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
@@ -156,7 +58,7 @@ void RunHalidePipelines(AppState& state) {
                 lfLensCalibDistortion dist_model;
                 if (lens->InterpolateDistortion(cfg.focal_length, dist_model)) {
                     if (dist_model.Model == LF_DIST_MODEL_POLY3 || dist_model.Model == LF_DIST_MODEL_POLY5 || dist_model.Model == LF_DIST_MODEL_PTLENS) {
-                        distortion_lut = LensCorrection::generate_distortion_lut(dist_model);
+                        distortion_lut = PipelineUtils::LensCorrection::generate_distortion_lut(dist_model);
                         lensfun_applied = true;
                     }
                 }
@@ -175,41 +77,13 @@ void RunHalidePipelines(AppState& state) {
             manual_model.Terms[0] = cfg.dist_k1;
             manual_model.Terms[1] = cfg.dist_k2;
             // Note: k3 is ignored as POLY5 solver only uses k1, k2.
-            distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
+            distortion_lut = PipelineUtils::LensCorrection::generate_distortion_lut(manual_model);
         }
     }
 #endif
 
-    float _matrix_3200[][4] = {{1.6697f, -0.2693f, -0.4004f, -42.4346f},
-                               {-0.3576f, 1.0615f, 1.5949f, -37.1158f},
-                               {-0.2175f, -1.8751f, 6.9640f, -26.6970f}};
-    float _matrix_7000[][4] = {{2.2997f, -0.4478f, 0.1706f, -39.0923f},
-                               {-0.3826f, 1.5906f, -0.2080f, -25.4311f},
-                               {-0.0888f, -0.7344f, 2.2832f, -20.0826f}};
-
-    // If libraw loaded a file and found a color matrix, use it.
-    if (state.raw_processor && state.raw_processor->imgdata.color.rgb_cam[0][0] != 0) {
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 4; j++) {
-                _matrix_3200[i][j] = state.raw_processor->imgdata.color.rgb_cam[i][j];
-                _matrix_7000[i][j] = state.raw_processor->imgdata.color.rgb_cam[i][j];
-            }
-        }
-    }
-
     Halide::Runtime::Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
-    float inv_range = 1.0f;
-    if (state.whiteLevel > state.blackLevel) {
-        inv_range = 1.0f / (static_cast<float>(state.whiteLevel) - static_cast<float>(state.blackLevel));
-    }
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            matrix_3200(j, i) = _matrix_3200[i][j];
-            matrix_7000(j, i) = _matrix_7000[i][j];
-        }
-        matrix_3200(3, i) = _matrix_3200[i][3] * inv_range;
-        matrix_7000(3, i) = _matrix_7000[i][3] * inv_range;
-    }
+    PipelineUtils::prepare_color_matrices(state.raw_image_data, matrix_3200, matrix_7000);
 
     // --- Main Preview Pipeline ---
     {

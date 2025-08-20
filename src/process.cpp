@@ -17,14 +17,15 @@
 #include "lensfun/lensfun.h"
 #endif
 
-#include "raw_load.h" // NEW: Use the raw loading module
+#include "raw_load.h"
 #include "HalideBuffer.h"
 #include "halide_image_io.h"
 #include "halide_malloc_trace.h"
 #include "tone_curve_utils.h"
-#include "process_options.h" // Use the new shared header
-#include "color_tools.h"     // For LUT generation
-#include "simple_timer.h"    // Include the new timer header
+#include "process_options.h"
+#include "color_tools.h"
+#include "simple_timer.h"
+#include "pipeline_utils.h" // Use the new shared utility header
 
 // Conditionally include the generated pipeline headers based on the
 // macro defined by CMake.
@@ -85,137 +86,6 @@ void print_lut_sample(const Buffer<float, 4>& lut) {
     printf("-----------------------------------------------------------------\n\n");
 }
 
-// --- Lens Correction LUT Generation ---
-namespace LensCorrection {
-    const int LUT_SIZE = 2048;
-    // This value defines the mapping from radius^2 to LUT index.
-    // It must be consistent between this host code and the Halide pipeline.
-    // A normalized corner for a 16:9 image is at sqrt(1^2 + (9/16)^2) = 1.14.
-    // Squared, this is ~1.3. A value of 3.0 is a very safe upper bound
-    // for even extreme wide-angle lenses and heavy distortion.
-    const float MAX_RD_SQUARED_NORM = 3.0f;
-
-    // Solves the depressed cubic equation: r_u^3 + p*r_u + q = 0
-    // using Cardano's method. We only need the single, positive real root.
-    float solve_cubic_poly3(float p, float q) {
-        float p_3 = p / 3.0f;
-        float q_2 = q / 2.0f;
-        float discriminant = q_2 * q_2 + p_3 * p_3 * p_3;
-
-        if (discriminant >= 0) {
-            float root_discriminant = sqrtf(discriminant);
-            float term1 = cbrtf(-q_2 + root_discriminant);
-            float term2 = cbrtf(-q_2 - root_discriminant);
-            return term1 + term2;
-        } else {
-            // Three real roots case. We need the one that's physically meaningful.
-            float r = sqrtf(-p_3 * -p_3 * -p_3);
-            float phi = acosf(-q_2 / r);
-            float two_sqrt_p3 = 2.0f * sqrtf(-p_3);
-            // The three roots are:
-            // float root1 = two_sqrt_p3 * cosf(phi / 3.0f);
-            // float root2 = two_sqrt_p3 * cosf((phi + 2.0f * M_PI) / 3.0f);
-            // float root3 = two_sqrt_p3 * cosf((phi - 2.0f * M_PI) / 3.0f);
-            // For lens distortion, the first root is the correct positive one.
-            return two_sqrt_p3 * cosf(phi / 3.0f);
-        }
-    }
-
-    // Solves for r_u using Newton-Raphson for the POLY5 model.
-    // f(r_u) = k2*r_u^5 + k1*r_u^3 + r_u - r_d = 0
-    float solve_poly5(float k1, float k2, float rd) {
-        float ru = rd; // Initial guess
-        for (int i = 0; i < 4; ++i) { // 4 iterations is plenty
-            float ru2 = ru * ru;
-            float ru3 = ru2 * ru;
-            float ru4 = ru2 * ru2;
-            float ru5 = ru4 * ru;
-            float f = k2 * ru5 + k1 * ru3 + ru - rd;
-            float f_prime = 5.0f * k2 * ru4 + 3.0f * k1 * ru2 + 1.0f;
-            if (fabsf(f_prime) < 1e-6) break; // Avoid division by zero
-            ru -= f / f_prime;
-        }
-        return ru;
-    }
-
-    // Solves for r_u using Newton-Raphson for the PTLENS model.
-    // f(r_u) = a*r_u^4 + b*r_u^3 + c*r_u^2 + (1-a-b-c)*r_u - r_d = 0
-    float solve_ptlens(float a, float b, float c, float rd) {
-        float ru = rd; // Initial guess
-        float d = 1.0f - a - b - c;
-        for (int i = 0; i < 4; ++i) { // 4 iterations is plenty
-            float ru2 = ru * ru;
-            float ru3 = ru2 * ru;
-            float ru4 = ru2 * ru2;
-            float f = a * ru4 + b * ru3 + c * ru2 + d * ru - rd;
-            float f_prime = 4.0f * a * ru3 + 3.0f * b * ru2 + 2.0f * c * ru + d;
-            if (fabsf(f_prime) < 1e-6) break; // Avoid division by zero
-            ru -= f / f_prime;
-        }
-        return ru;
-    }
-
-    // Generates an "identity" LUT for when no correction is needed.
-    Buffer<float, 1> generate_identity_lut() {
-        Buffer<float, 1> lut(LUT_SIZE);
-        for (int i = 0; i < LUT_SIZE; ++i) {
-            lut(i) = 1.0f;
-        }
-        return lut;
-    }
-
-    // Main LUT generation function.
-#ifdef USE_LENSFUN
-    Buffer<float, 1> generate_distortion_lut(const lfLensCalibDistortion& model) {
-        Buffer<float, 1> lut(LUT_SIZE);
-
-        for (int i = 0; i < LUT_SIZE; ++i) {
-            float rd_sq_norm = (float)i * MAX_RD_SQUARED_NORM / (float)(LUT_SIZE - 1);
-            float rd_norm = sqrtf(rd_sq_norm);
-            float ru_norm = rd_norm; // Default to no change
-
-            switch (model.Model) {
-                case LF_DIST_MODEL_POLY3: {
-                    // k1*r_u^3 + (1-k1)*r_u - r_d = 0
-                    // Standard form: r_u^3 + p*r_u + q = 0
-                    float k1 = model.Terms[0];
-                    if (fabsf(k1) > 1e-6f) {
-                        float p = (1.0f - k1) / k1;
-                        float q = -rd_norm / k1;
-                        ru_norm = solve_cubic_poly3(p, q);
-                    }
-                    break;
-                }
-                case LF_DIST_MODEL_POLY5: {
-                    float k1 = model.Terms[0];
-                    float k2 = model.Terms[1];
-                    ru_norm = solve_poly5(k1, k2, rd_norm);
-                    break;
-                }
-                case LF_DIST_MODEL_PTLENS: {
-                    float a = model.Terms[0];
-                    float b = model.Terms[1];
-                    float c = model.Terms[2];
-                    ru_norm = solve_ptlens(a, b, c, rd_norm);
-                    break;
-                }
-                default:
-                    // For unsupported models, ru_norm remains rd_norm,
-                    // resulting in a correction factor of 1.0.
-                    break;
-            }
-
-            if (rd_norm > 1e-5f) {
-                lut(i) = ru_norm / rd_norm;
-            } else {
-                lut(i) = 1.0f; // Avoid division by zero at the center
-            }
-        }
-        return lut;
-    }
-#endif // USE_LENSFUN
-
-} // namespace LensCorrection
 } // namespace
 
 
@@ -276,7 +146,7 @@ int main(int argc, char **argv) {
     Buffer<float, 1> distortion_lut;
     {
         SimpleTimer lens_timer("Lens Correction LUT Generation");
-        distortion_lut = LensCorrection::generate_identity_lut();
+        distortion_lut = PipelineUtils::LensCorrection::generate_identity_lut();
 #ifdef USE_LENSFUN
         bool needs_lensfun = !cfg.camera_make.empty() && !cfg.camera_model.empty() &&
                              cfg.lens_profile_name != "None" && !cfg.lens_profile_name.empty();
@@ -311,7 +181,7 @@ int main(int argc, char **argv) {
                             distortion_model.Model == LF_DIST_MODEL_PTLENS) {
 
                             fprintf(stderr, "  -> Profile loaded (%s). Generating inverse distortion LUT...\n", model_name);
-                            distortion_lut = LensCorrection::generate_distortion_lut(distortion_model);
+                            distortion_lut = PipelineUtils::LensCorrection::generate_distortion_lut(distortion_model);
                             lensfun_applied = true;
                         } else {
                             fprintf(stderr, "  -> Warning: Lens profile uses an unsupported distortion model (%s). Distortion not applied.\n", model_name);
@@ -333,7 +203,7 @@ int main(int argc, char **argv) {
                 manual_model.Model = LF_DIST_MODEL_POLY5;
                 manual_model.Terms[0] = cfg.dist_k1;
                 manual_model.Terms[1] = cfg.dist_k2;
-                distortion_lut = LensCorrection::generate_distortion_lut(manual_model);
+                distortion_lut = PipelineUtils::LensCorrection::generate_distortion_lut(manual_model);
             }
         }
 #endif
@@ -351,16 +221,7 @@ int main(int argc, char **argv) {
     }
     
     Buffer<float, 2> matrix_3200(4, 3), matrix_7000(4, 3);
-    float inv_range = 1.0f / (static_cast<float>(raw_data.white_level) - static_cast<float>(raw_data.black_level));
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) { // Copy 3x3 rotational part
-            matrix_3200(j, i) = raw_data.matrix_3200[i][j];
-            matrix_7000(j, i) = raw_data.matrix_7000[i][j];
-        }
-        // Normalize the 4th (offset) column
-        matrix_3200(3, i) = raw_data.matrix_3200[i][3] * inv_range;
-        matrix_7000(3, i) = raw_data.matrix_7000[i][3] * inv_range;
-    }
+    PipelineUtils::prepare_color_matrices(raw_data, matrix_3200, matrix_7000);
 
     if (raw_data.has_matrix) {
         fprintf(stderr, "Using color matrix from RAW file metadata.\n");
@@ -444,4 +305,3 @@ int main(int argc, char **argv) {
     printf("Success!\n");
     return 0;
 }
-
