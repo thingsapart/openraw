@@ -17,6 +17,19 @@ message(STATUS "Found Halide: ${Halide_DIR}")
 find_package(PNG REQUIRED)
 find_package(PkgConfig REQUIRED)
 
+# --- Configure RPATH for dynamic library loading ---
+# This makes the executables portable by telling them to look for .so/.dylib
+# files in the same directory they are located in.
+if(APPLE)
+    # For macOS, @executable_path is the placeholder for the executable's directory.
+    set(CMAKE_INSTALL_RPATH "@executable_path")
+elseif(UNIX)
+    # For Linux, $ORIGIN is the equivalent.
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+endif()
+# Ensure that the RPATH is used for the build tree as well, not just for 'make install'.
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+
 # --- Fetch Dependencies ---
 include(FetchContent)
 # Do NOT set FETCHCONTENT_BASE_DIR to a source directory. Let CMake use its default
@@ -36,13 +49,33 @@ FetchContent_Declare(
   GIT_SHALLOW    TRUE
 )
 
+# --- RawSpeed Build Customization ---
+# This is a robust, programmatic way to force RawSpeed to build as a shared library
+# with its symbols correctly exported. We override their custom CMake function
+# *before* their scripts are processed. Our version does two things:
+# 1. Calls the standard `add_library` but forces the SHARED type.
+# 2. Immediately sets the symbol visibility property on the new target.
+function(rawspeed_add_library target)
+    message(STATUS "Overriding rawspeed_add_library to build SHARED library with public symbols.")
+    # The ARGN variable contains all arguments passed to this function after the named ones.
+    # We strip the first argument if it is 'STATIC' and then create the SHARED library.
+    list(FILTER ARGN EXCLUDE REGEX "STATIC")
+    add_library(${target} SHARED ${ARGN})
+
+    # Set the symbol visibility to 'default' (i.e., public) right after creation.
+    # This is crucial for exporting symbols from the shared library on macOS/Linux.
+    if(NOT WIN32)
+        set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET default)
+    endif()
+endfunction()
+
 # Disable building tests and OpenMP for the RawSpeed subproject before making it available.
 set(BUILD_TESTING OFF)
 set(BUILD_BENCHMARKING OFF)
 set(WITH_OPENMP ON)
-# Use the modern, simpler MakeAvailable call for both.
 FetchContent_MakeAvailable(stb rawspeed)
 
+# ==============================================================================
 
 # Add a default target if not specified by the user/environment.
 if(NOT CMAKE_HALIDE_TARGET)
@@ -153,6 +186,15 @@ foreach(VARIANT ${PIPELINE_VARIANTS})
         ${LENSFUN_LIBRARIES}
     )
     add_dependencies(${PROCESS_TARGET} generate_${PIPELINE_NAME})
+    set_target_properties(${PROCESS_TARGET} PROPERTIES MACOSX_RPATH ON)
+
+    # Copy the shared RawSpeed library next to the executable after it's built.
+    add_custom_command(TARGET ${PROCESS_TARGET} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                $<TARGET_FILE:rawspeed>
+                $<TARGET_FILE_DIR:${PROCESS_TARGET}>
+        COMMENT "Copying RawSpeed library to executable directory..."
+    )
 endforeach()
 
 
@@ -263,6 +305,14 @@ target_include_directories(rawr PRIVATE
 )
 set_target_properties(rawr PROPERTIES MACOSX_RPATH ON)
 
+# Copy the shared RawSpeed library next to the executable after it's built.
+add_custom_command(TARGET rawr POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE:rawspeed>
+            $<TARGET_FILE_DIR:rawr>
+    COMMENT "Copying RawSpeed library to executable directory..."
+)
+
 if(LENSFUN_FOUND)
     # --- Build the lens_info utility ---
     add_executable(lens_info src/lens_info.cpp)
@@ -270,3 +320,4 @@ if(LENSFUN_FOUND)
     target_link_directories(lens_info PRIVATE ${LENSFUN_LIBRARY_DIRS})
     target_link_libraries(lens_info PRIVATE ${LENSFUN_LIBRARIES})
 endif()
+
