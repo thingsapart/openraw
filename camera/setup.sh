@@ -32,7 +32,7 @@ echo
 echo "[3/4] Downloading font and icon assets..."
 
 # Roboto Font
-ROBOTO_URL="https://github.com/googlefonts/roboto-2/blob/main/src/hinted/Roboto-Regular.ttf"
+ROBOTO_URL="https://github.com/googlefonts/roboto-2/raw/refs/heads/main/src/hinted/Roboto-Regular.ttf"
 ROBOTO_DEST="assets/Roboto-Regular.ttf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$ROBOTO_DEST" ]; then
