@@ -4,7 +4,7 @@
 
 // Use GLES 3
 #define GL_GLEXT_PROTOTYPES 1
-#include <SDL_opengles2.h>
+#include <GLES3/gl3.h>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -88,6 +88,16 @@ struct RendererState {
     GLuint vao;
 };
 
+// --- Per-Display Resources ---
+struct Display {
+    int display_index;
+    SDL_Window* window = nullptr;
+    SDL_GLContext gl_context = nullptr;
+    ImGuiContext* imgui_context = nullptr;
+    int width = 0;
+    int height = 0;
+};
+
 // --- Declarative UI Structures ---
 // Forward declaration for nested menus
 struct MenuItem;
@@ -117,7 +127,7 @@ struct AppState {
     int active_tab_idx = 0;
     // A stack representing the path of submenus taken. The back() is the current page.
     std::vector<MenuPage*> navigation_stack;
-    
+
     // This will hold our entire menu definition
     std::vector<SettingsTab> settings_tabs;
 
@@ -138,7 +148,7 @@ void InitializeSettings(AppState& state) {
                     "Calibrate", 
                     MenuItemType::Submenu,
                     { // Sub-page for "Calibrate"
-                        { "This is where calibration sliders will go.", MenuItemType::StaticText },
+                        { "This is where calibration sliders will go.", MenuItemType::StaticText, {} },
                     }
                 },
             }
@@ -146,8 +156,8 @@ void InitializeSettings(AppState& state) {
         {
             "About", // Tab Name
             { // Root Page
-                { "PiCam Frontend", MenuItemType::StaticText },
-                { "Version 0.1.0", MenuItemType::StaticText },
+                { "PiCam Frontend", MenuItemType::StaticText, {} },
+                { "Version 0.1.0", MenuItemType::StaticText, {} },
             }
         }
     };
@@ -184,7 +194,8 @@ void RenderMenuPage(AppState& state, MenuPage& page) {
 }
 
 // Main UI rendering function
-void RenderUI(SDL_Window* window, AppState& state) {
+void RenderUI(Display& /*display*/, AppState& state) {
+    // This function now operates on the currently active ImGui context
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -227,7 +238,7 @@ void RenderUI(SDL_Window* window, AppState& state) {
         ImGui::Begin("Settings", &state.show_settings_window);
 
         if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_None)) {
-            for (int i = 0; i < state.settings_tabs.size(); ++i) {
+            for (size_t i = 0; i < state.settings_tabs.size(); ++i) {
                 auto& tab = state.settings_tabs[i];
                 if (ImGui::BeginTabItem(tab.name.c_str())) {
                     // If tab changes, reset navigation
@@ -291,7 +302,9 @@ int main(int, char**) {
 
     // --- Setup Dear ImGui context ---
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    ImGuiContext* main_imgui_context = ImGui::CreateContext();
+    ImGui::SetCurrentContext(main_imgui_context);
+
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.IniFilename = nullptr; // Disable imgui.ini saving
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
@@ -303,22 +316,17 @@ int main(int, char**) {
     ImGui_ImplOpenGL3_Init("#version 300 es");
 
     // --- Load Fonts ---
-    // First, load the main font.
     io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
-
-    // Second, merge in icons from Font Awesome.
     ImFontConfig config;
     config.MergeMode = true;
     config.PixelSnapH = true;
-    config.GlyphMinAdvanceX = 20.0f; // Use if you want to make the icon monospaced
+    config.GlyphMinAdvanceX = 20.0f;
     static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
     io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
 
     // --- Setup Renderer for Camera View ---
     RendererState renderer;
     renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
-    
-    // Create a texture for the camera frame
     glGenTextures(1, &renderer.textureID);
     glBindTexture(GL_TEXTURE_2D, renderer.textureID);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -327,18 +335,13 @@ int main(int, char**) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera.width, camera.height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
 
-    // Create a quad to draw the texture on
     float vertices[] = {
-        // positions         // texture coords
-         1.0f,  1.0f, 0.0f,   1.0f, 0.0f, // top right
-         1.0f, -1.0f, 0.0f,   1.0f, 1.0f, // bottom right
-        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, // bottom left
-        -1.0f,  1.0f, 0.0f,   0.0f, 0.0f  // top left
+         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,
+         1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
     };
-    unsigned int indices[] = {
-        0, 1, 3, // first triangle
-        1, 2, 3  // second triangle
-    };
+    unsigned int indices[] = { 0, 1, 3, 1, 2, 3 };
     GLuint VBO, EBO;
     glGenVertexArrays(1, &renderer.vao);
     glGenBuffers(1, &VBO);
@@ -353,67 +356,103 @@ int main(int, char**) {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     
-    // Application state
+    // --- Finalize Application State and Display List ---
+    std::vector<Display> displays;
+    {
+        Display d;
+        d.display_index = 0;
+        d.window = window;
+        d.gl_context = gl_context;
+        d.imgui_context = main_imgui_context;
+        SDL_GetWindowSize(d.window, &d.width, &d.height);
+        displays.push_back(d);
+    }
+
     AppState state;
-    InitializeSettings(state); // Set up our declarative menu structure
-    ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f); // Background if camera fails
+    InitializeSettings(state);
+    ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
 
     // --- Main loop ---
     bool done = false;
     while (!done) {
         SDL_Event event;
-        // Use SDL_WaitEventTimeout to sleep when idle, waking up for events or
-        // after a timeout. This is the key to an efficient, non-polling loop.
-        // A 16ms timeout gives us ~60 FPS.
-        if (SDL_WaitEventTimeout(&event, 16)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT)
+        while (SDL_PollEvent(&event)) {
+            // Find the display associated with the event's window ID
+            Display* event_display = nullptr;
+            if (event.type == SDL_WINDOWEVENT) {
+                for (auto& d : displays) {
+                    if (event.window.windowID == SDL_GetWindowID(d.window)) {
+                        event_display = &d;
+                        break;
+                    }
+                }
+            }
+            // For other events, or if no specific display found, default to the first one
+            if (!event_display && !displays.empty()) {
+                event_display = &displays[0];
+            }
+
+            if (event_display) {
+                ImGui::SetCurrentContext(event_display->imgui_context);
+                ImGui_ImplSDL2_ProcessEvent(&event);
+            }
+            
+            if (event.type == SDL_QUIT) done = true;
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) {
                 done = true;
-            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window))
-                done = true;
+            }
         }
 
-        // --- Get Camera Frame and Update Texture ---
+        // --- Get ONE Camera Frame for this iteration ---
         camera.cap >> camera.frame;
         if (!camera.frame.empty()) {
             cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
             glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-            // Use glTexSubImage2D for better performance
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
         }
 
-        // --- Rendering ---
-        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
-        glClear(GL_COLOR_BUFFER_BIT);
+        // --- Render to each display ---
+        for (auto& display : displays) {
+            SDL_GL_MakeCurrent(display.window, display.gl_context);
+            ImGui::SetCurrentContext(display.imgui_context);
 
-        // 1. Render Camera View (background)
-        glUseProgram(renderer.shaderProgram);
-        glBindVertexArray(renderer.vao);
-        glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            glViewport(0, 0, display.width, display.height);
+            glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+            glClear(GL_COLOR_BUFFER_BIT);
 
-        // 2. Render ImGui UI (foreground)
-        RenderUI(window, state);
-        ImGui::Render();
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        
-        SDL_GL_SwapWindow(window);
+            // 1. Render Camera View (background)
+            glUseProgram(renderer.shaderProgram);
+            glBindVertexArray(renderer.vao);
+            glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            
+            // 2. Render ImGui UI (foreground)
+            RenderUI(display, state);
+            ImGui::Render();
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        // Swap all windows after rendering is complete for all of them
+        for (auto& display : displays) {
+            SDL_GL_SwapWindow(display.window);
+        }
     }
 
     // --- Cleanup ---
     camera.cap.release();
     glDeleteVertexArrays(1, &renderer.vao);
-    // VBO and EBO are cleaned up with VAO
     glDeleteTextures(1, &renderer.textureID);
     glDeleteProgram(renderer.shaderProgram);
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
-
-    SDL_GL_DeleteContext(gl_context);
-    SDL_DestroyWindow(window);
+    for (auto& display : displays) {
+        ImGui::SetCurrentContext(display.imgui_context);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext(display.imgui_context);
+        SDL_GL_DeleteContext(display.gl_context);
+        SDL_DestroyWindow(display.window);
+    }
+    
     SDL_Quit();
 
     return 0;

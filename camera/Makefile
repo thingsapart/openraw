@@ -7,6 +7,7 @@ LDFLAGS =
 EXECUTABLE = openrf_cam
 SRC_DIR = src
 VENDOR_DIR = $(SRC_DIR)/vendor/imgui
+ASSET_DIR = assets
 BUILD_DIR = build
 
 # Source files
@@ -26,7 +27,7 @@ CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
 LIBS = $(shell pkg-config --libs $(PKG_LIBS))
 
 # Include our own source and vendor directories for headers
-CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR)
+CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR) -I$(ASSET_DIR)
 
 # --- Build Rules ---
 

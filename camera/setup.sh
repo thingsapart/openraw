@@ -69,6 +69,7 @@ echo
 # --- 4. Build the Project ---
 echo "[4/4] Building the project using 'make'..."
 echo "This will also download Dear ImGui sources if they are missing."
+make fetch-imgui
 make
 
 echo
