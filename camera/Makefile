@@ -3,67 +3,11 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 LDFLAGS =
 
-# Project structure
-EXECUTABLE = openrf_cam
-SRC_DIR = src
-VENDOR_DIR = $(SRC_DIR)/vendor/imgui
-ASSET_DIR = assets
-BUILD_DIR = build
-
-# Source files
-# Automatically find all .cpp files in the main source and vendor directories
-SOURCES = $(wildcard $(SRC_DIR)/*.cpp) \
-          $(wildcard $(VENDOR_DIR)/*.cpp)
-
-# Object files: create a corresponding .o file in the BUILD_DIR for each source file
-OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(filter %.cpp,$(SOURCES)))
-
-# Libraries to find using pkg-config
-# Note: On many systems, OpenCV is registered as 'opencv4'
-PKG_LIBS = sdl2 opencv4 glesv2 egl gl
-
-# Use pkg-config to get compiler and linker flags for our libraries
-CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
-LIBS = $(shell pkg-config --libs $(PKG_LIBS))
-
-# Include our own source and vendor directories for headers
-CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR) -I$(ASSET_DIR)
-
-# --- Build Rules ---
-
-# The default target, called when you just run 'make'
-all: $(EXECUTABLE)
-
-# Rule to link the final executable
-$(EXECUTABLE): $(OBJECTS)
-	@echo "Linking $@..."
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
-
-# Pattern rule to compile .cpp source files into .o object files
-# It handles both src/*.cpp and src/vendor/imgui/*.cpp sources
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
-	@mkdir -p $(@D) # Create build directory if it doesn't exist
-	@echo "Compiling $<..."
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
-
-# A "phony" target is one that is not a file. 'clean' and 'all' are examples.
-.PHONY: all clean
-
-# Rule to clean up build artifacts
-clean:
-	@echo "Cleaning up..."
-	rm -f $(EXECUTABLE)
-	rm -rf $(BUILD_DIR)
-#=====
-# Compiler and flags
-CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2
-LDFLAGS =
-
 # --- Project Structure ---
 EXECUTABLE = picam_frontend
 SRC_DIR = src
 VENDOR_DIR = $(SRC_DIR)/vendor/imgui
+ASSET_DIR = assets
 BUILD_DIR = build
 
 # --- Dear ImGui Setup ---
@@ -96,7 +40,7 @@ CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
 LIBS = $(shell pkg-config --libs $(PKG_LIBS))
 
 # Include our own source and vendor directories for headers
-CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR)
+CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR) -I$(ASSET_DIR)
 
 
 # --- Build Rules ---
