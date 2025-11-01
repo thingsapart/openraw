@@ -34,7 +34,8 @@ echo "[3/4] Downloading font and icon assets..."
 # Roboto Font
 ROBOTO_URL="https://raw.githubusercontent.com/google/fonts/main/apache/roboto/Roboto-Regular.ttf"
 ROBOTO_DEST="assets/Roboto-Regular.ttf"
-if [ ! -f "$ROBOTO_DEST" ]; then
+# Use -s to check if the file exists AND is not empty
+if [ ! -s "$ROBOTO_DEST" ]; then
     echo "      -> Downloading Roboto Regular font..."
     wget -qO "$ROBOTO_DEST" "$ROBOTO_URL"
 else
@@ -45,7 +46,8 @@ fi
 # We download the free solid font and save it with the name the C++ code expects.
 FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
 FA_DEST="assets/FontAwesome6-Solid-900.otf"
-if [ ! -f "$FA_DEST" ]; then
+# Use -s to check if the file exists AND is not empty
+if [ ! -s "$FA_DEST" ]; then
     echo "      -> Downloading Font Awesome 6 Solid icon font..."
     wget -qO "$FA_DEST" "$FA_URL"
 else
@@ -56,7 +58,8 @@ fi
 # This is a source header, so it belongs in the 'src' directory to be found by the compiler.
 ICON_HEADER_URL="https://raw.githubusercontent.com/juliettef/IconFontCppHeaders/main/IconsFontAwesome6.h"
 ICON_HEADER_DEST="src/IconsFontAwesome6.h"
-if [ ! -f "$ICON_HEADER_DEST" ]; then
+# Use -s to check if the file exists AND is not empty
+if [ ! -s "$ICON_HEADER_DEST" ]; then
     echo "      -> Downloading Font Awesome C++ header..."
     wget -qO "$ICON_HEADER_DEST" "$ICON_HEADER_URL"
 else

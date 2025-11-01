@@ -4,7 +4,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 LDFLAGS =
 
 # --- Project Structure ---
-EXECUTABLE = picam_frontend
+EXECUTABLE = open_rf_liveview
 SRC_DIR = src
 IMGUI_DIR = $(SRC_DIR)/vendor/imgui
 ASSET_DIR = assets
