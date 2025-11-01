@@ -6,7 +6,7 @@ LDFLAGS =
 # --- Project Structure ---
 EXECUTABLE = picam_frontend
 SRC_DIR = src
-VENDOR_DIR = $(SRC_DIR)/vendor/imgui
+IMGUI_DIR = $(SRC_DIR)/vendor/imgui
 ASSET_DIR = assets
 BUILD_DIR = build
 
@@ -22,12 +22,12 @@ IMGUI_BACKEND_FILES = \
     imgui_impl_opengl3.cpp imgui_impl_opengl3.h \
     imgui_impl_sdl2.cpp imgui_impl_sdl2.h
 # Sentinel file to check if ImGui has been downloaded
-IMGUI_SENTINEL = $(VENDOR_DIR)/.download_complete
+IMGUI_SENTINEL = $(IMGUI_DIR)/.download_complete
 
 # --- Source and Object Files ---
 # Automatically find all .cpp files in the main source and vendor directories
 SOURCES = $(wildcard $(SRC_DIR)/*.cpp) \
-          $(wildcard $(VENDOR_DIR)/*.cpp)
+          $(wildcard $(IMGUI_DIR)/*.cpp)
 
 # Object files: create a corresponding .o file in the BUILD_DIR for each source file
 OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(filter %.cpp,$(SOURCES)))
@@ -41,7 +41,7 @@ CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
 LIBS = $(shell pkg-config --libs $(PKG_LIBS))
 
 # Include our own source and vendor directories for headers
-CXXFLAGS += -I$(SRC_DIR) -I$(VENDOR_DIR) -I$(ASSET_DIR)
+CXXFLAGS += -I$(SRC_DIR) -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backend -I$(ASSET_DIR)
 
 
 # --- Build Rules ---
@@ -87,14 +87,14 @@ fetch-imgui: $(IMGUI_SENTINEL)
 
 $(IMGUI_SENTINEL):
 	@echo "==> Dear ImGui not found. Downloading..."
-	@mkdir -p $(VENDOR_DIR)
+	@mkdir -p $(IMGUI_DIR)
 	@for file in $(IMGUI_FILES); do \
 	    echo "    Fetching $$file..."; \
-	    wget -qO $(VENDOR_DIR)/$$file $(IMGUI_BASE_URL)/$$file; \
+	    wget -qO $(IMGUI_DIR)/$$file $(IMGUI_BASE_URL)/$$file; \
 	done
 	@for file in $(IMGUI_BACKEND_FILES); do \
 	    echo "    Fetching backend/$$file..."; \
-	    wget -qO $(VENDOR_DIR)/$$file $(IMGUI_BASE_URL)/backends/$$file; \
+	    wget -qO $(IMGUI_DIR)/$$file $(IMGUI_BASE_URL)/backends/$$file; \
 	done
 	@touch $@ # Create the sentinel file to mark completion
 
@@ -103,4 +103,4 @@ clean:
 	@echo "==> Cleaning up..."
 	rm -f $(EXECUTABLE)
 	rm -rf $(BUILD_DIR)
-	rm -rf $(VENDOR_DIR) # Also remove downloaded ImGui files
+	rm -rf $(IMGUI_DIR) # Also remove downloaded ImGui files
