@@ -279,18 +279,80 @@ int main(int, char**) {
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_FULLSCREEN_DESKTOP);
-    SDL_Window* window = SDL_CreateWindow("PiCam Frontend", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
-    if (window == nullptr) {
-        printf("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
+    // --- Create a window and context for each display ---
+    std::vector<Display> displays;
+    IMGUI_CHECKVERSION();
+
+    int num_displays = SDL_GetNumVideoDisplays();
+    if (num_displays < 1) {
+        std::cerr << "Error: No displays found by SDL." << std::endl;
         return -1;
     }
 
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
-    SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1); // Enable vsync
+    std::cout << "Found " << num_displays << " displays. Initializing..." << std::endl;
 
-    // --- Initialize Camera ---
+    for (int i = 0; i < num_displays; ++i) {
+        Display d;
+        d.display_index = i;
+
+        SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP);
+        d.window = SDL_CreateWindow(
+            "PiCam Frontend",
+            SDL_WINDOWPOS_UNDEFINED_DISPLAY(i),
+            SDL_WINDOWPOS_UNDEFINED_DISPLAY(i),
+            0, 0, // Ignored for FULLSCREEN_DESKTOP
+            window_flags
+        );
+
+        if (d.window == nullptr) {
+            std::cerr << "Error: SDL_CreateWindow() for display " << i << ": " << SDL_GetError() << std::endl;
+            continue;
+        }
+        
+        SDL_GetWindowSize(d.window, &d.width, &d.height);
+        std::cout << "  - Display " << i << ": Window created with size " << d.width << "x" << d.height << std::endl;
+
+        d.gl_context = SDL_GL_CreateContext(d.window);
+        if (d.gl_context == nullptr) {
+            std::cerr << "Error: SDL_GL_CreateContext() for display " << i << ": " << SDL_GetError() << std::endl;
+            SDL_DestroyWindow(d.window);
+            continue;
+        }
+
+        SDL_GL_MakeCurrent(d.window, d.gl_context);
+        SDL_GL_SetSwapInterval(1); // Enable vsync
+
+        // Setup Dear ImGui context for this display
+        d.imgui_context = ImGui::CreateContext();
+        ImGui::SetCurrentContext(d.imgui_context);
+
+        ImGuiIO& io = ImGui::GetIO(); (void)io;
+        io.IniFilename = nullptr; // Disable imgui.ini saving
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        ImGui::StyleColorsDark();
+
+        ImGui_ImplSDL2_InitForOpenGL(d.window, d.gl_context);
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+
+        // Load fonts for this context
+        io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
+        ImFontConfig config;
+        config.MergeMode = true;
+        config.PixelSnapH = true;
+        config.GlyphMinAdvanceX = 20.0f;
+        static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+        io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
+
+        displays.push_back(d);
+    }
+
+    if (displays.empty()) {
+        std::cerr << "Error: Failed to create a window on any display." << std::endl;
+        SDL_Quit();
+        return -1;
+    }
+
+    // --- Initialize Camera (Shared Resource) ---
     CameraState camera;
     camera.cap.open(0, cv::CAP_V4L2); // Use V4L2 backend
     if (!camera.cap.isOpened()) {
@@ -300,32 +362,10 @@ int main(int, char**) {
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
 
-    // --- Setup Dear ImGui context ---
-    IMGUI_CHECKVERSION();
-    ImGuiContext* main_imgui_context = ImGui::CreateContext();
-    ImGui::SetCurrentContext(main_imgui_context);
-
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.IniFilename = nullptr; // Disable imgui.ini saving
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
-
-    ImGui::StyleColorsDark();
-
-    // --- Setup Platform/Renderer backends ---
-    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-
-    // --- Load Fonts ---
-    io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
-    ImFontConfig config;
-    config.MergeMode = true;
-    config.PixelSnapH = true;
-    config.GlyphMinAdvanceX = 20.0f;
-    static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
-    io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
-
-    // --- Setup Renderer for Camera View ---
+    // --- Setup Renderer for Camera View (Shared Resources) ---
     RendererState renderer;
+    // Set GL context for shared resource creation
+    SDL_GL_MakeCurrent(displays[0].window, displays[0].gl_context);
     renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
     glGenTextures(1, &renderer.textureID);
     glBindTexture(GL_TEXTURE_2D, renderer.textureID);
@@ -355,19 +395,8 @@ int main(int, char**) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    
-    // --- Finalize Application State and Display List ---
-    std::vector<Display> displays;
-    {
-        Display d;
-        d.display_index = 0;
-        d.window = window;
-        d.gl_context = gl_context;
-        d.imgui_context = main_imgui_context;
-        SDL_GetWindowSize(d.window, &d.width, &d.height);
-        displays.push_back(d);
-    }
 
+    // --- Initialize Application State ---
     AppState state;
     InitializeSettings(state);
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
@@ -398,7 +427,7 @@ int main(int, char**) {
             }
             
             if (event.type == SDL_QUIT) done = true;
-            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) {
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE) {
                 done = true;
             }
         }
