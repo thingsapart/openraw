@@ -36,7 +36,7 @@ IMGUI_CPP_FILES = \
     imgui_widgets.cpp \
     imgui_impl_sdl2.cpp \
     imgui_impl_opengl3.cpp
-IMGUI_SOURCES = $(addprefix $(VENDOR_DIR)/, $(IMGUI_CPP_FILES))
+IMGUI_SOURCES = $(addprefix $(IMGUI_DIR)/, $(IMGUI_CPP_FILES))
 
 # Combine the lists
 SOURCES = $(APP_SOURCES) $(IMGUI_SOURCES)
@@ -54,7 +54,7 @@ CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
 LIBS = $(shell pkg-config --libs $(PKG_LIBS))
 
 # Include our own source and vendor directories for headers
-CXXFLAGS += -I$(SRC_DIR) -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backend -I$(ASSET_DIR)
+CXXFLAGS += -I$(SRC_DIR) -I$(IMGUI_DIR) -I$(ASSET_DIR)
 
 
 # --- Build Rules ---
