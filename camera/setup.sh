@@ -37,20 +37,19 @@ ROBOTO_DEST="assets/Roboto-Regular.ttf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$ROBOTO_DEST" ]; then
     echo "      -> Downloading Roboto Regular font..."
-    wget -qO "$ROBOTO_DEST" "$ROBOTO_URL"
+    wget -O "$ROBOTO_DEST" "$ROBOTO_URL"
 else
     echo "      -> Roboto font already exists."
 fi
 
 # Font Awesome Icons (OTF)
 # We download the free solid font and save it with the name the C++ code expects.
-# FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
-FA_URL="https://github.com/FortAwesome/Font-Awesome/raw/refs/heads/fa-release-6.7.2/otfs/Font%20Awesome%206%20Free-Solid-900.otf"
+FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
 FA_DEST="assets/FontAwesome6-Solid-900.otf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$FA_DEST" ]; then
     echo "      -> Downloading Font Awesome 6 Solid icon font..."
-    wget -qO "$FA_DEST" "$FA_URL"
+    wget -O "$FA_DEST" "$FA_URL"
 else
     echo "      -> Font Awesome font already exists."
 fi
@@ -62,7 +61,7 @@ ICON_HEADER_DEST="src/IconsFontAwesome6.h"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$ICON_HEADER_DEST" ]; then
     echo "      -> Downloading Font Awesome C++ header..."
-    wget -qO "$ICON_HEADER_DEST" "$ICON_HEADER_URL"
+    wget -O "$ICON_HEADER_DEST" "$ICON_HEADER_URL"
 else
     echo "      -> Font Awesome header already exists."
 fi
