@@ -1,0 +1,15 @@
+lib/rawspeed-src/src/librawspeed/rawspeedconfig.h
+lib/rawspeed-src/src/librawspeed/adt/Mutex.h
+lib/rawspeed-src/src/librawspeed/adt/Point.h
+lib/rawspeed-src/src/librawspeed/common/Common.h
+lib/rawspeed-src/src/librawspeed/common/RawImage.h
+lib/rawspeed-src/src/librawspeed/common/RawspeedException.h
+lib/rawspeed-src/src/librawspeed/decoders/RawDecoder.h
+lib/rawspeed-src/src/librawspeed/io/Buffer.h
+lib/rawspeed-src/src/librawspeed/io/Endianness.h
+lib/rawspeed-src/src/librawspeed/io/FileReader.h
+lib/rawspeed-src/src/librawspeed/metadata/BlackArea.h
+lib/rawspeed-src/src/librawspeed/metadata/Camera.h
+lib/rawspeed-src/src/librawspeed/metadata/CameraMetaData.h
+lib/rawspeed-src/src/librawspeed/metadata/ColorFilterArray.h
+lib/rawspeed-src/src/librawspeed/parsers/RawParser.h

@@ -73,6 +73,7 @@ endfunction()
 set(BUILD_TESTING OFF)
 set(BUILD_BENCHMARKING OFF)
 set(WITH_OPENMP ON)
+set(WITH_FUZZER OFF)
 FetchContent_MakeAvailable(stb rawspeed)
 
 # ==============================================================================

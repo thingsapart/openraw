@@ -1,0 +1,348 @@
+#include <SDL.h>
+#include <iostream>
+#include <vector>
+
+// Use GLES 3
+#define GL_GLEXT_PROTOTYPES 1
+#include <SDL_opengles2.h>
+
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_opengl3.h"
+#include "IconsFontAwesome6.h"
+
+#include <opencv2/opencv.hpp>
+#include <opencv2/videoio.hpp>
+
+// --- GLSL Shaders for the camera view ---
+const char* vertexShaderSource = R"(
+    #version 300 es
+    layout (location = 0) in vec3 aPos;
+    layout (location = 1) in vec2 aTexCoord;
+    out vec2 TexCoord;
+    void main()
+    {
+        gl_Position = vec4(aPos, 1.0);
+        TexCoord = aTexCoord;
+    }
+)";
+
+const char* fragmentShaderSource = R"(
+    #version 300 es
+    precision mediump float;
+    out vec4 FragColor;
+    in vec2 TexCoord;
+    uniform sampler2D ourTexture;
+    void main()
+    {
+        FragColor = texture(ourTexture, TexCoord);
+    }
+)";
+
+// --- OpenGL Helper Functions ---
+GLuint CompileShader(GLenum type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    GLint success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetShaderInfoLog(shader, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::COMPILATION_FAILED\n" << infoLog << std::endl;
+    }
+    return shader;
+}
+
+GLuint CreateShaderProgram(const char* vsSource, const char* fsSource) {
+    GLuint vertexShader = CompileShader(GL_VERTEX_SHADER, vsSource);
+    GLuint fragmentShader = CompileShader(GL_FRAGMENT_SHADER, fsSource);
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+    GLint success;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(program, 512, NULL, infoLog);
+        std::cerr << "ERROR::PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
+    }
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    return program;
+}
+
+
+// --- Application State ---
+struct CameraState {
+    cv::VideoCapture cap;
+    cv::Mat frame;
+    int width = 1280;
+    int height = 720;
+};
+
+struct RendererState {
+    GLuint shaderProgram;
+    GLuint textureID;
+    GLuint vao;
+};
+
+struct AppState {
+    bool show_settings_window = false;
+
+    // Calibration settings placeholders
+    float k1 = 0.0f, k2 = 0.0f, p1 = 0.0f, p2 = 0.0f;
+    float fx = 1280.0f, fy = 720.0f, cx = 640.0f, cy = 360.0f;
+};
+
+// --- UI Rendering ---
+void RenderUI(SDL_Window* window, AppState& state) {
+    // Start the Dear ImGui frame
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 display_size = io.DisplaySize;
+
+    // --- Top and Bottom Bars ---
+    const float top_bar_height = 40.0f;
+    const float bottom_bar_height = 60.0f;
+
+    // Top Bar
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(display_size.x, top_bar_height));
+    ImGui::Begin("TopBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(display_size.x, top_bar_height), IM_COL32(0, 0, 0, 180));
+    ImGui::SetCursorPos(ImVec2(10, 8));
+    ImGui::Text("PiCam Live View");
+    ImGui::End();
+
+    // Bottom Bar
+    ImGui::SetNextWindowPos(ImVec2(0, display_size.y - bottom_bar_height));
+    ImGui::SetNextWindowSize(ImVec2(display_size.x, bottom_bar_height));
+    ImGui::Begin("BottomBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, display_size.y - bottom_bar_height), display_size, IM_COL32(0, 0, 0, 180));
+    
+    // Center the settings button
+    const char* settings_text = ICON_FA_GEAR " Settings";
+    ImVec2 settings_text_size = ImGui::CalcTextSize(settings_text);
+    ImGui::SetCursorPosX((display_size.x - settings_text_size.x) * 0.5f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bottom_bar_height - settings_text_size.y) * 0.5f - ImGui::GetStyle().FramePadding.y);
+
+    if (ImGui::Button(settings_text, ImVec2(settings_text_size.x + 40, settings_text_size.y + 10))) {
+        state.show_settings_window = !state.show_settings_window;
+    }
+    ImGui::End();
+
+
+    // --- Settings Window (Modal) ---
+    if (state.show_settings_window) {
+        ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Settings", &state.show_settings_window);
+
+        if (ImGui::BeginTabBar("SettingsTabs")) {
+            if (ImGui::BeginTabItem("Calibration")) {
+                ImGui::Text("Lens Distortion");
+                ImGui::SliderFloat("k1 (Radial)", &state.k1, -0.5f, 0.5f);
+                ImGui::SliderFloat("k2 (Radial)", &state.k2, -0.1f, 0.1f);
+
+                ImGui::Separator();
+                ImGui::Text("Camera Intrinsics");
+                ImGui::DragFloat("fx (Focal X)", &state.fx, 1.0f, 100.0f, 2000.0f);
+                ImGui::DragFloat("fy (Focal Y)", &state.fy, 1.0f, 100.0f, 2000.0f);
+                ImGui::DragFloat("cx (Center X)", &state.cx, 0.5f, 0.0f, 1920.0f);
+                ImGui::DragFloat("cy (Center Y)", &state.cy, 0.5f, 0.0f, 1080.0f);
+
+                // Example of a nested/sub-menu
+                if (ImGui::TreeNode("Advanced Distortion")) {
+                    ImGui::SliderFloat("p1 (Tangential)", &state.p1, -0.1f, 0.1f);
+                    ImGui::SliderFloat("p2 (Tangential)", &state.p2, -0.1f, 0.1f);
+                    ImGui::TreePop();
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("About")) {
+                ImGui::Text("PiCam Frontend");
+                ImGui::Text("Version 0.1.0");
+                ImGui::Separator();
+                ImGui::Text("An efficient, terminal-based camera utility.");
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
+
+        ImGui::End();
+    }
+}
+
+
+int main(int, char**) {
+    // --- Setup SDL ---
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+        printf("Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    // --- Setup Window with OpenGL ES 3 context ---
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_Window* window = SDL_CreateWindow("PiCam Frontend", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    if (window == nullptr) {
+        printf("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
+        return -1;
+    }
+
+    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+    SDL_GL_MakeCurrent(window, gl_context);
+    SDL_GL_SetSwapInterval(1); // Enable vsync
+
+    // --- Initialize Camera ---
+    CameraState camera;
+    camera.cap.open(0, cv::CAP_V4L2); // Use V4L2 backend
+    if (!camera.cap.isOpened()) {
+        std::cerr << "Error: Could not open webcam." << std::endl;
+        return -1;
+    }
+    camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
+    camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
+
+    // --- Setup Dear ImGui context ---
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.IniFilename = nullptr; // Disable imgui.ini saving
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+
+    ImGui::StyleColorsDark();
+
+    // --- Setup Platform/Renderer backends ---
+    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+
+    // --- Load Fonts ---
+    // First, load the main font.
+    io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
+
+    // Second, merge in icons from Font Awesome.
+    ImFontConfig config;
+    config.MergeMode = true;
+    config.PixelSnapH = true;
+    config.GlyphMinAdvanceX = 20.0f; // Use if you want to make the icon monospaced
+    static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+    io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
+
+    // --- Setup Renderer for Camera View ---
+    RendererState renderer;
+    renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
+    
+    // Create a texture for the camera frame
+    glGenTextures(1, &renderer.textureID);
+    glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera.width, camera.height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+
+    // Create a quad to draw the texture on
+    float vertices[] = {
+        // positions         // texture coords
+         1.0f,  1.0f, 0.0f,   1.0f, 0.0f, // top right
+         1.0f, -1.0f, 0.0f,   1.0f, 1.0f, // bottom right
+        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, // bottom left
+        -1.0f,  1.0f, 0.0f,   0.0f, 0.0f  // top left
+    };
+    unsigned int indices[] = {
+        0, 1, 3, // first triangle
+        1, 2, 3  // second triangle
+    };
+    GLuint VBO, EBO;
+    glGenVertexArrays(1, &renderer.vao);
+    glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
+    glBindVertexArray(renderer.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    
+    // Application state
+    AppState state;
+    ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f); // Background if camera fails
+
+    // --- Main loop ---
+    bool done = false;
+    while (!done) {
+        SDL_Event event;
+        // Use SDL_WaitEventTimeout to sleep when idle, waking up for events or
+        // after a timeout. This is the key to an efficient, non-polling loop.
+        // A 16ms timeout gives us ~60 FPS.
+        if (SDL_WaitEventTimeout(&event, 16)) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+            if (event.type == SDL_QUIT)
+                done = true;
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window))
+                done = true;
+        }
+
+        // --- Get Camera Frame and Update Texture ---
+        camera.cap >> camera.frame;
+        if (!camera.frame.empty()) {
+            cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
+            glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+            // Use glTexSubImage2D for better performance
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
+        }
+
+        // --- Rendering ---
+        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // 1. Render Camera View (background)
+        glUseProgram(renderer.shaderProgram);
+        glBindVertexArray(renderer.vao);
+        glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        // 2. Render ImGui UI (foreground)
+        RenderUI(window, state);
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        
+        SDL_GL_SwapWindow(window);
+    }
+
+    // --- Cleanup ---
+    camera.cap.release();
+    glDeleteVertexArrays(1, &renderer.vao);
+    // VBO and EBO are cleaned up with VAO
+    glDeleteTextures(1, &renderer.textureID);
+    glDeleteProgram(renderer.shaderProgram);
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+
+    SDL_GL_DeleteContext(gl_context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    return 0;
+}
