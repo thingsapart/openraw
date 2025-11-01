@@ -265,6 +265,10 @@ void RenderUI(Display& /*display*/, AppState& state) {
 
 int main(int, char**) {
     // --- Setup SDL ---
+    // Hint SDL to use the KMS/DRM video driver. This is crucial for detecting
+    // multiple displays (like DSI and HDMI) on embedded systems without a
+    // full X11 desktop environment.
+    SDL_SetHint(SDL_HINT_VIDEODRIVER, "kmsdrm");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         printf("Error: %s\n", SDL_GetError());
         return -1;
