@@ -88,17 +88,103 @@ struct RendererState {
     GLuint vao;
 };
 
+// --- Declarative UI Structures ---
+// Forward declaration for nested menus
+struct MenuItem;
+using MenuPage = std::vector<MenuItem>;
+
+// We can add more types like Toggle, Enum, Slider later
+enum class MenuItemType {
+    Submenu,    // Navigates to another page of items
+    StaticText  // A simple non-interactive text label
+};
+
+struct MenuItem {
+    std::string label;
+    MenuItemType type;
+    MenuPage submenu_page; // Only used by Submenu type
+};
+
+struct SettingsTab {
+    std::string name;
+    MenuPage root_page;
+};
+
 struct AppState {
     bool show_settings_window = false;
 
-    // Calibration settings placeholders
+    // UI Navigation State
+    int active_tab_idx = 0;
+    // A stack representing the path of submenus taken. The back() is the current page.
+    std::vector<MenuPage*> navigation_stack;
+    
+    // This will hold our entire menu definition
+    std::vector<SettingsTab> settings_tabs;
+
+    // Placeholder for actual calibration values
     float k1 = 0.0f, k2 = 0.0f, p1 = 0.0f, p2 = 0.0f;
     float fx = 1280.0f, fy = 720.0f, cx = 640.0f, cy = 360.0f;
 };
 
-// --- UI Rendering ---
+
+// --- UI Logic ---
+
+void InitializeSettings(AppState& state) {
+    state.settings_tabs = {
+        {
+            "Calibration", // Tab Name
+            { // Root Page
+                { 
+                    "Calibrate", 
+                    MenuItemType::Submenu,
+                    { // Sub-page for "Calibrate"
+                        { "This is where calibration sliders will go.", MenuItemType::StaticText },
+                    }
+                },
+            }
+        },
+        {
+            "About", // Tab Name
+            { // Root Page
+                { "PiCam Frontend", MenuItemType::StaticText },
+                { "Version 0.1.0", MenuItemType::StaticText },
+            }
+        }
+    };
+}
+
+// Renders a single page of menu items
+void RenderMenuPage(AppState& state, MenuPage& page) {
+    // Back button for submenus
+    if (state.navigation_stack.size() > 1) {
+        if (ImGui::Button(ICON_FA_ARROW_LEFT " Back")) {
+            state.navigation_stack.pop_back();
+        }
+        ImGui::Separator();
+    }
+
+    // Render each item on the page
+    for (auto& item : page) {
+        switch (item.type) {
+            case MenuItemType::Submenu:
+                ImGui::PushID(&item); // Ensure unique ID for items with same label
+                if (ImGui::Selectable(item.label.c_str(), false, 0, ImVec2(0, ImGui::GetTextLineHeightWithSpacing()))){
+                    state.navigation_stack.push_back(&item.submenu_page);
+                }
+                ImGui::SameLine(ImGui::GetWindowWidth() - 30);
+                ImGui::Text(ICON_FA_CHEVRON_RIGHT);
+                ImGui::PopID();
+                break;
+
+            case MenuItemType::StaticText:
+                ImGui::TextWrapped("%s", item.label.c_str());
+                break;
+        }
+    }
+}
+
+// Main UI rendering function
 void RenderUI(SDL_Window* window, AppState& state) {
-    // Start the Dear ImGui frame
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -106,11 +192,10 @@ void RenderUI(SDL_Window* window, AppState& state) {
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 display_size = io.DisplaySize;
 
-    // --- Top and Bottom Bars ---
+    // --- Top and Bottom Bars (unchanged) ---
     const float top_bar_height = 40.0f;
     const float bottom_bar_height = 60.0f;
 
-    // Top Bar
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(display_size.x, top_bar_height));
     ImGui::Begin("TopBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
@@ -119,63 +204,49 @@ void RenderUI(SDL_Window* window, AppState& state) {
     ImGui::Text("PiCam Live View");
     ImGui::End();
 
-    // Bottom Bar
     ImGui::SetNextWindowPos(ImVec2(0, display_size.y - bottom_bar_height));
     ImGui::SetNextWindowSize(ImVec2(display_size.x, bottom_bar_height));
     ImGui::Begin("BottomBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, display_size.y - bottom_bar_height), display_size, IM_COL32(0, 0, 0, 180));
-    
-    // Center the settings button
     const char* settings_text = ICON_FA_GEAR " Settings";
     ImVec2 settings_text_size = ImGui::CalcTextSize(settings_text);
     ImGui::SetCursorPosX((display_size.x - settings_text_size.x) * 0.5f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bottom_bar_height - settings_text_size.y) * 0.5f - ImGui::GetStyle().FramePadding.y);
-
     if (ImGui::Button(settings_text, ImVec2(settings_text_size.x + 40, settings_text_size.y + 10))) {
         state.show_settings_window = !state.show_settings_window;
+        // When opening the window, reset navigation to the root of the active tab
+        if (state.show_settings_window) {
+            state.navigation_stack.clear();
+        }
     }
     ImGui::End();
 
 
-    // --- Settings Window (Modal) ---
+    // --- Declarative Settings Window ---
     if (state.show_settings_window) {
         ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
         ImGui::Begin("Settings", &state.show_settings_window);
 
-        if (ImGui::BeginTabBar("SettingsTabs")) {
-            if (ImGui::BeginTabItem("Calibration")) {
-                ImGui::Text("Lens Distortion");
-                ImGui::SliderFloat("k1 (Radial)", &state.k1, -0.5f, 0.5f);
-                ImGui::SliderFloat("k2 (Radial)", &state.k2, -0.1f, 0.1f);
+        if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_None)) {
+            for (int i = 0; i < state.settings_tabs.size(); ++i) {
+                auto& tab = state.settings_tabs[i];
+                if (ImGui::BeginTabItem(tab.name.c_str())) {
+                    // If tab changes, reset navigation
+                    if (state.active_tab_idx != i) {
+                        state.active_tab_idx = i;
+                        state.navigation_stack.clear();
+                    }
+                    
+                    // Ensure navigation stack is initialized
+                    if (state.navigation_stack.empty()) {
+                        state.navigation_stack.push_back(&tab.root_page);
+                    }
 
-                ImGui::Separator();
-                ImGui::Text("Camera Intrinsics");
-                ImGui::DragFloat("fx (Focal X)", &state.fx, 1.0f, 100.0f, 2000.0f);
-                ImGui::DragFloat("fy (Focal Y)", &state.fy, 1.0f, 100.0f, 2000.0f);
-                ImGui::DragFloat("cx (Center X)", &state.cx, 0.5f, 0.0f, 1920.0f);
-                ImGui::DragFloat("cy (Center Y)", &state.cy, 0.5f, 0.0f, 1080.0f);
-
-                // Example of a nested/sub-menu
-                if (ImGui::TreeNode("Advanced Distortion")) {
-                    ImGui::SliderFloat("p1 (Tangential)", &state.p1, -0.1f, 0.1f);
-                    ImGui::SliderFloat("p2 (Tangential)", &state.p2, -0.1f, 0.1f);
-                    ImGui::TreePop();
+                    RenderMenuPage(state, *state.navigation_stack.back());
+                    ImGui::EndTabItem();
                 }
-
-                ImGui::EndTabItem();
             }
-
-            if (ImGui::BeginTabItem("About")) {
-                ImGui::Text("PiCam Frontend");
-                ImGui::Text("Version 0.1.0");
-                ImGui::Separator();
-                ImGui::Text("An efficient, terminal-based camera utility.");
-                ImGui::EndTabItem();
-            }
-
             ImGui::EndTabBar();
         }
-
         ImGui::End();
     }
 }
@@ -284,6 +355,7 @@ int main(int, char**) {
     
     // Application state
     AppState state;
+    InitializeSettings(state); // Set up our declarative menu structure
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f); // Background if camera fails
 
     // --- Main loop ---
