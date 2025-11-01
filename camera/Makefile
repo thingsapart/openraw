@@ -4,7 +4,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 LDFLAGS =
 
 # Project structure
-EXECUTABLE = picam_frontend
+EXECUTABLE = openrf_cam
 SRC_DIR = src
 VENDOR_DIR = $(SRC_DIR)/vendor/imgui
 BUILD_DIR = build
