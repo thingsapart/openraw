@@ -44,7 +44,8 @@ fi
 
 # Font Awesome Icons (OTF)
 # We download the free solid font and save it with the name the C++ code expects.
-FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
+# FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
+FA_URL="https://github.com/FortAwesome/Font-Awesome/raw/refs/heads/fa-release-6.7.2/otfs/Font%20Awesome%206%20Free-Solid-900.otf"
 FA_DEST="assets/FontAwesome6-Solid-900.otf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$FA_DEST" ]; then
