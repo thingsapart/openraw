@@ -25,12 +25,25 @@ IMGUI_BACKEND_FILES = \
 IMGUI_SENTINEL = $(IMGUI_DIR)/.download_complete
 
 # --- Source and Object Files ---
-# Automatically find all .cpp files in the main source and vendor directories
-SOURCES = $(wildcard $(SRC_DIR)/*.cpp) \
-          $(wildcard $(IMGUI_DIR)/*.cpp)
+# List application sources with wildcard
+APP_SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
+
+# Explicitly list the ImGui source files we download
+IMGUI_CPP_FILES = \
+    imgui.cpp \
+    imgui_draw.cpp \
+    imgui_tables.cpp \
+    imgui_widgets.cpp \
+    imgui_impl_sdl2.cpp \
+    imgui_impl_opengl3.cpp
+IMGUI_SOURCES = $(addprefix $(VENDOR_DIR)/, $(IMGUI_CPP_FILES))
+
+# Combine the lists
+SOURCES = $(APP_SOURCES) $(IMGUI_SOURCES)
 
 # Object files: create a corresponding .o file in the BUILD_DIR for each source file
-OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(filter %.cpp,$(SOURCES)))
+# This substitution works for both `src/*.cpp` and `src/vendor/imgui/*.cpp`
+OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
 # --- Dependencies ---
 # Libraries to find using pkg-config. On Raspberry Pi OS, OpenCV is opencv4.
