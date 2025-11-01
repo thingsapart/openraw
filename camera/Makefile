@@ -16,7 +16,8 @@ IMGUI_VERSION = v1.90.5
 IMGUI_BASE_URL = https://raw.githubusercontent.com/ocornut/imgui/$(IMGUI_VERSION)
 IMGUI_FILES = \
     imconfig.h imgui.cpp imgui_draw.cpp imgui.h imgui_internal.h \
-    imgui_tables.cpp imgui_widgets.cpp imstb_truetype.h
+    imgui_tables.cpp imgui_widgets.cpp \
+    imstb_rectpack.h imstb_textedit.h imstb_truetype.h
 IMGUI_BACKEND_FILES = \
     imgui_impl_opengl3.cpp imgui_impl_opengl3.h \
     imgui_impl_sdl2.cpp imgui_impl_sdl2.h

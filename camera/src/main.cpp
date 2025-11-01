@@ -124,7 +124,7 @@ struct AppState {
     bool show_settings_window = false;
 
     // UI Navigation State
-    int active_tab_idx = 0;
+    size_t active_tab_idx = 0;
     // A stack representing the path of submenus taken. The back() is the current page.
     std::vector<MenuPage*> navigation_stack;
 
