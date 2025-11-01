@@ -32,7 +32,7 @@ echo
 echo "[3/4] Downloading font and icon assets..."
 
 # Roboto Font
-ROBOTO_URL="https://raw.githubusercontent.com/google/fonts/main/apache/roboto/Roboto-Regular.ttf"
+ROBOTO_URL="https://github.com/googlefonts/roboto-2/blob/main/src/hinted/Roboto-Regular.ttf"
 ROBOTO_DEST="assets/Roboto-Regular.ttf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$ROBOTO_DEST" ]; then
@@ -44,7 +44,7 @@ fi
 
 # Font Awesome Icons (OTF)
 # We download the free solid font and save it with the name the C++ code expects.
-FA_URL="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/otfs/FontAwesome6-Free-Solid-900.otf"
+FA_URL="https://github.com/FortAwesome/Font-Awesome/raw/refs/heads/fa-release-6.7.2/otfs/Font%20Awesome%206%20Free-Solid-900.otf"
 FA_DEST="assets/FontAwesome6-Solid-900.otf"
 # Use -s to check if the file exists AND is not empty
 if [ ! -s "$FA_DEST" ]; then
