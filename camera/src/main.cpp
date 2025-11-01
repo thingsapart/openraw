@@ -265,6 +265,9 @@ void RenderUI(Display& /*display*/, AppState& state) {
 
 int main(int, char**) {
     // --- Setup SDL ---
+    // Enable verbose logging to help debug display initialization issues.
+    SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+
     // Hint SDL to use the KMS/DRM video driver. This is crucial for detecting
     // multiple displays (like DSI and HDMI) on embedded systems without a
     // full X11 desktop environment.
