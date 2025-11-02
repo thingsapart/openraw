@@ -176,6 +176,10 @@ struct AppState {
     // Placeholder for actual calibration values
     float k1 = 0.0f, k2 = 0.0f, p1 = 0.0f, p2 = 0.0f;
     float fx = 1280.0f, fy = 720.0f, cx = 640.0f, cy = 360.0f;
+
+    // --- Performance Metrics ---
+    float render_fps = 0.0f;
+    float capture_fps = 0.0f;
 };
 
 // --- UI Logic ---
@@ -253,6 +257,15 @@ void RenderUI(AppState& state) {
     ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(display_size.x, top_bar_height), IM_COL32(0, 0, 0, 180));
     ImGui::SetCursorPos(ImVec2(10, 8));
     ImGui::Text("PiCam Live View");
+
+    // --- FPS Display ---
+    char fps_text[64];
+    snprintf(fps_text, sizeof(fps_text), "Render: %.1f FPS | Capture: %.1f FPS", state.render_fps, state.capture_fps);
+    ImVec2 text_size = ImGui::CalcTextSize(fps_text);
+    // Position on the right, with a 10px margin
+    ImGui::SameLine(io.DisplaySize.x - text_size.x - 10);
+    ImGui::Text("%s", fps_text);
+
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(0, display_size.y - bottom_bar_height));
@@ -664,16 +677,28 @@ int main(int, char**) {
     AppState state;
     InitializeSettings(state);
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
-    auto last_time = std::chrono::high_resolution_clock::now();
+    auto last_render_time = std::chrono::high_resolution_clock::now();
+    auto last_capture_time = std::chrono::high_resolution_clock::now();
 
     // --- Main loop ---
     while (!done) {
         auto current_time = std::chrono::high_resolution_clock::now();
-        float delta_time = std::chrono::duration<float>(current_time - last_time).count();
-        last_time = current_time;
+        float render_delta = std::chrono::duration<float>(current_time - last_render_time).count();
+        last_render_time = current_time;
+        if (render_delta > 0.0f) {
+            state.render_fps = 1.0f / render_delta;
+        }
+
 
         camera.cap >> camera.frame;
         if (!camera.frame.empty()) {
+            auto capture_time = std::chrono::high_resolution_clock::now();
+            float capture_delta = std::chrono::duration<float>(capture_time - last_capture_time).count();
+            last_capture_time = capture_time;
+            if (capture_delta > 0.0f) {
+                state.capture_fps = 1.0f / capture_delta;
+            }
+
             // Apply rotation if specified
             if (camera.rotation_angle >= 0) {
                 cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
@@ -708,7 +733,8 @@ int main(int, char**) {
 
             eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
             ImGui::SetCurrentContext(display->imgui_context);
-            ImGui::GetIO().DeltaTime = delta_time > 0.0f ? delta_time : 1.0f/60.0f;
+            // Use the calculated render delta time for ImGui
+            ImGui::GetIO().DeltaTime = render_delta > 0.0f ? render_delta : 1.0f/60.0f;
 
             glViewport(0, 0, display->width, display->height);
             glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
