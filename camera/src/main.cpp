@@ -150,7 +150,7 @@ struct CameraState {
     cv::Mat frame;
     int width = 1280;
     int height = 720;
-    int rotation_angle = -1; // OpenCV rotation code, e.g., cv::ROTATE_180. -1 means no rotation.
+    // Rotation is now handled by the renderer.
 };
 
 struct RendererState {
@@ -379,7 +379,7 @@ void RenderUI(AppState& state) {
 }
 
 // --- Renderer Setup ---
-void InitializeRenderer(RendererState& renderer, int camera_width, int camera_height) {
+void InitializeRenderer(RendererState& renderer, int camera_width, int camera_height, int rotation_code) {
     renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
     renderer.brightness_uniform_loc = glGetUniformLocation(renderer.shaderProgram, "u_brightness_factor");
 
@@ -391,10 +391,32 @@ void InitializeRenderer(RendererState& renderer, int camera_width, int camera_he
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera_width, camera_height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
 
-    float vertices[] = {
-         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,  1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
-        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
+    // Default texture coordinates for a quad that fills the screen.
+    // (u,v) -> (0,0) is top-left of texture, (1,1) is bottom-right.
+    float tex_coords[8] = {
+        1.0f, 0.0f, // Top-Right vertex gets Top-Right of texture
+        1.0f, 1.0f, // Bottom-Right vertex gets Bottom-Right of texture
+        0.0f, 1.0f, // Bottom-Left vertex gets Bottom-Left of texture
+        0.0f, 0.0f  // Top-Left vertex gets Top-Left of texture
     };
+
+    // For a 180-degree rotation, we flip the texture coordinates by mapping
+    // each vertex to the opposite corner of the texture.
+    if (rotation_code == cv::ROTATE_180) {
+        tex_coords[0] = 0.0f; tex_coords[1] = 1.0f; // Top-Right vertex -> Bottom-Left tex
+        tex_coords[2] = 0.0f; tex_coords[3] = 0.0f; // Bottom-Right vertex -> Top-Left tex
+        tex_coords[4] = 1.0f; tex_coords[5] = 0.0f; // Bottom-Left vertex -> Top-Right tex
+        tex_coords[6] = 1.0f; tex_coords[7] = 1.0f; // Top-Left vertex -> Bottom-Right tex
+    }
+
+    float vertices[] = {
+        // Position            // TexCoords
+         1.0f,  1.0f, 0.0f,   tex_coords[0], tex_coords[1], // Top Right vertex
+         1.0f, -1.0f, 0.0f,   tex_coords[2], tex_coords[3], // Bottom Right vertex
+        -1.0f, -1.0f, 0.0f,   tex_coords[4], tex_coords[5], // Bottom Left vertex
+        -1.0f,  1.0f, 0.0f,   tex_coords[6], tex_coords[7]  // Top Left vertex
+    };
+
     unsigned int indices[] = { 0, 1, 3, 1, 2, 3 };
     GLuint VBO, EBO;
     glGenVertexArrays(1, &renderer.vao);
@@ -484,7 +506,7 @@ int main(int, char**) {
     // resource conflicts where initializing a non-display DRM device (like a
     // camera controller) might interfere with the V4L2 subsystem.
     CameraState camera;
-    camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
+    const int camera_rotation = cv::ROTATE_180; // Correct for upside-down camera mounting
     // Use the V4L2 backend for direct control on Linux.
     camera.cap.open(0, cv::CAP_V4L2);
     if (!camera.cap.isOpened()) {
@@ -728,7 +750,7 @@ int main(int, char**) {
         // If a backend has no displays, we don't need to create renderer resources for it
         if (display_for_context) {
             eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
-            InitializeRenderer(backend->renderer, camera.width, camera.height);
+            InitializeRenderer(backend->renderer, camera.width, camera.height, camera_rotation);
         }
     }
 
@@ -750,6 +772,14 @@ int main(int, char**) {
     InitializeSettings(state);
     // Create a destination buffer for our decoded RGB frames
     cv::Mat rgb_frame(camera.height, camera.width, CV_8UC3);
+    
+    // Create tiny buffers for the auto-exposure calculation thumbnail
+    const int DOWNSAMPLE_FACTOR = 8;
+    const int thumb_w = camera.width / DOWNSAMPLE_FACTOR;
+    const int thumb_h = camera.height / DOWNSAMPLE_FACTOR;
+    cv::Mat exposure_thumbnail(thumb_h, thumb_w, CV_8UC3);
+    cv::Mat gray_thumbnail;
+
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
     auto last_render_time = std::chrono::high_resolution_clock::now();
     auto last_capture_time = std::chrono::high_resolution_clock::now();
@@ -779,6 +809,12 @@ int main(int, char**) {
         if (!camera.frame.empty()) {
             {
                 ScopedTimer timer("1b. TurboJPEG Decode", profiler);
+                // Decompress a small thumbnail for auto-exposure calculation. This is very fast.
+                tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
+                              exposure_thumbnail.data, thumb_w, 0 /*pitch*/, thumb_h,
+                              TJPF_RGB, TJFLAG_FASTDCT);
+                
+                // Decompress the full-size image for display
                 tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
                               rgb_frame.data, camera.width, 0 /*pitch*/, camera.height,
                               TJPF_RGB, TJFLAG_FASTDCT);
@@ -793,11 +829,9 @@ int main(int, char**) {
                     state.capture_fps = 1.0f / capture_delta;
                 }
 
-                // --- Fast Software Auto-Exposure Calculation (operates on decoded rgb_frame) ---
-                cv::Mat thumbnail;
-                cv::resize(rgb_frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
-                cv::Mat gray_thumbnail;
-                cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_RGB2GRAY); // From RGB
+                // --- Fast Software Auto-Exposure Calculation (operates on the pre-scaled thumbnail) ---
+                // The expensive cv::resize step has been eliminated.
+                cv::cvtColor(exposure_thumbnail, gray_thumbnail, cv::COLOR_RGB2GRAY);
                 cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
                 float current_avg = avg_brightness[0];
 
@@ -807,11 +841,8 @@ int main(int, char**) {
                     state.brightness_factor += (required_factor - state.brightness_factor) * 0.1f;
                 }
 
-                // --- Final conversions for display ---
-                if (camera.rotation_angle >= 0) {
-                    cv::rotate(rgb_frame, rgb_frame, camera.rotation_angle);
-                }
-                // BGR->RGB conversion is no longer necessary as we decoded directly to RGB
+                // Image rotation is now handled on the GPU via texture coordinates,
+                // so the expensive cv::rotate call is no longer needed.
             }
 
             {
