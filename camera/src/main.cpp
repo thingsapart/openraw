@@ -59,7 +59,7 @@ public:
             double percentage = (total_ms > 0) ? (chunk_ms / total_ms * 100.0) : 0.0;
             printf("  - %-26s: %6.2fms (%5.1f%%)\n", pair.first.c_str(), chunk_ms, percentage);
         }
-        
+
         // --- Add a summary section ---
         auto it = results_.find("CPU Work");
         if (it != results_.end()) {
@@ -68,7 +68,7 @@ public:
             double work_ms = std::chrono::duration<double, std::milli>(work_duration).count();
             double idle_ms = std::chrono::duration<double, std::milli>(idle_duration).count();
             double busy_percent = (total_ms > 0) ? (work_ms / total_ms * 100.0) : 0.0;
-            
+
             printf("  ------------------------------------------\n");
             printf("  - App Idle / V4L2 Wait    : %6.2fms (%5.1f%%)\n", idle_ms, 100.0 - busy_percent);
             printf("  - Total CPU Work          : %6.2fms (%5.1f%%)\n", work_ms, busy_percent);
@@ -789,7 +789,7 @@ int main(int, char**) {
     InitializeSettings(state);
     // Create a destination buffer for our decoded RGB frames
     cv::Mat rgb_frame(camera.height, camera.width, CV_8UC3);
-    
+
     // Create tiny buffers for the auto-exposure calculation thumbnail
     const int DOWNSAMPLE_FACTOR = 8;
     const int thumb_w = camera.width / DOWNSAMPLE_FACTOR;
@@ -819,7 +819,7 @@ int main(int, char**) {
 
         // The >> operator blocks until a new frame is available. This is our primary "idle" time.
         camera.cap >> camera.frame;
-        
+
         // Everything inside this block is considered "active work".
         // The ScopedTimer will measure from the moment it's created until the end of the block.
         {
@@ -829,116 +829,100 @@ int main(int, char**) {
                 {
                     ScopedTimer timer("1b. TurboJPEG Decode", profiler);
                     // Decompress a small thumbnail for auto-exposure calculation. This is very fast.
-                tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
-                              exposure_thumbnail.data, thumb_w, 0 /*pitch*/, thumb_h,
-                              TJPF_RGB, TJFLAG_FASTDCT);
-                
-                // Decompress the full-size image for display
-                tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
-                              rgb_frame.data, camera.width, 0 /*pitch*/, camera.height,
-                              TJPF_RGB, TJFLAG_FASTDCT);
-            }
+                    tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
+                                  exposure_thumbnail.data, thumb_w, 0 /*pitch*/, thumb_h,
+                                  TJPF_RGB, TJFLAG_FASTDCT);
 
-            {
-                ScopedTimer timer("2. CPU Image Processing", profiler);
-                auto capture_time = std::chrono::high_resolution_clock::now();
-                float capture_delta = std::chrono::duration<float>(capture_time - last_capture_time).count();
-                last_capture_time = capture_time;
-                if (capture_delta > 0.0f) {
-                    state.capture_fps = 1.0f / capture_delta;
+                    // Decompress the full-size image for display
+                    tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
+                                  rgb_frame.data, camera.width, 0 /*pitch*/, camera.height,
+                                  TJPF_RGB, TJFLAG_FASTDCT);
                 }
 
-                // --- Fast Software Auto-Exposure Calculation (operates on the pre-scaled thumbnail) ---
-                // The expensive cv::resize step has been eliminated.
-                cv::cvtColor(exposure_thumbnail, gray_thumbnail, cv::COLOR_RGB2GRAY);
-                cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
-                float current_avg = avg_brightness[0];
+                {
+                    ScopedTimer timer("2. CPU Image Processing", profiler);
+                    auto capture_time = std::chrono::high_resolution_clock::now();
+                    float capture_delta = std::chrono::duration<float>(capture_time - last_capture_time).count();
+                    last_capture_time = capture_time;
+                    if (capture_delta > 0.0f) {
+                        state.capture_fps = 1.0f / capture_delta;
+                    }
 
-                if (current_avg > 1.0f) {
-                    float required_factor = state.target_brightness / current_avg;
-                    required_factor = std::max(0.2f, std::min(5.0f, required_factor));
-                    state.brightness_factor += (required_factor - state.brightness_factor) * 0.1f;
+                    // --- Fast Software Auto-Exposure Calculation (operates on the pre-scaled thumbnail) ---
+                    // The expensive cv::resize step has been eliminated.
+                    cv::cvtColor(exposure_thumbnail, gray_thumbnail, cv::COLOR_RGB2GRAY);
+                    cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
+                    float current_avg = avg_brightness[0];
+
+                    if (current_avg > 1.0f) {
+                        float required_factor = state.target_brightness / current_avg;
+                        required_factor = std::max(0.2f, std::min(5.0f, required_factor));
+                        state.brightness_factor += (required_factor - state.brightness_factor) * 0.1f;
+                    }
+
+                    // Image rotation is now handled on the GPU via texture coordinates,
+                    // so the expensive cv::rotate call is no longer needed.
                 }
 
-                // Image rotation is now handled on the GPU via texture coordinates,
-                // so the expensive cv::rotate call is no longer needed.
-            }
-
-            {
-                ScopedTimer timer("3. GPU Texture Upload", profiler);
-                for (const auto& backend : backends) {
-                    if (backend->renderer.textureID == 0) continue;
-                    Display* display_for_context = nullptr;
-                    for (const auto& d : displays) { if (d->backend == backend.get()) { display_for_context = d.get(); break; } }
-                    if (display_for_context) {
-                        eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
-                        glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, rgb_frame.data);
+                {
+                    ScopedTimer timer("3. GPU Texture Upload", profiler);
+                    for (const auto& backend : backends) {
+                        if (backend->renderer.textureID == 0) continue;
+                        Display* display_for_context = nullptr;
+                        for (const auto& d : displays) { if (d->backend == backend.get()) { display_for_context = d.get(); break; } }
+                        if (display_for_context) {
+                            eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
+                            glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
+                            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, rgb_frame.data);
+                        }
                     }
                 }
             }
-        }
 
-        {
-            ScopedTimer timer("4. Render & Display", profiler);
-            for (const auto& display : displays) {
-                if (display->page_flip_pending) continue;
+            {
+                ScopedTimer timer("4. Render & Display", profiler);
+                for (const auto& display : displays) {
+                    if (display->page_flip_pending) continue;
 
-                eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
-                ImGui::SetCurrentContext(display->imgui_context);
-                ImGui::GetIO().DeltaTime = render_delta > 0.0f ? render_delta : 1.0f/60.0f;
+                    eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
+                    ImGui::SetCurrentContext(display->imgui_context);
+                    ImGui::GetIO().DeltaTime = render_delta > 0.0f ? render_delta : 1.0f/60.0f;
 
-                glViewport(0, 0, display->width, display->height);
-                glClear(GL_COLOR_BUFFER_BIT);
+                    glViewport(0, 0, display->width, display->height);
+                    glClear(GL_COLOR_BUFFER_BIT);
 
-                {
-                    ScopedTimer timer("  4a. GL Draw Scene", profiler);
-                    RendererState& renderer = display->backend->renderer;
-                    glUseProgram(renderer.shaderProgram);
-                    glUniform1f(renderer.brightness_uniform_loc, state.brightness_factor);
-                    glBindVertexArray(renderer.vao);
-                    glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-                }
+                    {
+                        ScopedTimer timer("  4a. GL Draw Scene", profiler);
+                        RendererState& renderer = display->backend->renderer;
+                        glUseProgram(renderer.shaderProgram);
+                        glUniform1f(renderer.brightness_uniform_loc, state.brightness_factor);
+                        glBindVertexArray(renderer.vao);
+                        glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+                        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+                    }
 
-                {
-                    ScopedTimer timer("  4b. ImGui UI Render", profiler);
-                    RenderUI(state);
-                    ImGui::Render();
-                    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-                }
-                
-                {
-                    ScopedTimer timer("  4c. EGL Swap & Pageflip", profiler);
-                    eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
-                    struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
-                    uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
+                    {
+                        ScopedTimer timer("  4b. ImGui UI Render", profiler);
+                        RenderUI(state);
+                        ImGui::Render();
+                        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                    }
 
-                    if (drmModePageFlip(display->backend->fd, display->crtc_id, next_fb_id, DRM_MODE_PAGE_FLIP_EVENT, display.get()) == 0) {
-                        display->page_flip_pending = true;
-                        gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
-                        display->current_bo = next_bo;
-                    } else {
-                        gbm_surface_release_buffer(display->gbm_surf, next_bo);
+                    {
+                        ScopedTimer timer("  4c. EGL Swap & Pageflip", profiler);
+                        eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
+                        struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
+                        uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
+
+                        if (drmModePageFlip(display->backend->fd, display->crtc_id, next_fb_id, DRM_MODE_PAGE_FLIP_EVENT, display.get()) == 0) {
+                            display->page_flip_pending = true;
+                            gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
+                            display->current_bo = next_bo;
+                        } else {
+                            gbm_surface_release_buffer(display->gbm_surf, next_bo);
+                        }
                     }
                 }
-            }
-        }
-
-        {
-            ScopedTimer timer("5. Event Handling", profiler);
-            drmEventContext ev_ctx = {};
-            ev_ctx.version = 2;
-            ev_ctx.page_flip_handler = page_flip_handler;
-            fd_set fds;
-            FD_ZERO(&fds);
-            int max_fd = -1;
-            for(const auto& backend : backends) { FD_SET(backend->fd, &fds); if (backend->fd > max_fd) max_fd = backend->fd; }
-
-            struct timeval timeout = { .tv_sec = 0, .tv_usec = 10000 }; // Short timeout
-            int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
-            if (ret > 0) {
-                for(const auto& backend : backends) { if (FD_ISSET(backend->fd, &fds)) { drmHandleEvent(backend->fd, &ev_ctx); } }
             }
 
             {
