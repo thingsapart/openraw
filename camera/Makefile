@@ -45,7 +45,7 @@ OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
 # --- Dependencies ---
 # Libraries to find using pkg-config. On Raspberry Pi OS, OpenCV is opencv4.
-PKG_LIBS = opencv4 glesv2 egl libdrm gbm udev
+PKG_LIBS = opencv4 glesv2 egl libdrm gbm libudev
 
 # Use pkg-config to get compiler and linker flags for our libraries.
 # We explicitly add -I/usr/include/drm for kernel headers like drm.h that are
