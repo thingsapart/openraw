@@ -53,10 +53,27 @@ public:
         printf("\n--- Frame Time: %6.2fms ---\n", total_ms);
 
         for (const auto& pair : results_) {
+            // Don't print the overall "CPU Work" timer here, we'll use it for a summary
+            if (pair.first == "CPU Work") continue;
             double chunk_ms = std::chrono::duration<double, std::milli>(pair.second).count();
             double percentage = (total_ms > 0) ? (chunk_ms / total_ms * 100.0) : 0.0;
             printf("  - %-26s: %6.2fms (%5.1f%%)\n", pair.first.c_str(), chunk_ms, percentage);
         }
+        
+        // --- Add a summary section ---
+        auto it = results_.find("CPU Work");
+        if (it != results_.end()) {
+            auto work_duration = it->second;
+            auto idle_duration = total_duration - work_duration;
+            double work_ms = std::chrono::duration<double, std::milli>(work_duration).count();
+            double idle_ms = std::chrono::duration<double, std::milli>(idle_duration).count();
+            double busy_percent = (total_ms > 0) ? (work_ms / total_ms * 100.0) : 0.0;
+            
+            printf("  ------------------------------------------\n");
+            printf("  - App Idle / V4L2 Wait    : %6.2fms (%5.1f%%)\n", idle_ms, 100.0 - busy_percent);
+            printf("  - Total CPU Work          : %6.2fms (%5.1f%%)\n", work_ms, busy_percent);
+        }
+
         fflush(stdout); // Ensure the report is printed immediately
     }
 
@@ -800,16 +817,18 @@ int main(int, char**) {
             }
         }
 
+        // The >> operator blocks until a new frame is available. This is our primary "idle" time.
+        camera.cap >> camera.frame;
+        
+        // Everything inside this block is considered "active work".
+        // The ScopedTimer will measure from the moment it's created until the end of the block.
         {
-            ScopedTimer timer("1a. V4L2 Capture", profiler);
-            // camera.frame now contains the raw compressed MJPEG data
-            camera.cap >> camera.frame;
-        }
+            ScopedTimer work_timer("CPU Work", profiler);
 
-        if (!camera.frame.empty()) {
-            {
-                ScopedTimer timer("1b. TurboJPEG Decode", profiler);
-                // Decompress a small thumbnail for auto-exposure calculation. This is very fast.
+            if (!camera.frame.empty()) {
+                {
+                    ScopedTimer timer("1b. TurboJPEG Decode", profiler);
+                    // Decompress a small thumbnail for auto-exposure calculation. This is very fast.
                 tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
                               exposure_thumbnail.data, thumb_w, 0 /*pitch*/, thumb_h,
                               TJPF_RGB, TJFLAG_FASTDCT);
@@ -921,7 +940,25 @@ int main(int, char**) {
             if (ret > 0) {
                 for(const auto& backend : backends) { if (FD_ISSET(backend->fd, &fds)) { drmHandleEvent(backend->fd, &ev_ctx); } }
             }
-        }
+
+            {
+                ScopedTimer timer("5. Event Handling", profiler);
+                drmEventContext ev_ctx = {};
+                ev_ctx.version = 2;
+                ev_ctx.page_flip_handler = page_flip_handler;
+                fd_set fds;
+                FD_ZERO(&fds);
+                int max_fd = -1;
+                for(const auto& backend : backends) { FD_SET(backend->fd, &fds); if (backend->fd > max_fd) max_fd = backend->fd; }
+
+                struct timeval timeout = { .tv_sec = 0, .tv_usec = 10000 }; // Short timeout
+                int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
+                if (ret > 0) {
+                    for(const auto& backend : backends) { if (FD_ISSET(backend->fd, &fds)) { drmHandleEvent(backend->fd, &ev_ctx); } }
+                }
+            }
+        } // End of "CPU Work" scope
+
         profiler.end_frame_and_print();
     }
 
