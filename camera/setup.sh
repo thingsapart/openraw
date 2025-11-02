@@ -20,7 +20,7 @@ sudo apt-get install -y \
     libopencv-dev \
     libgles2-mesa-dev \
     libegl1-mesa-dev \
-    libjpeg-turbo8-dev
+    libturbojpeg0-dev
 echo "Dependencies installed successfully."
 echo
 
