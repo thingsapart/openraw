@@ -510,15 +510,18 @@ int main(int, char**) {
               << " @ " << camera.cap.get(cv::CAP_PROP_FPS) << " FPS" << std::endl;
 
 
-    // 3. Disable Auto Exposure to prevent long shutter times in low light.
-    //    For V4L2, 1 = Manual Mode, 3 = Auto Mode.
-    camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
-    std::cout << "  Requesting Manual Exposure -> Got Mode: " << camera.cap.get(cv::CAP_PROP_AUTO_EXPOSURE) << std::endl;
+    // 3. Use Aperture Priority auto-exposure. This lets the camera adjust exposure
+    //    automatically, but we can cap the maximum time to ensure high FPS.
+    //    For V4L2, 1 = Manual Mode, 3 = Aperture Priority (often treated as "Auto").
+    camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
+    std::cout << "  Requesting Auto Exposure (Aperture Priority) -> Got Mode: " << camera.cap.get(cv::CAP_PROP_AUTO_EXPOSURE) << std::endl;
 
-    // 4. Set a fixed, short exposure time. This value is driver-dependent.
-    //    A low value like 150 often corresponds to a few milliseconds.
-    camera.cap.set(cv::CAP_PROP_EXPOSURE, 150);
-    std::cout << "  Requesting Exposure 150 -> Got: " << camera.cap.get(cv::CAP_PROP_EXPOSURE) << std::endl;
+    // 4. Set the MAXIMUM exposure time. For 30 FPS, the frame time is ~33.3ms.
+    //    The V4L2 unit for exposure is often 100µs. So, 33.3ms = 333 units.
+    //    We set it to 300 (equivalent to 30ms) to provide a safe margin.
+    //    In Aperture Priority mode, this value acts as an upper limit.
+    camera.cap.set(cv::CAP_PROP_EXPOSURE, 300);
+    std::cout << "  Requesting Max Exposure 300 (~30ms) -> Got: " << camera.cap.get(cv::CAP_PROP_EXPOSURE) << std::endl;
 
     // 5. Disable OpenCV's automatic conversion. We'll get raw MJPEG frames.
     camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 0);
