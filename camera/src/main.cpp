@@ -503,11 +503,43 @@ int main(int, char**) {
             // Per-display EGL/GBM/ImGui setup
             display->gbm_surf = gbm_surface_create(backend->gbm_dev, display->width, display->height,
                 GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+            if (!display->gbm_surf) {
+                std::cerr << "Error: Could not create GBM surface for connector " << display->connector_id << std::endl;
+                drmModeFreeCrtc(display->saved_crtc);
+                drmModeFreeConnector(connector);
+                continue;
+            }
+
             display->egl_surf = eglCreateWindowSurface(backend->egl_dpy, backend->egl_conf, (EGLNativeWindowType)display->gbm_surf, NULL);
+            if (display->egl_surf == EGL_NO_SURFACE) {
+                std::cerr << "Error: Could not create EGL window surface (EGL error: " << std::hex << eglGetError() << ")" << std::endl;
+                gbm_surface_destroy(display->gbm_surf);
+                drmModeFreeCrtc(display->saved_crtc);
+                drmModeFreeConnector(connector);
+                continue;
+            }
+
             const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
             display->egl_ctx = eglCreateContext(backend->egl_dpy, backend->egl_conf, backend->shared_egl_ctx, context_attribs);
+            if (display->egl_ctx == EGL_NO_CONTEXT) {
+                std::cerr << "Error: Could not create EGL context (EGL error: " << std::hex << eglGetError() << ")" << std::endl;
+                eglDestroySurface(backend->egl_dpy, display->egl_surf);
+                gbm_surface_destroy(display->gbm_surf);
+                drmModeFreeCrtc(display->saved_crtc);
+                drmModeFreeConnector(connector);
+                continue;
+            }
 
-            eglMakeCurrent(backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
+
+            if (eglMakeCurrent(backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx) == EGL_FALSE) {
+                std::cerr << "Error: Could not make EGL context current (EGL error: " << std::hex << eglGetError() << ")" << std::endl;
+                eglDestroyContext(backend->egl_dpy, display->egl_ctx);
+                eglDestroySurface(backend->egl_dpy, display->egl_surf);
+                gbm_surface_destroy(display->gbm_surf);
+                drmModeFreeCrtc(display->saved_crtc);
+                drmModeFreeConnector(connector);
+                continue;
+            }
 
             IMGUI_CHECKVERSION();
             display->imgui_context = ImGui::CreateContext();
