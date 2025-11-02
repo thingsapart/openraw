@@ -564,6 +564,8 @@ int main(int, char**) {
 
     // --- Initial display setup (modesetting) ---
     for(const auto& display : displays) {
+        // Set the correct context before performing operations on its surface.
+        eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
         eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
         struct gbm_bo* bo = gbm_surface_lock_front_buffer(display->gbm_surf);
         uint32_t fb_id = get_fb_for_bo(display->backend->fd, bo);
