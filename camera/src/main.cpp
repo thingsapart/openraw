@@ -420,27 +420,36 @@ int main(int, char**) {
         return -1;
     }
 
-    // --- Configure Camera ---
-    // Set the desired resolution.
+    // --- Force high-performance camera settings ---
+    std::cout << "--- Configuring Camera ---" << std::endl;
+
+    // 1. Set pixel format to MJPEG, which is common for high-res/high-fps streaming.
+    camera.cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+    std::cout << "  Requesting FourCC: MJPG -> Got: " << static_cast<int>(camera.cap.get(cv::CAP_PROP_FOURCC)) << std::endl;
+
+
+    // 2. Set Resolution & FPS
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
-
-    // Request a decent framerate. The driver will choose the closest supported rate.
     camera.cap.set(cv::CAP_PROP_FPS, 30.0);
+    std::cout << "  Requesting " << camera.width << "x" << camera.height << " @ 30 FPS" << std::endl;
+    std::cout << "  -> Got: " << camera.cap.get(cv::CAP_PROP_FRAME_WIDTH) << "x" << camera.cap.get(cv::CAP_PROP_FRAME_HEIGHT)
+              << " @ " << camera.cap.get(cv::CAP_PROP_FPS) << " FPS" << std::endl;
 
-    // Let OpenCV handle the pixel format negotiation and conversion.
-    // By default, it will convert frames to BGR, which is what we'll handle below.
-    // This is often the most optimized path.
+
+    // 3. Disable Auto Exposure to prevent long shutter times in low light.
+    //    For V4L2, 1 = Manual Mode, 3 = Auto Mode.
+    camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
+    std::cout << "  Requesting Manual Exposure -> Got Mode: " << camera.cap.get(cv::CAP_PROP_AUTO_EXPOSURE) << std::endl;
+
+    // 4. Set a fixed, short exposure time. This value is driver-dependent.
+    //    A low value like 150 often corresponds to a few milliseconds.
+    camera.cap.set(cv::CAP_PROP_EXPOSURE, 150);
+    std::cout << "  Requesting Exposure 150 -> Got: " << camera.cap.get(cv::CAP_PROP_EXPOSURE) << std::endl;
+
+    // 5. Ensure OpenCV converts the MJPEG stream to BGR for us.
     camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 1);
-
-    // --- Verify actual camera settings ---
-    double actual_w = camera.cap.get(cv::CAP_PROP_FRAME_WIDTH);
-    double actual_h = camera.cap.get(cv::CAP_PROP_FRAME_HEIGHT);
-    double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
-
-    std::cout << "--- Camera Configuration ---" << std::endl;
-    std::cout << "  Resolution: " << actual_w << "x" << actual_h << std::endl;
-    std::cout << "  FPS: " << actual_fps << std::endl;
     std::cout << "--------------------------" << std::endl;
 
     // --- Setup DRM/GBM/EGL for all available cards ---
@@ -691,7 +700,7 @@ int main(int, char**) {
             if (camera.rotation_angle >= 0) {
                 cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
             }
-            // By default, OpenCV's V4L2 backend provides frames in BGR format.
+            // OpenCV has decoded the MJPEG stream to BGR format for us.
             // We must convert it to RGB for OpenGL.
             cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
 
