@@ -92,6 +92,7 @@ struct CameraState {
     int width = 1280;
     int height = 720;
     int rotation_angle = -1; // OpenCV rotation code, e.g., cv::ROTATE_180. -1 means no rotation.
+    bool auto_exposure = false;
 };
 
 struct RendererState {
@@ -130,6 +131,7 @@ struct Display {
 
 // Resources shared across all displays on a single GPU.
 struct DrmBackend {
+    std::string device_path;
     int fd = -1;
     struct gbm_device* gbm_dev = nullptr;
     EGLDisplay egl_dpy = EGL_NO_DISPLAY;
@@ -369,6 +371,7 @@ int main(int, char**) {
         if (fd < 0) continue;
 
         auto backend = std::make_unique<DrmBackend>();
+        backend->device_path = card_path;
         backend->fd = fd;
         
         backend->gbm_dev = gbm_create_device(backend->fd);
@@ -433,7 +436,8 @@ int main(int, char**) {
         DrmBackend* backend = backend_ptr.get();
         drmModeRes* resources = drmModeGetResources(backend->fd);
         if (!resources) {
-            std::cerr << "Error: Could not get DRM resources for backend." << std::endl;
+            // This is expected for devices like camera receivers that don't have display outputs.
+            std::cout << "Info: DRM device " << backend->device_path << " has no display resources, skipping." << std::endl;
             continue;
         }
 
@@ -511,6 +515,18 @@ int main(int, char**) {
     }
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
+    
+    // Disable auto-exposure to achieve consistent high framerates.
+    // Note: The image may appear dark if the scene is not well-lit.
+    if (!camera.auto_exposure) {
+        // For V4L2, 1 means manual mode, 3 means auto mode.
+        camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
+        // Set a short exposure time. The unit and range are driver-dependent.
+        // A value of 1000 often corresponds to 1000 * 100µs = 100ms, which is too long.
+        // A value of 100 might be 10ms. Let's try a small value like 200.
+        camera.cap.set(cv::CAP_PROP_EXPOSURE, 200); 
+    }
+
     camera.cap.set(cv::CAP_PROP_FPS, 60.0); // Request a higher framerate
     double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
     std::cout << "Camera initialized: Requested 60 FPS, got " << actual_fps << " FPS." << std::endl;
