@@ -137,6 +137,7 @@ struct DrmBackend {
     EGLDisplay egl_dpy = EGL_NO_DISPLAY;
     EGLConfig egl_conf = nullptr;
     EGLContext shared_egl_ctx = EGL_NO_CONTEXT;
+    RendererState renderer;
 };
 
 
@@ -301,7 +302,41 @@ void RenderUI(AppState& state) {
     }
 }
 
+// --- Renderer Setup ---
+void InitializeRenderer(RendererState& renderer, int camera_width, int camera_height) {
+    renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
+    glGenTextures(1, &renderer.textureID);
+    glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera_width, camera_height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+
+    float vertices[] = {
+         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,  1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
+    };
+    unsigned int indices[] = { 0, 1, 3, 1, 2, 3 };
+    GLuint VBO, EBO;
+    glGenVertexArrays(1, &renderer.vao);
+    glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
+    glBindVertexArray(renderer.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+}
+
+
 // --- DRM/GBM/EGL Helper Functions ---
+
+// Callback for page flip events.
 
 // Callback for page flip events.
 void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void *data) {
@@ -373,7 +408,7 @@ int main(int, char**) {
         auto backend = std::make_unique<DrmBackend>();
         backend->device_path = card_path;
         backend->fd = fd;
-        
+
         backend->gbm_dev = gbm_create_device(backend->fd);
         if (!backend->gbm_dev) {
             std::cerr << "Error: Could not create GBM device for " << card_path << std::endl;
@@ -421,11 +456,11 @@ int main(int, char**) {
             close(backend->fd);
             continue;
         }
-        
+
         std::cout << "Initialized backend for " << card_path << std::endl;
         backends.push_back(std::move(backend));
     }
-    
+
     if (backends.empty()) {
         std::cerr << "Error: Could not initialize any DRM devices." << std::endl;
         return -1;
@@ -483,7 +518,7 @@ int main(int, char**) {
 
             ImGui::StyleColorsDark();
             ImGui_ImplOpenGL3_Init("#version 300 es");
-            
+
             io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
             ImFontConfig config;
             config.MergeMode = true;
@@ -491,14 +526,14 @@ int main(int, char**) {
             config.GlyphMinAdvanceX = 20.0f;
             static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
             io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
-            
+
             std::cout << "  - Found display on connector " << display->connector_id << " (" << display->width << "x" << display->height << ")" << std::endl;
             displays.push_back(std::move(display));
             drmModeFreeConnector(connector);
         }
         drmModeFreeResources(resources);
     }
-    
+
     if (displays.empty()) {
         std::cerr << "Error: No connected displays found across all backends." << std::endl;
         // Cleanup logic will run at the end of main
@@ -515,7 +550,7 @@ int main(int, char**) {
     }
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
-    
+
     // Disable auto-exposure to achieve consistent high framerates.
     // Note: The image may appear dark if the scene is not well-lit.
     if (!camera.auto_exposure) {
@@ -524,43 +559,30 @@ int main(int, char**) {
         // Set a short exposure time. The unit and range are driver-dependent.
         // A value of 1000 often corresponds to 1000 * 100µs = 100ms, which is too long.
         // A value of 100 might be 10ms. Let's try a small value like 200.
-        camera.cap.set(cv::CAP_PROP_EXPOSURE, 200); 
+        camera.cap.set(cv::CAP_PROP_EXPOSURE, 200);
     }
 
     camera.cap.set(cv::CAP_PROP_FPS, 60.0); // Request a higher framerate
     double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
     std::cout << "Camera initialized: Requested 60 FPS, got " << actual_fps << " FPS." << std::endl;
 
-    // --- Setup Renderer for Camera View (Shared Resources) ---
-    RendererState renderer;
-    Display* first_display = displays[0].get();
-    eglMakeCurrent(first_display->backend->egl_dpy, first_display->egl_surf, first_display->egl_surf, first_display->egl_ctx);
-    renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
-    glGenTextures(1, &renderer.textureID);
-    glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera.width, camera.height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-    float vertices[] = {
-         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,  1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
-        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
-    };
-    unsigned int indices[] = { 0, 1, 3, 1, 2, 3 };
-    GLuint VBO, EBO;
-    glGenVertexArrays(1, &renderer.vao);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-    glBindVertexArray(renderer.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
+    // --- Setup a renderer for each backend ---
+    for (const auto& backend : backends) {
+        // Find a display that belongs to this backend to get a valid EGL context
+        Display* display_for_context = nullptr;
+        for (const auto& d : displays) {
+            if (d->backend == backend.get()) {
+                display_for_context = d.get();
+                break;
+            }
+        }
+        // If a backend has no displays, we don't need to create renderer resources for it
+        if (display_for_context) {
+            eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
+            InitializeRenderer(backend->renderer, camera.width, camera.height);
+        }
+    }
+
 
     // --- Initial display setup (modesetting) ---
     for(const auto& display : displays) {
@@ -573,7 +595,7 @@ int main(int, char**) {
         display->current_bo = bo;
         display->current_fb_id = fb_id;
     }
-    
+
     // --- Initialize Application State ---
     AppState state;
     InitializeSettings(state);
@@ -593,10 +615,26 @@ int main(int, char**) {
                 cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
             }
             cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
-            glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-            // Note: For 90/270 degree rotations, width/height for glTexSubImage2D would need to be swapped.
-            // For 180 degrees, dimensions remain the same.
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
+
+            // Upload the frame to each backend's texture
+            for (const auto& backend : backends) {
+                if (backend->renderer.textureID == 0) continue; // Skip backends with no displays/renderer
+
+                // We need a context to be current to do GL operations. We can just use the
+                // first display associated with this backend.
+                Display* display_for_context = nullptr;
+                for (const auto& d : displays) {
+                    if (d->backend == backend.get()) {
+                        display_for_context = d.get();
+                        break;
+                    }
+                }
+                if (display_for_context) {
+                    eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
+                    glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
+                }
+            }
         }
 
         for (const auto& display : displays) {
@@ -610,6 +648,8 @@ int main(int, char**) {
             glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
             glClear(GL_COLOR_BUFFER_BIT);
 
+            // Use the renderer associated with this display's backend
+            RendererState& renderer = display->backend->renderer;
             glUseProgram(renderer.shaderProgram);
             glBindVertexArray(renderer.vao);
             glBindTexture(GL_TEXTURE_2D, renderer.textureID);
@@ -618,7 +658,7 @@ int main(int, char**) {
             RenderUI(state);
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            
+
             eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
             struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
             uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
@@ -632,7 +672,7 @@ int main(int, char**) {
                  std::cerr << "drmModePageFlip failed" << std::endl;
             }
         }
-        
+
         drmEventContext ev_ctx = {};
         ev_ctx.version = 2;
         ev_ctx.page_flip_handler = page_flip_handler;
@@ -643,7 +683,7 @@ int main(int, char**) {
             FD_SET(backend->fd, &fds);
             if (backend->fd > max_fd) max_fd = backend->fd;
         }
-        
+
         struct timeval timeout = { .tv_sec = 0, .tv_usec = 500000 };
         int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
         if (ret > 0) {
@@ -658,15 +698,31 @@ int main(int, char**) {
     // --- Cleanup ---
     std::cout << "Cleaning up..." << std::endl;
     camera.cap.release();
-    glDeleteVertexArrays(1, &renderer.vao);
-    glDeleteTextures(1, &renderer.textureID);
-    glDeleteProgram(renderer.shaderProgram);
+    // Clean up GL resources for each backend
+    for (const auto& backend : backends) {
+        if (backend->renderer.shaderProgram == 0) continue; // Skip backends with no renderer
+
+        Display* display_for_context = nullptr;
+        for (const auto& d : displays) {
+            if (d->backend == backend.get()) {
+                display_for_context = d.get();
+                break;
+            }
+        }
+        if (display_for_context) {
+            eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
+            glDeleteVertexArrays(1, &backend->renderer.vao);
+            glDeleteTextures(1, &backend->renderer.textureID);
+            glDeleteProgram(backend->renderer.shaderProgram);
+        }
+    }
+
 
     for (const auto& display : displays) {
         ImGui::SetCurrentContext(display->imgui_context);
         ImGui_ImplOpenGL3_Shutdown();
         ImGui::DestroyContext(display->imgui_context);
-        
+
         drmModeSetCrtc(display->backend->fd, display->saved_crtc->crtc_id, display->saved_crtc->buffer_id,
             display->saved_crtc->x, display->saved_crtc->y, &display->connector_id, 1, &display->saved_crtc->mode);
         drmModeFreeCrtc(display->saved_crtc);
@@ -675,7 +731,7 @@ int main(int, char**) {
         gbm_surface_destroy(display->gbm_surf);
         eglDestroyContext(display->backend->egl_dpy, display->egl_ctx);
     }
-    
+
     for (const auto& backend : backends) {
         if (backend->shared_egl_ctx != EGL_NO_CONTEXT) eglDestroyContext(backend->egl_dpy, backend->shared_egl_ctx);
         if (backend->egl_dpy != EGL_NO_DISPLAY) eglTerminate(backend->egl_dpy);
