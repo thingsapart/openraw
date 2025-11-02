@@ -238,7 +238,7 @@ void RenderUI(AppState& state) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
 
-    ImGuiIO& io = ImGui::getIO();
+    ImGuiIO& io = ImGui::GetIO();
     ImVec2 display_size = io.DisplaySize;
 
     // --- Top and Bottom Bars (unchanged) ---
@@ -473,7 +473,7 @@ int main(int, char**) {
             IMGUI_CHECKVERSION();
             display->imgui_context = ImGui::CreateContext();
             ImGui::SetCurrentContext(display->imgui_context);
-            ImGuiIO& io = ImGui::getIO();
+            ImGuiIO& io = ImGui::GetIO();
             io.DisplaySize = ImVec2((float)display->width, (float)display->height);
             io.IniFilename = nullptr;
 
