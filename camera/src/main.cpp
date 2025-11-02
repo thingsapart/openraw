@@ -45,9 +45,12 @@ const char* fragmentShaderSource = R"(
     out vec4 FragColor;
     in vec2 TexCoord;
     uniform sampler2D ourTexture;
+    uniform float u_brightness_factor; // Our software auto-exposure gain
     void main()
     {
-        FragColor = texture(ourTexture, TexCoord);
+        vec4 texColor = texture(ourTexture, TexCoord);
+        // Apply the brightness factor to the RGB channels only
+        FragColor = vec4(texColor.rgb * u_brightness_factor, texColor.a);
     }
 )";
 
@@ -98,6 +101,7 @@ struct RendererState {
     GLuint shaderProgram;
     GLuint textureID;
     GLuint vao;
+    GLint brightness_uniform_loc = -1;
 };
 
 // --- DRM/GBM/EGL Backend Structures ---
@@ -180,6 +184,10 @@ struct AppState {
     // --- Performance Metrics ---
     float render_fps = 0.0f;
     float capture_fps = 0.0f;
+
+    // --- Software Auto-Exposure State ---
+    float target_brightness = 90.0f; // Target average pixel intensity (0-255)
+    float brightness_factor = 1.0f;  // The current gain applied in the shader
 };
 
 // --- UI Logic ---
@@ -317,6 +325,8 @@ void RenderUI(AppState& state) {
 // --- Renderer Setup ---
 void InitializeRenderer(RendererState& renderer, int camera_width, int camera_height) {
     renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
+    renderer.brightness_uniform_loc = glGetUniformLocation(renderer.shaderProgram, "u_brightness_factor");
+
     glGenTextures(1, &renderer.textureID);
     glBindTexture(GL_TEXTURE_2D, renderer.textureID);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -696,6 +706,22 @@ int main(int, char**) {
                 state.capture_fps = 1.0f / capture_delta;
             }
 
+            // --- Software Auto-Exposure Calculation ---
+            cv::Mat gray_frame;
+            cv::cvtColor(camera.frame, gray_frame, cv::COLOR_BGR2GRAY);
+            cv::Scalar avg_brightness = cv::mean(gray_frame);
+            float current_avg = avg_brightness[0];
+
+            if (current_avg > 1.0f) { // Avoid division by zero
+                float required_factor = state.target_brightness / current_avg;
+                // Clamp the factor to prevent extreme changes
+                required_factor = std::max(0.2f, std::min(5.0f, required_factor));
+
+                // Smoothly interpolate towards the required factor to avoid flickering
+                float smoothing = 0.1f;
+                state.brightness_factor += (required_factor - state.brightness_factor) * smoothing;
+            }
+
             // Apply rotation if specified
             if (camera.rotation_angle >= 0) {
                 cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
@@ -740,6 +766,7 @@ int main(int, char**) {
             // Use the renderer associated with this display's backend
             RendererState& renderer = display->backend->renderer;
             glUseProgram(renderer.shaderProgram);
+            glUniform1f(renderer.brightness_uniform_loc, state.brightness_factor);
             glBindVertexArray(renderer.vao);
             glBindTexture(GL_TEXTURE_2D, renderer.textureID);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
