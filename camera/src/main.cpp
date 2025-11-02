@@ -91,6 +91,7 @@ struct CameraState {
     cv::Mat frame;
     int width = 1280;
     int height = 720;
+    int rotation_angle = -1; // OpenCV rotation code, e.g., cv::ROTATE_180. -1 means no rotation.
 };
 
 struct RendererState {
@@ -502,6 +503,7 @@ int main(int, char**) {
 
     // --- Initialize Camera (Shared Resource) ---
     CameraState camera;
+    camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
     camera.cap.open(0, cv::CAP_V4L2);
     if (!camera.cap.isOpened()) {
         std::cerr << "Error: Could not open webcam." << std::endl;
@@ -509,6 +511,9 @@ int main(int, char**) {
     }
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
+    camera.cap.set(cv::CAP_PROP_FPS, 60.0); // Request a higher framerate
+    double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
+    std::cout << "Camera initialized: Requested 60 FPS, got " << actual_fps << " FPS." << std::endl;
 
     // --- Setup Renderer for Camera View (Shared Resources) ---
     RendererState renderer;
@@ -565,8 +570,14 @@ int main(int, char**) {
 
         camera.cap >> camera.frame;
         if (!camera.frame.empty()) {
+            // Apply rotation if specified
+            if (camera.rotation_angle >= 0) {
+                cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
+            }
             cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
             glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+            // Note: For 90/270 degree rotations, width/height for glTexSubImage2D would need to be swapped.
+            // For 180 degrees, dimensions remain the same.
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
         }
 
