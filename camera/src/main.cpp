@@ -420,39 +420,27 @@ int main(int, char**) {
         return -1;
     }
 
-    // --- Configure camera for performance ---
-    // The order of these settings can be important.
-    // 1. Request a performant pixel format. YUYV is common for MIPI/V4L2 cameras.
-    camera.cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('Y', 'U', 'Y', 'V'));
-
-    // 2. Set the desired resolution.
+    // --- Configure Camera ---
+    // Set the desired resolution.
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
     camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
 
-    // 3. Request a higher framerate. Let's start with a reasonable 30 FPS.
+    // Request a decent framerate. The driver will choose the closest supported rate.
     camera.cap.set(cv::CAP_PROP_FPS, 30.0);
 
-    // 4. Tell OpenCV not to auto-convert frames to BGR. We will get raw YUYV
-    //    frames, which allows for a more efficient single color conversion step.
-    camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 0);
+    // Let OpenCV handle the pixel format negotiation and conversion.
+    // By default, it will convert frames to BGR, which is what we'll handle below.
+    // This is often the most optimized path.
+    camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 1);
 
     // --- Verify actual camera settings ---
     double actual_w = camera.cap.get(cv::CAP_PROP_FRAME_WIDTH);
     double actual_h = camera.cap.get(cv::CAP_PROP_FRAME_HEIGHT);
     double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
-    int fourcc_int = static_cast<int>(camera.cap.get(cv::CAP_PROP_FOURCC));
-    char fourcc_str[] = {
-        (char)(fourcc_int & 0XFF),
-        (char)((fourcc_int >> 8) & 0XFF),
-        (char)((fourcc_int >> 16) & 0XFF),
-        (char)((fourcc_int >> 24) & 0XFF),
-        '\0'
-    };
 
     std::cout << "--- Camera Configuration ---" << std::endl;
     std::cout << "  Resolution: " << actual_w << "x" << actual_h << std::endl;
     std::cout << "  FPS: " << actual_fps << std::endl;
-    std::cout << "  Pixel Format (FourCC): " << fourcc_str << std::endl;
     std::cout << "--------------------------" << std::endl;
 
     // --- Setup DRM/GBM/EGL for all available cards ---
@@ -703,9 +691,9 @@ int main(int, char**) {
             if (camera.rotation_angle >= 0) {
                 cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
             }
-            // We configured the camera to give us raw YUYV frames.
-            // Convert YUYV directly to RGB for OpenGL in one step.
-            cv::cvtColor(camera.frame, camera.frame, cv::COLOR_YUV2RGB_YUYV);
+            // By default, OpenCV's V4L2 backend provides frames in BGR format.
+            // We must convert it to RGB for OpenGL.
+            cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
 
             // Upload the frame to each backend's texture
             for (const auto& backend : backends) {
