@@ -395,6 +395,36 @@ int main(int, char**) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
+    // --- Initialize Camera (Shared Resource) ---
+    // We do this *before* initializing DRM/display devices to avoid potential
+    // resource conflicts where initializing a non-display DRM device (like a
+    // camera controller) might interfere with the V4L2 subsystem.
+    CameraState camera;
+    camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
+    // Use the V4L2 backend, as this is what worked in the original code for the USB webcam.
+    camera.cap.open(0, cv::CAP_V4L2);
+    if (!camera.cap.isOpened()) {
+        std::cerr << "Error: Could not open webcam." << std::endl;
+        return -1;
+    }
+    camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
+    camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
+
+    // Disable auto-exposure to achieve consistent high framerates.
+    // Note: The image may appear dark if the scene is not well-lit.
+    if (!camera.auto_exposure) {
+        // For V4L2, 1 means manual mode, 3 means auto mode.
+        camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
+        // Set a short exposure time. The unit and range are driver-dependent.
+        // A value of 1000 often corresponds to 1000 * 100µs = 100ms, which is too long.
+        // A value of 100 might be 10ms. Let's try a small value like 200.
+        camera.cap.set(cv::CAP_PROP_EXPOSURE, 200);
+    }
+
+    camera.cap.set(cv::CAP_PROP_FPS, 60.0); // Request a higher framerate
+    double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
+    std::cout << "Camera initialized: Requested 60 FPS, got " << actual_fps << " FPS." << std::endl;
+
     // --- Setup DRM/GBM/EGL for all available cards ---
     std::vector<std::unique_ptr<DrmBackend>> backends;
     std::vector<std::unique_ptr<Display>> displays;
@@ -582,33 +612,6 @@ int main(int, char**) {
         // Cleanup logic will run at the end of main
         return -1;
     }
-
-    // --- Initialize Camera (Shared Resource) ---
-    CameraState camera;
-    camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
-    // Use the V4L2 backend, as this is what worked in the original code for the USB webcam.
-    camera.cap.open(0, cv::CAP_V4L2);
-    if (!camera.cap.isOpened()) {
-        std::cerr << "Error: Could not open webcam." << std::endl;
-        return -1;
-    }
-    camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
-    camera.cap.set(cv::CAP_PROP_FRAME_HEIGHT, camera.height);
-
-    // Disable auto-exposure to achieve consistent high framerates.
-    // Note: The image may appear dark if the scene is not well-lit.
-    if (!camera.auto_exposure) {
-        // For V4L2, 1 means manual mode, 3 means auto mode.
-        camera.cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
-        // Set a short exposure time. The unit and range are driver-dependent.
-        // A value of 1000 often corresponds to 1000 * 100µs = 100ms, which is too long.
-        // A value of 100 might be 10ms. Let's try a small value like 200.
-        camera.cap.set(cv::CAP_PROP_EXPOSURE, 200);
-    }
-
-    camera.cap.set(cv::CAP_PROP_FPS, 60.0); // Request a higher framerate
-    double actual_fps = camera.cap.get(cv::CAP_PROP_FPS);
-    std::cout << "Camera initialized: Requested 60 FPS, got " << actual_fps << " FPS." << std::endl;
 
     // --- Setup a renderer for each backend ---
     for (const auto& backend : backends) {
