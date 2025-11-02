@@ -19,8 +19,7 @@ IMGUI_FILES = \
     imgui_tables.cpp imgui_widgets.cpp \
     imstb_rectpack.h imstb_textedit.h imstb_truetype.h
 IMGUI_BACKEND_FILES = \
-    imgui_impl_opengl3.cpp imgui_impl_opengl3.h imgui_impl_opengl3_loader.h \
-    imgui_impl_sdl2.cpp imgui_impl_sdl2.h
+    imgui_impl_opengl3.cpp imgui_impl_opengl3.h imgui_impl_opengl3_loader.h
 # Sentinel file to check if ImGui has been downloaded
 IMGUI_SENTINEL = $(IMGUI_DIR)/.download_complete
 
@@ -34,7 +33,6 @@ IMGUI_CPP_FILES = \
     imgui_draw.cpp \
     imgui_tables.cpp \
     imgui_widgets.cpp \
-    imgui_impl_sdl2.cpp \
     imgui_impl_opengl3.cpp
 IMGUI_SOURCES = $(addprefix $(IMGUI_DIR)/, $(IMGUI_CPP_FILES))
 
@@ -47,7 +45,7 @@ OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
 # --- Dependencies ---
 # Libraries to find using pkg-config. On Raspberry Pi OS, OpenCV is opencv4.
-PKG_LIBS = sdl2 opencv4 glesv2 egl gl
+PKG_LIBS = opencv4 glesv2 egl libdrm gbm udev
 
 # Use pkg-config to get compiler and linker flags for our libraries
 CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
@@ -89,7 +87,9 @@ install-deps:
 	    build-essential \
 	    pkg-config \
 	    wget \
-	    libsdl2-dev \
+	    libdrm-dev \
+	    libgbm-dev \
+	    libudev-dev \
 	    libopencv-dev \
 	    libgles2-mesa-dev \
 	    libegl1-mesa-dev

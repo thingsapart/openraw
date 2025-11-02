@@ -1,13 +1,25 @@
-#include <SDL.h>
 #include <iostream>
 #include <vector>
+#include <string>
+#include <memory>
+#include <chrono>
+#include <csignal>
+
+// DRM/KMS, GBM, and EGL headers
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <gbm.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/select.h>
 
 // Use GLES 3
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLES3/gl3.h>
 
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include "IconsFontAwesome6.h"
 
@@ -73,7 +85,6 @@ GLuint CreateShaderProgram(const char* vsSource, const char* fsSource) {
     return program;
 }
 
-
 // --- Application State ---
 struct CameraState {
     cv::VideoCapture cap;
@@ -88,15 +99,43 @@ struct RendererState {
     GLuint vao;
 };
 
-// --- Per-Display Resources ---
+// --- DRM/GBM/EGL Backend Structures ---
+
+struct DrmBackend; // Forward declaration
+
+// All resources related to a single connected display.
 struct Display {
-    int display_index;
-    SDL_Window* window = nullptr;
-    SDL_GLContext gl_context = nullptr;
+    DrmBackend* backend = nullptr;
+    uint32_t connector_id = 0;
+    uint32_t crtc_id = 0;
+    drmModeModeInfo mode = {};
+    drmModeCrtc* saved_crtc = nullptr;
+
+    struct gbm_surface* gbm_surf = nullptr;
+    EGLContext egl_ctx = EGL_NO_CONTEXT;
+    EGLSurface egl_surf = EGL_NO_SURFACE;
+
     ImGuiContext* imgui_context = nullptr;
+
+    struct gbm_bo* current_bo = nullptr;
+    uint32_t current_fb_id = 0;
+
+    bool page_flip_pending = false;
+
+    // Keep width/height for convenience, populated from 'mode'
     int width = 0;
     int height = 0;
 };
+
+// Resources shared across all displays on a single GPU.
+struct DrmBackend {
+    int fd = -1;
+    struct gbm_device* gbm_dev = nullptr;
+    EGLDisplay egl_dpy = EGL_NO_DISPLAY;
+    EGLConfig egl_conf = nullptr;
+    EGLContext shared_egl_ctx = EGL_NO_CONTEXT;
+};
+
 
 // --- Declarative UI Structures ---
 // Forward declaration for nested menus
@@ -136,7 +175,6 @@ struct AppState {
     float fx = 1280.0f, fy = 720.0f, cx = 640.0f, cy = 360.0f;
 };
 
-
 // --- UI Logic ---
 
 void InitializeSettings(AppState& state) {
@@ -144,8 +182,8 @@ void InitializeSettings(AppState& state) {
         {
             "Calibration", // Tab Name
             { // Root Page
-                { 
-                    "Calibrate", 
+                {
+                    "Calibrate",
                     MenuItemType::Submenu,
                     { // Sub-page for "Calibrate"
                         { "This is where calibration sliders will go.", MenuItemType::StaticText, {} },
@@ -194,13 +232,12 @@ void RenderMenuPage(AppState& state, MenuPage& page) {
 }
 
 // Main UI rendering function
-void RenderUI(Display& /*display*/, AppState& state) {
+void RenderUI(AppState& state) {
     // This function now operates on the currently active ImGui context
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
-    ImGuiIO& io = ImGui::GetIO();
+    ImGuiIO& io = ImGui::getIO();
     ImVec2 display_size = io.DisplaySize;
 
     // --- Top and Bottom Bars (unchanged) ---
@@ -222,13 +259,16 @@ void RenderUI(Display& /*display*/, AppState& state) {
     ImVec2 settings_text_size = ImGui::CalcTextSize(settings_text);
     ImGui::SetCursorPosX((display_size.x - settings_text_size.x) * 0.5f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bottom_bar_height - settings_text_size.y) * 0.5f - ImGui::GetStyle().FramePadding.y);
+
+    // Button is disabled as we have no input handling yet.
+    ImGui::BeginDisabled();
     if (ImGui::Button(settings_text, ImVec2(settings_text_size.x + 40, settings_text_size.y + 10))) {
         state.show_settings_window = !state.show_settings_window;
-        // When opening the window, reset navigation to the root of the active tab
         if (state.show_settings_window) {
             state.navigation_stack.clear();
         }
     }
+    ImGui::EndDisabled();
     ImGui::End();
 
 
@@ -241,17 +281,13 @@ void RenderUI(Display& /*display*/, AppState& state) {
             for (size_t i = 0; i < state.settings_tabs.size(); ++i) {
                 auto& tab = state.settings_tabs[i];
                 if (ImGui::BeginTabItem(tab.name.c_str())) {
-                    // If tab changes, reset navigation
                     if (state.active_tab_idx != i) {
                         state.active_tab_idx = i;
                         state.navigation_stack.clear();
                     }
-                    
-                    // Ensure navigation stack is initialized
                     if (state.navigation_stack.empty()) {
                         state.navigation_stack.push_back(&tab.root_page);
                     }
-
                     RenderMenuPage(state, *state.navigation_stack.back());
                     ImGui::EndTabItem();
                 }
@@ -262,106 +298,211 @@ void RenderUI(Display& /*display*/, AppState& state) {
     }
 }
 
+// --- DRM/GBM/EGL Helper Functions ---
+
+// Callback for page flip events.
+void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void *data) {
+    Display* display = static_cast<Display*>(data);
+    display->page_flip_pending = false;
+}
+
+// Helper to get a DRM framebuffer ID for a GBM buffer object.
+// Caches the ID in the BO's user data.
+uint32_t get_fb_for_bo(int drm_fd, struct gbm_bo* bo) {
+    uint32_t* p_fb_id = static_cast<uint32_t*>(gbm_bo_get_user_data(bo));
+    if (p_fb_id && *p_fb_id != 0) {
+        return *p_fb_id;
+    }
+
+    uint32_t fb_id;
+    uint32_t width = gbm_bo_get_width(bo);
+    uint32_t height = gbm_bo_get_height(bo);
+    uint32_t format = gbm_bo_get_format(bo);
+    uint32_t handles[4] = {0};
+    uint32_t strides[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+
+    int num_planes = gbm_bo_get_plane_count(bo);
+    for (int i = 0; i < num_planes; ++i) {
+        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
+        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+        offsets[i] = gbm_bo_get_offset(bo, i);
+        modifiers[i] = gbm_bo_get_modifier(bo);
+    }
+
+    if (drmModeAddFB2WithModifiers(drm_fd, width, height, format, handles, strides, offsets, modifiers, &fb_id, DRM_MODE_FB_MODIFIERS) != 0) {
+        std::cerr << "Failed to create DRM framebuffer" << std::endl;
+        return 0;
+    }
+
+    // Store the fb_id in the user data of the bo for reuse.
+    uint32_t* new_fb_id = new uint32_t(fb_id);
+    gbm_bo_set_user_data(bo, new_fb_id, [](struct gbm_bo*, void* data){
+        delete static_cast<uint32_t*>(data);
+    });
+
+    return fb_id;
+}
+
+
+// Global flag to signal main loop to exit
+volatile bool done = false;
+
+void signal_handler(int) {
+    done = true;
+}
 
 int main(int, char**) {
-    // --- Setup SDL ---
-    // Enable verbose logging to help debug display initialization issues.
-    SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
 
-    // Hint SDL to use the KMS/DRM video driver. This is crucial for detecting
-    // multiple displays (like DSI and HDMI) on embedded systems without a
-    // full X11 desktop environment.
-    SDL_SetHint(SDL_HINT_VIDEODRIVER, "kmsdrm");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-        printf("Error: %s\n", SDL_GetError());
-        return -1;
-    }
+    // --- Setup DRM/GBM/EGL for all available cards ---
+    std::vector<std::unique_ptr<DrmBackend>> backends;
+    std::vector<std::unique_ptr<Display>> displays;
 
-    // --- Setup Window with OpenGL ES 3 context ---
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    // --- Find and initialize all available DRM devices ---
+    for (int i = 0; i < 4; ++i) { // Simple scan for card0 to card3
+        std::string card_path = "/dev/dri/card" + std::to_string(i);
+        int fd = open(card_path.c_str(), O_RDWR);
+        if (fd < 0) continue;
 
-    // --- Create a window and context for each display ---
-    std::vector<Display> displays;
-    IMGUI_CHECKVERSION();
+        auto backend = std::make_unique<DrmBackend>();
+        backend->fd = fd;
+        
+        backend->gbm_dev = gbm_create_device(backend->fd);
+        if (!backend->gbm_dev) {
+            std::cerr << "Error: Could not create GBM device for " << card_path << std::endl;
+            close(backend->fd);
+            continue;
+        }
 
-    int num_displays = SDL_GetNumVideoDisplays();
-    if (num_displays < 1) {
-        std::cerr << "Error: No displays found by SDL." << std::endl;
-        return -1;
-    }
+        backend->egl_dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_MESA, backend->gbm_dev, NULL);
+        if (backend->egl_dpy == EGL_NO_DISPLAY) {
+            std::cerr << "Error: Could not get EGL display for " << card_path << std::endl;
+            gbm_device_destroy(backend->gbm_dev);
+            close(backend->fd);
+            continue;
+        }
 
-    std::cout << "Found " << num_displays << " displays. Initializing..." << std::endl;
+        EGLint major, minor;
+        if (!eglInitialize(backend->egl_dpy, &major, &minor)) {
+            std::cerr << "Error: Could not initialize EGL for " << card_path << std::endl;
+            gbm_device_destroy(backend->gbm_dev);
+            close(backend->fd);
+            continue;
+        }
+        eglBindAPI(EGL_OPENGL_ES_API);
 
-    for (int i = 0; i < num_displays; ++i) {
-        Display d;
-        d.display_index = i;
+        const EGLint config_attribs[] = {
+            EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0,
+            EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE
+        };
+        EGLint num_config;
+        if (!eglChooseConfig(backend->egl_dpy, config_attribs, &backend->egl_conf, 1, &num_config) || num_config != 1) {
+            std::cerr << "Error: Could not choose EGL config for " << card_path << std::endl;
+            eglTerminate(backend->egl_dpy);
+            gbm_device_destroy(backend->gbm_dev);
+            close(backend->fd);
+            continue;
+        }
 
-        SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP);
-        d.window = SDL_CreateWindow(
-            "PiCam Frontend",
-            SDL_WINDOWPOS_UNDEFINED_DISPLAY(i),
-            SDL_WINDOWPOS_UNDEFINED_DISPLAY(i),
-            0, 0, // Ignored for FULLSCREEN_DESKTOP
-            window_flags
-        );
-
-        if (d.window == nullptr) {
-            std::cerr << "Error: SDL_CreateWindow() for display " << i << ": " << SDL_GetError() << std::endl;
+        const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+        backend->shared_egl_ctx = eglCreateContext(backend->egl_dpy, backend->egl_conf, EGL_NO_CONTEXT, context_attribs);
+        if (backend->shared_egl_ctx == EGL_NO_CONTEXT) {
+            std::cerr << "Error: Could not create shared EGL context for " << card_path << std::endl;
+            eglTerminate(backend->egl_dpy);
+            gbm_device_destroy(backend->gbm_dev);
+            close(backend->fd);
             continue;
         }
         
-        SDL_GetWindowSize(d.window, &d.width, &d.height);
-        std::cout << "  - Display " << i << ": Window created with size " << d.width << "x" << d.height << std::endl;
+        std::cout << "Initialized backend for " << card_path << std::endl;
+        backends.push_back(std::move(backend));
+    }
+    
+    if (backends.empty()) {
+        std::cerr << "Error: Could not initialize any DRM devices." << std::endl;
+        return -1;
+    }
 
-        d.gl_context = SDL_GL_CreateContext(d.window);
-        if (d.gl_context == nullptr) {
-            std::cerr << "Error: SDL_GL_CreateContext() for display " << i << ": " << SDL_GetError() << std::endl;
-            SDL_DestroyWindow(d.window);
+    // --- Find and set up displays on all initialized backends ---
+    for (const auto& backend_ptr : backends) {
+        DrmBackend* backend = backend_ptr.get();
+        drmModeRes* resources = drmModeGetResources(backend->fd);
+        if (!resources) {
+            std::cerr << "Error: Could not get DRM resources for backend." << std::endl;
             continue;
         }
 
-        SDL_GL_MakeCurrent(d.window, d.gl_context);
-        SDL_GL_SetSwapInterval(1); // Enable vsync
+        for (int i = 0; i < resources->count_connectors; ++i) {
+            drmModeConnector* connector = drmModeGetConnector(backend->fd, resources->connectors[i]);
+            if (!connector || connector->connection != DRM_MODE_CONNECTED || connector->count_modes == 0) {
+                drmModeFreeConnector(connector);
+                continue;
+            }
 
-        // Setup Dear ImGui context for this display
-        d.imgui_context = ImGui::CreateContext();
-        ImGui::SetCurrentContext(d.imgui_context);
+            auto display = std::make_unique<Display>();
+            display->backend = backend;
+            display->connector_id = connector->connector_id;
+            display->mode = connector->modes[0];
+            display->width = display->mode.hdisplay;
+            display->height = display->mode.vdisplay;
 
-        ImGuiIO& io = ImGui::GetIO(); (void)io;
-        io.IniFilename = nullptr; // Disable imgui.ini saving
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        ImGui::StyleColorsDark();
+            drmModeEncoder* encoder = drmModeGetEncoder(backend->fd, connector->encoder_id);
+            if (!encoder) {
+                std::cerr << "Could not get encoder for connector " << i << std::endl;
+                drmModeFreeConnector(connector);
+                continue;
+            }
+            display->crtc_id = encoder->crtc_id;
+            display->saved_crtc = drmModeGetCrtc(backend->fd, display->crtc_id);
+            drmModeFreeEncoder(encoder);
 
-        ImGui_ImplSDL2_InitForOpenGL(d.window, d.gl_context);
-        ImGui_ImplOpenGL3_Init("#version 300 es");
+            // Per-display EGL/GBM/ImGui setup
+            display->gbm_surf = gbm_surface_create(backend->gbm_dev, display->width, display->height,
+                GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+            display->egl_surf = eglCreateWindowSurface(backend->egl_dpy, backend->egl_conf, (EGLNativeWindowType)display->gbm_surf, NULL);
+            const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+            display->egl_ctx = eglCreateContext(backend->egl_dpy, backend->egl_conf, backend->shared_egl_ctx, context_attribs);
 
-        // Load fonts for this context
-        io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
-        ImFontConfig config;
-        config.MergeMode = true;
-        config.PixelSnapH = true;
-        config.GlyphMinAdvanceX = 20.0f;
-        static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
-        io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
+            eglMakeCurrent(backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
 
-        displays.push_back(d);
+            IMGUI_CHECKVERSION();
+            display->imgui_context = ImGui::CreateContext();
+            ImGui::SetCurrentContext(display->imgui_context);
+            ImGuiIO& io = ImGui::getIO();
+            io.DisplaySize = ImVec2((float)display->width, (float)display->height);
+            io.IniFilename = nullptr;
+
+            ImGui::StyleColorsDark();
+            ImGui_ImplOpenGL3_Init("#version 300 es");
+            
+            io.Fonts->AddFontFromFileTTF("assets/Roboto-Regular.ttf", 20.0f);
+            ImFontConfig config;
+            config.MergeMode = true;
+            config.PixelSnapH = true;
+            config.GlyphMinAdvanceX = 20.0f;
+            static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+            io.Fonts->AddFontFromFileTTF("assets/FontAwesome6-Solid-900.otf", 16.0f, &config, icon_ranges);
+            
+            std::cout << "  - Found display on connector " << display->connector_id << " (" << display->width << "x" << display->height << ")" << std::endl;
+            displays.push_back(std::move(display));
+            drmModeFreeConnector(connector);
+        }
+        drmModeFreeResources(resources);
     }
-
+    
     if (displays.empty()) {
-        std::cerr << "Error: Failed to create a window on any display." << std::endl;
-        SDL_Quit();
+        std::cerr << "Error: No connected displays found across all backends." << std::endl;
+        // Cleanup logic will run at the end of main
         return -1;
     }
 
     // --- Initialize Camera (Shared Resource) ---
     CameraState camera;
-    camera.cap.open(0, cv::CAP_V4L2); // Use V4L2 backend
+    camera.cap.open(0, cv::CAP_V4L2);
     if (!camera.cap.isOpened()) {
         std::cerr << "Error: Could not open webcam." << std::endl;
         return -1;
@@ -371,8 +512,8 @@ int main(int, char**) {
 
     // --- Setup Renderer for Camera View (Shared Resources) ---
     RendererState renderer;
-    // Set GL context for shared resource creation
-    SDL_GL_MakeCurrent(displays[0].window, displays[0].gl_context);
+    Display* first_display = displays[0].get();
+    eglMakeCurrent(first_display->backend->egl_dpy, first_display->egl_surf, first_display->egl_surf, first_display->egl_ctx);
     renderer.shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
     glGenTextures(1, &renderer.textureID);
     glBindTexture(GL_TEXTURE_2D, renderer.textureID);
@@ -381,12 +522,9 @@ int main(int, char**) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera.width, camera.height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-
     float vertices[] = {
-         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,
-         1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
-        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
+         1.0f,  1.0f, 0.0f,   1.0f, 0.0f,  1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f,   0.0f, 1.0f, -1.0f,  1.0f, 0.0f,   0.0f, 0.0f
     };
     unsigned int indices[] = { 0, 1, 3, 1, 2, 3 };
     GLuint VBO, EBO;
@@ -403,43 +541,28 @@ int main(int, char**) {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
+    // --- Initial display setup (modesetting) ---
+    for(const auto& display : displays) {
+        eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
+        struct gbm_bo* bo = gbm_surface_lock_front_buffer(display->gbm_surf);
+        uint32_t fb_id = get_fb_for_bo(display->backend->fd, bo);
+        drmModeSetCrtc(display->backend->fd, display->crtc_id, fb_id, 0, 0, &display->connector_id, 1, &display->mode);
+        display->current_bo = bo;
+        display->current_fb_id = fb_id;
+    }
+    
     // --- Initialize Application State ---
     AppState state;
     InitializeSettings(state);
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
+    auto last_time = std::chrono::high_resolution_clock::now();
 
     // --- Main loop ---
-    bool done = false;
     while (!done) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            // Find the display associated with the event's window ID
-            Display* event_display = nullptr;
-            if (event.type == SDL_WINDOWEVENT) {
-                for (auto& d : displays) {
-                    if (event.window.windowID == SDL_GetWindowID(d.window)) {
-                        event_display = &d;
-                        break;
-                    }
-                }
-            }
-            // For other events, or if no specific display found, default to the first one
-            if (!event_display && !displays.empty()) {
-                event_display = &displays[0];
-            }
+        auto current_time = std::chrono::high_resolution_clock::now();
+        float delta_time = std::chrono::duration<float>(current_time - last_time).count();
+        last_time = current_time;
 
-            if (event_display) {
-                ImGui::SetCurrentContext(event_display->imgui_context);
-                ImGui_ImplSDL2_ProcessEvent(&event);
-            }
-            
-            if (event.type == SDL_QUIT) done = true;
-            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE) {
-                done = true;
-            }
-        }
-
-        // --- Get ONE Camera Frame for this iteration ---
         camera.cap >> camera.frame;
         if (!camera.frame.empty()) {
             cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
@@ -447,49 +570,89 @@ int main(int, char**) {
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
         }
 
-        // --- Render to each display ---
-        for (auto& display : displays) {
-            SDL_GL_MakeCurrent(display.window, display.gl_context);
-            ImGui::SetCurrentContext(display.imgui_context);
+        for (const auto& display : displays) {
+            if (display->page_flip_pending) continue;
 
-            glViewport(0, 0, display.width, display.height);
-            glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+            eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
+            ImGui::SetCurrentContext(display->imgui_context);
+            ImGui::GetIO().DeltaTime = delta_time > 0.0f ? delta_time : 1.0f/60.0f;
+
+            glViewport(0, 0, display->width, display->height);
+            glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
             glClear(GL_COLOR_BUFFER_BIT);
 
-            // 1. Render Camera View (background)
             glUseProgram(renderer.shaderProgram);
             glBindVertexArray(renderer.vao);
             glBindTexture(GL_TEXTURE_2D, renderer.textureID);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-            
-            // 2. Render ImGui UI (foreground)
-            RenderUI(display, state);
+
+            RenderUI(state);
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        }
+            
+            eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
+            struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
+            uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
 
-        // Swap all windows after rendering is complete for all of them
-        for (auto& display : displays) {
-            SDL_GL_SwapWindow(display.window);
+            if (drmModePageFlip(display->backend->fd, display->crtc_id, next_fb_id, DRM_MODE_PAGE_FLIP_EVENT, display.get()) == 0) {
+                display->page_flip_pending = true;
+                gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
+                display->current_bo = next_bo;
+                display->current_fb_id = next_fb_id;
+            } else {
+                 std::cerr << "drmModePageFlip failed" << std::endl;
+            }
+        }
+        
+        drmEventContext ev_ctx = {};
+        ev_ctx.version = 2;
+        ev_ctx.page_flip_handler = page_flip_handler;
+        fd_set fds;
+        FD_ZERO(&fds);
+        int max_fd = -1;
+        for(const auto& backend : backends) {
+            FD_SET(backend->fd, &fds);
+            if (backend->fd > max_fd) max_fd = backend->fd;
+        }
+        
+        struct timeval timeout = { .tv_sec = 0, .tv_usec = 500000 };
+        int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
+        if (ret > 0) {
+            for(const auto& backend : backends) {
+                if (FD_ISSET(backend->fd, &fds)) {
+                    drmHandleEvent(backend->fd, &ev_ctx);
+                }
+            }
         }
     }
 
     // --- Cleanup ---
+    std::cout << "Cleaning up..." << std::endl;
     camera.cap.release();
     glDeleteVertexArrays(1, &renderer.vao);
     glDeleteTextures(1, &renderer.textureID);
     glDeleteProgram(renderer.shaderProgram);
 
-    for (auto& display : displays) {
-        ImGui::SetCurrentContext(display.imgui_context);
+    for (const auto& display : displays) {
+        ImGui::SetCurrentContext(display->imgui_context);
         ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplSDL2_Shutdown();
-        ImGui::DestroyContext(display.imgui_context);
-        SDL_GL_DeleteContext(display.gl_context);
-        SDL_DestroyWindow(display.window);
+        ImGui::DestroyContext(display->imgui_context);
+        
+        drmModeSetCrtc(display->backend->fd, display->saved_crtc->crtc_id, display->saved_crtc->buffer_id,
+            display->saved_crtc->x, display->saved_crtc->y, &display->connector_id, 1, &display->saved_crtc->mode);
+        drmModeFreeCrtc(display->saved_crtc);
+        if (display->current_bo) gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
+        eglDestroySurface(display->backend->egl_dpy, display->egl_surf);
+        gbm_surface_destroy(display->gbm_surf);
+        eglDestroyContext(display->backend->egl_dpy, display->egl_ctx);
     }
     
-    SDL_Quit();
+    for (const auto& backend : backends) {
+        if (backend->shared_egl_ctx != EGL_NO_CONTEXT) eglDestroyContext(backend->egl_dpy, backend->shared_egl_ctx);
+        if (backend->egl_dpy != EGL_NO_DISPLAY) eglTerminate(backend->egl_dpy);
+        if (backend->gbm_dev) gbm_device_destroy(backend->gbm_dev);
+        if (backend->fd >= 0) close(backend->fd);
+    }
 
     return 0;
 }

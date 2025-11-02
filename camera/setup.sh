@@ -14,7 +14,9 @@ sudo apt-get install -y \
     build-essential \
     pkg-config \
     wget \
-    libsdl2-dev \
+    libdrm-dev \
+    libgbm-dev \
+    libudev-dev \
     libopencv-dev \
     libgles2-mesa-dev \
     libegl1-mesa-dev
