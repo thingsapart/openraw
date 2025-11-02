@@ -26,6 +26,61 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 
+#include <map>
+#include <iomanip>
+
+// A simple profiler to measure performance of different code sections.
+class Profiler {
+public:
+    void begin_frame() {
+        results_.clear();
+        frame_start_time_ = std::chrono::high_resolution_clock::now();
+    }
+
+    void record(const std::string& name, std::chrono::nanoseconds duration) {
+        results_[name] += duration; // Accumulate time for scopes with the same name
+    }
+
+    void end_frame_and_print() {
+        auto frame_end_time = std::chrono::high_resolution_clock::now();
+        auto total_duration = frame_end_time - frame_start_time_;
+        double total_ms = std::chrono::duration<double, std::milli>(total_duration).count();
+
+        // Prevent spamming the console if frames are very fast
+        if (total_ms < 16.0) return;
+
+        printf("\n--- Frame Time: %6.2fms ---\n", total_ms);
+
+        for (const auto& pair : results_) {
+            double chunk_ms = std::chrono::duration<double, std::milli>(pair.second).count();
+            double percentage = (total_ms > 0) ? (chunk_ms / total_ms * 100.0) : 0.0;
+            printf("  - %-26s: %6.2fms (%5.1f%%)\n", pair.first.c_str(), chunk_ms, percentage);
+        }
+        fflush(stdout); // Ensure the report is printed immediately
+    }
+
+private:
+    std::chrono::time_point<std::chrono::high_resolution_clock> frame_start_time_;
+    std::map<std::string, std::chrono::nanoseconds> results_;
+};
+
+// RAII timer to automatically record the duration of a scope.
+class ScopedTimer {
+public:
+    ScopedTimer(const std::string& name, Profiler& profiler)
+        : name_(name), profiler_(profiler), start_time_(std::chrono::high_resolution_clock::now()) {}
+
+    ~ScopedTimer() {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        profiler_.record(name_, end_time - start_time_);
+    }
+
+private:
+    std::string name_;
+    Profiler& profiler_;
+    std::chrono::time_point<std::chrono::high_resolution_clock> start_time_;
+};
+
 // --- GLSL Shaders for the camera view ---
 const char* vertexShaderSource = R"(
     #version 300 es
@@ -686,134 +741,137 @@ int main(int, char**) {
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
     auto last_render_time = std::chrono::high_resolution_clock::now();
     auto last_capture_time = std::chrono::high_resolution_clock::now();
+    Profiler profiler;
 
     // --- Main loop ---
     while (!done) {
-        auto current_time = std::chrono::high_resolution_clock::now();
-        float render_delta = std::chrono::duration<float>(current_time - last_render_time).count();
-        last_render_time = current_time;
-        if (render_delta > 0.0f) {
-            state.render_fps = 1.0f / render_delta;
+        profiler.begin_frame();
+        float render_delta;
+
+        {
+            ScopedTimer timer("0. Frame Pacing & FPS Calc", profiler);
+            auto current_time = std::chrono::high_resolution_clock::now();
+            render_delta = std::chrono::duration<float>(current_time - last_render_time).count();
+            last_render_time = current_time;
+            if (render_delta > 0.0f) {
+                state.render_fps = 1.0f / render_delta;
+            }
         }
 
+        {
+            ScopedTimer timer("1. V4L2 Capture & Decode", profiler);
+            camera.cap >> camera.frame;
+        }
 
-        camera.cap >> camera.frame;
         if (!camera.frame.empty()) {
-            auto capture_time = std::chrono::high_resolution_clock::now();
-            float capture_delta = std::chrono::duration<float>(capture_time - last_capture_time).count();
-            last_capture_time = capture_time;
-            if (capture_delta > 0.0f) {
-                state.capture_fps = 1.0f / capture_delta;
+            {
+                ScopedTimer timer("2. CPU Image Processing", profiler);
+                auto capture_time = std::chrono::high_resolution_clock::now();
+                float capture_delta = std::chrono::duration<float>(capture_time - last_capture_time).count();
+                last_capture_time = capture_time;
+                if (capture_delta > 0.0f) {
+                    state.capture_fps = 1.0f / capture_delta;
+                }
+
+                // --- Fast Software Auto-Exposure Calculation ---
+                cv::Mat thumbnail;
+                cv::resize(camera.frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
+                cv::Mat gray_thumbnail;
+                cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_BGR2GRAY);
+                cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
+                float current_avg = avg_brightness[0];
+
+                if (current_avg > 1.0f) {
+                    float required_factor = state.target_brightness / current_avg;
+                    required_factor = std::max(0.2f, std::min(5.0f, required_factor));
+                    state.brightness_factor += (required_factor - state.brightness_factor) * 0.1f;
+                }
+
+                // --- Final conversions for display ---
+                if (camera.rotation_angle >= 0) {
+                    cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
+                }
+                cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
             }
 
-            // --- Fast Software Auto-Exposure Calculation ---
-            // To avoid slow, full-frame processing, we create a tiny thumbnail
-            // of the image and perform the brightness analysis on that.
-            cv::Mat thumbnail;
-            cv::resize(camera.frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
-            
-            cv::Mat gray_thumbnail;
-            cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_BGR2GRAY);
-            cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
-            float current_avg = avg_brightness[0];
-
-            if (current_avg > 1.0f) { // Avoid division by zero
-                float required_factor = state.target_brightness / current_avg;
-                // Clamp the factor to prevent extreme changes
-                required_factor = std::max(0.2f, std::min(5.0f, required_factor));
-
-                // Smoothly interpolate towards the required factor to avoid flickering
-                float smoothing = 0.1f;
-                state.brightness_factor += (required_factor - state.brightness_factor) * smoothing;
-            }
-
-            // Apply rotation if specified
-            if (camera.rotation_angle >= 0) {
-                cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
-            }
-            // OpenCV has decoded the MJPEG stream to BGR format for us.
-            // We must convert it to RGB for OpenGL.
-            cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
-
-            // Upload the frame to each backend's texture
-            for (const auto& backend : backends) {
-                if (backend->renderer.textureID == 0) continue; // Skip backends with no displays/renderer
-
-                // We need a context to be current to do GL operations. We can just use the
-                // first display associated with this backend.
-                Display* display_for_context = nullptr;
-                for (const auto& d : displays) {
-                    if (d->backend == backend.get()) {
-                        display_for_context = d.get();
-                        break;
+            {
+                ScopedTimer timer("3. GPU Texture Upload", profiler);
+                for (const auto& backend : backends) {
+                    if (backend->renderer.textureID == 0) continue;
+                    Display* display_for_context = nullptr;
+                    for (const auto& d : displays) { if (d->backend == backend.get()) { display_for_context = d.get(); break; } }
+                    if (display_for_context) {
+                        eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
+                        glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
                     }
                 }
-                if (display_for_context) {
-                    eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
-                    glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
+            }
+        }
+
+        {
+            ScopedTimer timer("4. Render & Display", profiler);
+            for (const auto& display : displays) {
+                if (display->page_flip_pending) continue;
+
+                eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
+                ImGui::SetCurrentContext(display->imgui_context);
+                ImGui::GetIO().DeltaTime = render_delta > 0.0f ? render_delta : 1.0f/60.0f;
+
+                glViewport(0, 0, display->width, display->height);
+                glClear(GL_COLOR_BUFFER_BIT);
+
+                {
+                    ScopedTimer timer("  4a. GL Draw Scene", profiler);
+                    RendererState& renderer = display->backend->renderer;
+                    glUseProgram(renderer.shaderProgram);
+                    glUniform1f(renderer.brightness_uniform_loc, state.brightness_factor);
+                    glBindVertexArray(renderer.vao);
+                    glBindTexture(GL_TEXTURE_2D, renderer.textureID);
+                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+                }
+
+                {
+                    ScopedTimer timer("  4b. ImGui UI Render", profiler);
+                    RenderUI(state);
+                    ImGui::Render();
+                    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                }
+                
+                {
+                    ScopedTimer timer("  4c. EGL Swap & Pageflip", profiler);
+                    eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
+                    struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
+                    uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
+
+                    if (drmModePageFlip(display->backend->fd, display->crtc_id, next_fb_id, DRM_MODE_PAGE_FLIP_EVENT, display.get()) == 0) {
+                        display->page_flip_pending = true;
+                        gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
+                        display->current_bo = next_bo;
+                    } else {
+                        gbm_surface_release_buffer(display->gbm_surf, next_bo);
+                    }
                 }
             }
         }
 
-        for (const auto& display : displays) {
-            if (display->page_flip_pending) continue;
+        {
+            ScopedTimer timer("5. Event Handling", profiler);
+            drmEventContext ev_ctx = {};
+            ev_ctx.version = 2;
+            ev_ctx.page_flip_handler = page_flip_handler;
+            fd_set fds;
+            FD_ZERO(&fds);
+            int max_fd = -1;
+            for(const auto& backend : backends) { FD_SET(backend->fd, &fds); if (backend->fd > max_fd) max_fd = backend->fd; }
 
-            eglMakeCurrent(display->backend->egl_dpy, display->egl_surf, display->egl_surf, display->egl_ctx);
-            ImGui::SetCurrentContext(display->imgui_context);
-            // Use the calculated render delta time for ImGui
-            ImGui::GetIO().DeltaTime = render_delta > 0.0f ? render_delta : 1.0f/60.0f;
-
-            glViewport(0, 0, display->width, display->height);
-            glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            // Use the renderer associated with this display's backend
-            RendererState& renderer = display->backend->renderer;
-            glUseProgram(renderer.shaderProgram);
-            glUniform1f(renderer.brightness_uniform_loc, state.brightness_factor);
-            glBindVertexArray(renderer.vao);
-            glBindTexture(GL_TEXTURE_2D, renderer.textureID);
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-
-            RenderUI(state);
-            ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-            eglSwapBuffers(display->backend->egl_dpy, display->egl_surf);
-            struct gbm_bo* next_bo = gbm_surface_lock_front_buffer(display->gbm_surf);
-            uint32_t next_fb_id = get_fb_for_bo(display->backend->fd, next_bo);
-
-            if (drmModePageFlip(display->backend->fd, display->crtc_id, next_fb_id, DRM_MODE_PAGE_FLIP_EVENT, display.get()) == 0) {
-                display->page_flip_pending = true;
-                gbm_surface_release_buffer(display->gbm_surf, display->current_bo);
-                display->current_bo = next_bo;
-                display->current_fb_id = next_fb_id;
-            } else {
-                 std::cerr << "drmModePageFlip failed" << std::endl;
+            struct timeval timeout = { .tv_sec = 0, .tv_usec = 10000 }; // Short timeout
+            int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
+            if (ret > 0) {
+                for(const auto& backend : backends) { if (FD_ISSET(backend->fd, &fds)) { drmHandleEvent(backend->fd, &ev_ctx); } }
             }
         }
-
-        drmEventContext ev_ctx = {};
-        ev_ctx.version = 2;
-        ev_ctx.page_flip_handler = page_flip_handler;
-        fd_set fds;
-        FD_ZERO(&fds);
-        int max_fd = -1;
-        for(const auto& backend : backends) {
-            FD_SET(backend->fd, &fds);
-            if (backend->fd > max_fd) max_fd = backend->fd;
-        }
-
-        struct timeval timeout = { .tv_sec = 0, .tv_usec = 500000 };
-        int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
-        if (ret > 0) {
-            for(const auto& backend : backends) {
-                if (FD_ISSET(backend->fd, &fds)) {
-                    drmHandleEvent(backend->fd, &ev_ctx);
-                }
-            }
-        }
+        profiler.end_frame_and_print();
     }
 
     // --- Cleanup ---
