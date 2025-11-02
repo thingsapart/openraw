@@ -48,6 +48,9 @@ OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 PKG_LIBS = opencv4 glesv2 egl libdrm gbm udev
 
 # Use pkg-config to get compiler and linker flags for our libraries
+# We explicitly add /usr/include/drm for the kernel UAPI headers (drm.h),
+# which are included by libdrm's headers but not always in the default search path.
+CXXFLAGS += -I/usr/include/drm
 CXXFLAGS += $(shell pkg-config --cflags $(PKG_LIBS))
 LIBS = $(shell pkg-config --libs $(PKG_LIBS))
 
