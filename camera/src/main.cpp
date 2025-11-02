@@ -706,10 +706,15 @@ int main(int, char**) {
                 state.capture_fps = 1.0f / capture_delta;
             }
 
-            // --- Software Auto-Exposure Calculation ---
-            cv::Mat gray_frame;
-            cv::cvtColor(camera.frame, gray_frame, cv::COLOR_BGR2GRAY);
-            cv::Scalar avg_brightness = cv::mean(gray_frame);
+            // --- Fast Software Auto-Exposure Calculation ---
+            // To avoid slow, full-frame processing, we create a tiny thumbnail
+            // of the image and perform the brightness analysis on that.
+            cv::Mat thumbnail;
+            cv::resize(camera.frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
+            
+            cv::Mat gray_thumbnail;
+            cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_BGR2GRAY);
+            cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
             float current_avg = avg_brightness[0];
 
             if (current_avg > 1.0f) { // Avoid division by zero
