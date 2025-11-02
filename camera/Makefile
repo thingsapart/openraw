@@ -51,7 +51,7 @@ PKG_LIBS = opencv4 glesv2 egl libdrm gbm libudev
 # We explicitly add -I/usr/include/drm for kernel headers like drm.h that are
 # needed by libdrm but whose path is not always provided by pkg-config.
 CXXFLAGS += -I/usr/include/drm $(shell pkg-config --cflags $(PKG_LIBS))
-LIBS = $(shell pkg-config --libs $(PKG_LIBS))
+LIBS = $(shell pkg-config --libs $(PKG_LIBS)) -lturbojpeg
 
 # Include our own source and vendor directories for headers
 CXXFLAGS += -I$(SRC_DIR) -I$(IMGUI_DIR) -I$(ASSET_DIR)

@@ -25,6 +25,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
+#include <turbojpeg.h>
 
 #include <map>
 #include <iomanip>
@@ -472,6 +473,12 @@ int main(int, char**) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
+    tjhandle tjInstance = tjInitDecompress();
+    if (!tjInstance) {
+        std::cerr << "Error: Could not initialize TurboJPEG: " << tjGetErrorStr() << std::endl;
+        return -1;
+    }
+
     // --- Initialize Camera (Shared Resource) ---
     // We do this *before* initializing DRM/display devices to avoid potential
     // resource conflicts where initializing a non-display DRM device (like a
@@ -513,8 +520,8 @@ int main(int, char**) {
     camera.cap.set(cv::CAP_PROP_EXPOSURE, 150);
     std::cout << "  Requesting Exposure 150 -> Got: " << camera.cap.get(cv::CAP_PROP_EXPOSURE) << std::endl;
 
-    // 5. Ensure OpenCV converts the MJPEG stream to BGR for us.
-    camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 1);
+    // 5. Disable OpenCV's automatic conversion. We'll get raw MJPEG frames.
+    camera.cap.set(cv::CAP_PROP_CONVERT_RGB, 0);
     std::cout << "--------------------------" << std::endl;
 
     // --- Setup DRM/GBM/EGL for all available cards ---
@@ -738,6 +745,8 @@ int main(int, char**) {
     // --- Initialize Application State ---
     AppState state;
     InitializeSettings(state);
+    // Create a destination buffer for our decoded RGB frames
+    cv::Mat rgb_frame(camera.height, camera.width, CV_8UC3);
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
     auto last_render_time = std::chrono::high_resolution_clock::now();
     auto last_capture_time = std::chrono::high_resolution_clock::now();
@@ -759,11 +768,19 @@ int main(int, char**) {
         }
 
         {
-            ScopedTimer timer("1. V4L2 Capture & Decode", profiler);
+            ScopedTimer timer("1a. V4L2 Capture", profiler);
+            // camera.frame now contains the raw compressed MJPEG data
             camera.cap >> camera.frame;
         }
 
         if (!camera.frame.empty()) {
+            {
+                ScopedTimer timer("1b. TurboJPEG Decode", profiler);
+                tjDecompress2(tjInstance, camera.frame.data, camera.frame.total(),
+                              rgb_frame.data, camera.width, 0 /*pitch*/, camera.height,
+                              TJPF_RGB, TJFLAG_FASTDCT);
+            }
+
             {
                 ScopedTimer timer("2. CPU Image Processing", profiler);
                 auto capture_time = std::chrono::high_resolution_clock::now();
@@ -773,11 +790,11 @@ int main(int, char**) {
                     state.capture_fps = 1.0f / capture_delta;
                 }
 
-                // --- Fast Software Auto-Exposure Calculation ---
+                // --- Fast Software Auto-Exposure Calculation (operates on decoded rgb_frame) ---
                 cv::Mat thumbnail;
-                cv::resize(camera.frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
+                cv::resize(rgb_frame, thumbnail, cv::Size(64, 48), 0, 0, cv::INTER_AREA);
                 cv::Mat gray_thumbnail;
-                cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_BGR2GRAY);
+                cv::cvtColor(thumbnail, gray_thumbnail, cv::COLOR_RGB2GRAY); // From RGB
                 cv::Scalar avg_brightness = cv::mean(gray_thumbnail);
                 float current_avg = avg_brightness[0];
 
@@ -789,9 +806,9 @@ int main(int, char**) {
 
                 // --- Final conversions for display ---
                 if (camera.rotation_angle >= 0) {
-                    cv::rotate(camera.frame, camera.frame, camera.rotation_angle);
+                    cv::rotate(rgb_frame, rgb_frame, camera.rotation_angle);
                 }
-                cv::cvtColor(camera.frame, camera.frame, cv::COLOR_BGR2RGB);
+                // BGR->RGB conversion is no longer necessary as we decoded directly to RGB
             }
 
             {
@@ -803,7 +820,7 @@ int main(int, char**) {
                     if (display_for_context) {
                         eglMakeCurrent(backend->egl_dpy, display_for_context->egl_surf, display_for_context->egl_surf, display_for_context->egl_ctx);
                         glBindTexture(GL_TEXTURE_2D, backend->renderer.textureID);
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, camera.frame.data);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, camera.width, camera.height, GL_RGB, GL_UNSIGNED_BYTE, rgb_frame.data);
                     }
                 }
             }
@@ -876,6 +893,7 @@ int main(int, char**) {
 
     // --- Cleanup ---
     std::cout << "Cleaning up..." << std::endl;
+    tjDestroy(tjInstance);
     camera.cap.release();
     // Clean up GL resources for each backend
     for (const auto& backend : backends) {
