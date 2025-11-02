@@ -405,6 +405,17 @@ int main(int, char**) {
         int fd = open(card_path.c_str(), O_RDWR);
         if (fd < 0) continue;
 
+        // Immediately check if this DRM device has any display capability.
+        // This prevents us from grabbing non-display devices (like camera
+        // receivers) which can cause conflicts with V4L2.
+        drmModeRes* res = drmModeGetResources(fd);
+        if (!res || res->count_connectors == 0) {
+            drmModeFreeResources(res);
+            close(fd);
+            continue;
+        }
+        drmModeFreeResources(res); // We only needed to check for existence.
+
         auto backend = std::make_unique<DrmBackend>();
         backend->device_path = card_path;
         backend->fd = fd;
@@ -575,22 +586,10 @@ int main(int, char**) {
     // --- Initialize Camera (Shared Resource) ---
     CameraState camera;
     camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
-
-    // Try to open camera indices 0 through 4 to find the first available one.
-    for (int i = 0; i < 5; ++i) {
-        camera.cap.open(i, cv::CAP_V4L2);
-        if (camera.cap.isOpened()) {
-            std::cout << "Successfully opened camera on index " << i << "." << std::endl;
-            break;
-        }
-    }
-
+    // Use the V4L2 backend, as this is what worked in the original code for the USB webcam.
+    camera.cap.open(0, cv::CAP_V4L2);
     if (!camera.cap.isOpened()) {
-        std::cerr << "Error: Could not open a camera after checking indices 0-4." << std::endl;
-        std::cerr << "Troubleshooting steps:" << std::endl;
-        std::cerr << "1. Check if the camera is properly connected." << std::endl;
-        std::cerr << "2. Ensure camera is enabled in raspi-config or config.txt." << std::endl;
-        std::cerr << "3. Check permissions: run 'ls -l /dev/video*' and ensure your user is in the 'video' group (run 'sudo usermod -aG video $USER')." << std::endl;
+        std::cerr << "Error: Could not open webcam." << std::endl;
         return -1;
     }
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
