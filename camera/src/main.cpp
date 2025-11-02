@@ -575,9 +575,22 @@ int main(int, char**) {
     // --- Initialize Camera (Shared Resource) ---
     CameraState camera;
     camera.rotation_angle = cv::ROTATE_180; // Correct for upside-down camera mounting
-    camera.cap.open(0, cv::CAP_V4L2);
+
+    // Try to open camera indices 0 through 4 to find the first available one.
+    for (int i = 0; i < 5; ++i) {
+        camera.cap.open(i, cv::CAP_V4L2);
+        if (camera.cap.isOpened()) {
+            std::cout << "Successfully opened camera on index " << i << "." << std::endl;
+            break;
+        }
+    }
+
     if (!camera.cap.isOpened()) {
-        std::cerr << "Error: Could not open webcam." << std::endl;
+        std::cerr << "Error: Could not open a camera after checking indices 0-4." << std::endl;
+        std::cerr << "Troubleshooting steps:" << std::endl;
+        std::cerr << "1. Check if the camera is properly connected." << std::endl;
+        std::cerr << "2. Ensure camera is enabled in raspi-config or config.txt." << std::endl;
+        std::cerr << "3. Check permissions: run 'ls -l /dev/video*' and ensure your user is in the 'video' group (run 'sudo usermod -aG video $USER')." << std::endl;
         return -1;
     }
     camera.cap.set(cv::CAP_PROP_FRAME_WIDTH, camera.width);
